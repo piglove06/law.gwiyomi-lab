@@ -30,6 +30,22 @@ git remote -v
 echo ------------------------------------------------------------
 echo.
 
+rem  If there is no commit yet, there is nothing to push and git will
+rem  never ask you to sign in. This is the usual reason the GitHub
+rem  login window never appears.
+git rev-parse --verify HEAD >nul 2>&1
+if errorlevel 1 (
+  echo.
+  echo  [STOP] The repository has no commit yet - nothing to push.
+  echo         That is why no GitHub sign-in window appeared.
+  echo.
+  echo         Run  git_setup.bat  again and check that it reaches
+  echo         "[5/5] first commit ..." without stopping.
+  echo.
+  pause
+  exit /b 1
+)
+
 rem Make sure the branch is named main.
 git branch -M main
 
