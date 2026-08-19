@@ -33,11 +33,70 @@ import re
 import sys
 import time
 import urllib.error
+import urllib.parse
 import urllib.request
 from datetime import datetime
 
 HERE = os.path.dirname(os.path.abspath(__file__))
 CASES = os.path.join(HERE, "eval_cases.json")
+
+# ★ 2026-08-20 — main.py 에 비밀번호 로그인(APP_PASSWORD)이 생긴 뒤로
+#   /api/ask 가 전부 401 을 냈습니다. 로그인해서 받은 쿠키를 붙여야 합니다.
+#   main.py 의 로그인 쿠키는 secure=True 라 urllib 의 자동 쿠키 처리(http.cookiejar)가
+#   로컬 http 접속에는 다시 안 붙여줍니다(문서화된 제약). 그래서 자동 처리에
+#   맡기지 않고, 로그인 응답의 Set-Cookie 값을 직접 읽어 매 요청에 수동으로 붙입니다.
+_AUTH_COOKIE = ""
+
+
+def _env_value(name: str) -> str:
+    """.env 에서 값 하나를 읽습니다. (표준 라이브러리만 쓰므로 직접 파싱)"""
+    path = os.path.join(HERE, ".env")
+    if not os.path.exists(path):
+        return ""
+    try:
+        with open(path, encoding="utf-8", errors="ignore") as f:
+            for line in f:
+                line = line.strip()
+                if not line or line.startswith("#") or "=" not in line:
+                    continue
+                k, _, v = line.partition("=")
+                if k.strip() == name:
+                    return v.strip()
+    except OSError:
+        pass
+    return ""
+
+
+class _NoRedirect(urllib.request.HTTPRedirectHandler):
+    def redirect_request(self, *a, **kw):
+        return None
+
+
+def login(base: str) -> str:
+    """APP_PASSWORD 로 로그인해서 인증 쿠키 값을 얻습니다. 실패하면 빈 문자열."""
+    password = _env_value("APP_PASSWORD")
+    if not password:
+        return ""
+    opener = urllib.request.build_opener(_NoRedirect)
+    req = urllib.request.Request(
+        base.rstrip("/") + "/login",
+        data=urllib.parse.urlencode({"password": password}).encode("utf-8"),
+        headers={"Content-Type": "application/x-www-form-urlencoded"},
+        method="POST",
+    )
+    try:
+        with opener.open(req, timeout=10) as resp:
+            headers = resp.headers
+    except urllib.error.HTTPError as e:
+        headers = e.headers
+    except Exception:                             # noqa: BLE001
+        return ""
+    for raw in headers.get_all("Set-Cookie") or []:
+        if raw.startswith("lawfinder_auth="):
+            return raw.split(";", 1)[0].split("=", 1)[1]
+    return ""
+
+
 OUTDIR = os.path.join(HERE, "_eval")
 
 
@@ -54,10 +113,13 @@ def ask(base: str, payload: dict, timeout: float = 600.0) -> dict:
         {"quota": {...}}      한도 초과
     마지막에 온 result/error/quota 를 돌려줍니다.
     """
+    headers = {"Content-Type": "application/json"}
+    if _AUTH_COOKIE:
+        headers["Cookie"] = f"lawfinder_auth={_AUTH_COOKIE}"
     req = urllib.request.Request(
         base.rstrip("/") + "/api/ask",
         data=json.dumps(payload, ensure_ascii=False).encode("utf-8"),
-        headers={"Content-Type": "application/json"},
+        headers=headers,
         method="POST",
     )
     out = {"_progress": []}
@@ -338,6 +400,13 @@ def main():
     ap.add_argument("--only", default="", help="이름에 이 말이 들어간 시나리오만")
     ap.add_argument("--cases", default=CASES)
     args = ap.parse_args()
+
+    global _AUTH_COOKIE
+    _AUTH_COOKIE = login(args.base)
+    if _AUTH_COOKIE:
+        print("로그인 완료 (APP_PASSWORD)")
+    elif _env_value("APP_PASSWORD"):
+        print("[경고] 로그인 실패 — 이후 요청이 401 로 실패할 수 있습니다.")
 
     if not os.path.exists(args.cases):
         print(f"시나리오 파일이 없습니다: {args.cases}")

@@ -40,6 +40,7 @@ import subprocess
 import sys
 import time
 import urllib.error
+import urllib.parse
 import urllib.request
 from datetime import datetime
 
@@ -47,6 +48,63 @@ HERE = os.path.dirname(os.path.abspath(__file__))
 OUTDIR = os.path.join(HERE, "_eval")
 RUNFILE = os.path.join(OUTDIR, "RUN")
 STATEFILE = os.path.join(OUTDIR, "_watch_state.json")
+
+# ★ 2026-08-20 — main.py 에 비밀번호 로그인(APP_PASSWORD)이 생긴 뒤로
+#   /api/version 이 전부 401 을 내서 서버가 계속 "응답 없음"으로 보였습니다.
+#   로그인해서 받은 쿠키를 붙여야 합니다. main.py 의 로그인 쿠키는 secure=True 라
+#   urllib 의 자동 쿠키 처리(http.cookiejar)가 로컬 http 접속에는 다시 안 붙여줍니다
+#   (문서화된 제약). 그래서 자동 처리에 맡기지 않고, 로그인 응답의 Set-Cookie 값을
+#   직접 읽어 매 요청에 수동으로 붙입니다. (eval_run.py 와 동일한 방식)
+_AUTH_COOKIE = ""
+
+
+def _env_value(name: str) -> str:
+    """.env 에서 값 하나를 읽습니다. (표준 라이브러리만 쓰므로 직접 파싱)"""
+    path = os.path.join(HERE, ".env")
+    if not os.path.exists(path):
+        return ""
+    try:
+        with open(path, encoding="utf-8", errors="ignore") as f:
+            for line in f:
+                line = line.strip()
+                if not line or line.startswith("#") or "=" not in line:
+                    continue
+                k, _, v = line.partition("=")
+                if k.strip() == name:
+                    return v.strip()
+    except OSError:
+        pass
+    return ""
+
+
+class _NoRedirect(urllib.request.HTTPRedirectHandler):
+    def redirect_request(self, *a, **kw):
+        return None
+
+
+def login(base: str) -> str:
+    """APP_PASSWORD 로 로그인해서 인증 쿠키 값을 얻습니다. 실패하면 빈 문자열."""
+    password = _env_value("APP_PASSWORD")
+    if not password:
+        return ""
+    opener = urllib.request.build_opener(_NoRedirect)
+    req = urllib.request.Request(
+        base.rstrip("/") + "/login",
+        data=urllib.parse.urlencode({"password": password}).encode("utf-8"),
+        headers={"Content-Type": "application/x-www-form-urlencoded"},
+        method="POST",
+    )
+    try:
+        with opener.open(req, timeout=10) as resp:
+            headers = resp.headers
+    except urllib.error.HTTPError as e:
+        headers = e.headers
+    except Exception:                             # noqa: BLE001
+        return ""
+    for raw in headers.get_all("Set-Cookie") or []:
+        if raw.startswith("lawfinder_auth="):
+            return raw.split(";", 1)[0].split("=", 1)[1]
+    return ""
 
 # 감시할 파일. 이것들이 바뀌면 테스트를 다시 돌립니다.
 WATCH = [
@@ -73,10 +131,20 @@ def snapshot() -> dict:
 
 def server_ready(base: str, timeout: float = 2.0) -> bool:
     """서버가 응답하는지 봅니다. 오토리로드 중이면 잠깐 죽어 있습니다."""
+    global _AUTH_COOKIE
+    headers = {}
+    if _AUTH_COOKIE:
+        headers["Cookie"] = f"lawfinder_auth={_AUTH_COOKIE}"
     try:
-        with urllib.request.urlopen(base.rstrip("/") + "/api/version",
-                                    timeout=timeout) as r:
+        req = urllib.request.Request(base.rstrip("/") + "/api/version",
+                                     headers=headers)
+        with urllib.request.urlopen(req, timeout=timeout) as r:
             return r.status == 200
+    except urllib.error.HTTPError as e:
+        if e.code == 401:
+            # 로그인이 안 됐거나(오토리로드로 서버가 막 켜짐) 쿠키가 만료됐을 수 있습니다.
+            _AUTH_COOKIE = login(base)
+        return False
     except Exception:                            # noqa: BLE001
         return False
 
@@ -243,6 +311,7 @@ def main() -> int:
                     help="파일이 바뀐 뒤 이만큼 조용해지면 실행합니다(초)")
     args = ap.parse_args()
 
+    global _AUTH_COOKIE
     os.makedirs(OUTDIR, exist_ok=True)
     log("감시를 시작합니다. Ctrl+C 로 멈춥니다.")
     log(f"  대상 : {', '.join(WATCH)}")
@@ -251,6 +320,10 @@ def main() -> int:
     if not args.no_commit:
         log("  변경분은 자동으로 커밋"
             + ("됩니다." if args.no_push else " + GitHub push 됩니다."))
+    if _env_value("APP_PASSWORD"):
+        _AUTH_COOKIE = login(args.base)
+        log("로그인 완료 (APP_PASSWORD)" if _AUTH_COOKIE
+            else "로그인 실패 — 서버가 뜨면 자동으로 재시도합니다.")
 
     prev = snapshot()
     pending_since = 0.0
