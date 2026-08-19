@@ -1,0 +1,1332 @@
+<!DOCTYPE html>
+<html lang="ko" translate="no">
+<head>
+<meta charset="utf-8">
+<!-- 브라우저 자동 번역 차단.
+     크롬이 한국어 페이지를 다시 한국어로 "번역" 하면서 문구와 법령명을 뭉갭니다.
+     실제 사례: 석유류→스프레드류, 시행규칙→법률 조정, 확정할 수 없는→담당자할 수 없는 -->
+  <meta name="google" content="notranslate">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+<title>법령 조회 도우미</title>
+<style>
+  :root{
+    --ink:#1a1c20;
+    --paper:#f7f7f4;
+    --card:#fffffc;
+    --rule:#d6d3c9;
+    --seal:#a8332c;
+    --note:#6f6d64;
+    --accent:#2c4a52;
+  }
+  *{box-sizing:border-box}
+  body{
+    cursor:url('data:image/svg+xml;utf8,<svg xmlns="http://www.w3.org/2000/svg" width="30" height="30" viewBox="0 0 30 30"><ellipse cx="9" cy="8" rx="3.4" ry="3.8" fill="%23d9b38a"/><ellipse cx="20" cy="9" rx="3.4" ry="3.8" fill="%23d9b38a"/><ellipse cx="9" cy="8.4" rx="1.8" ry="2.1" fill="%23e8b7b0"/><ellipse cx="20" cy="9.4" rx="1.8" ry="2.1" fill="%23e8b7b0"/><ellipse cx="14.5" cy="15" rx="11" ry="9.6" fill="%23e8c9a4"/><ellipse cx="14.5" cy="18.6" rx="7.2" ry="5.6" fill="%23f7ecdb"/><ellipse cx="10.3" cy="13.4" rx="1.55" ry="1.8" fill="%23262019"/><ellipse cx="18.7" cy="13.4" rx="1.55" ry="1.8" fill="%23262019"/><circle cx="10.85" cy="12.75" r=".55" fill="%23fff"/><circle cx="19.25" cy="12.75" r=".55" fill="%23fff"/><ellipse cx="14.5" cy="16.6" rx="1.15" ry=".85" fill="%23c98b86"/><path d="M14.5 17.4v1.1M14.5 18.5q-1.5 1.2-2.7 0M14.5 18.5q1.5 1.2 2.7 0" stroke="%238a6a52" stroke-width=".85" fill="none" stroke-linecap="round"/><ellipse cx="6.6" cy="17.4" rx="1.9" ry="1.4" fill="%23f0b9b3" opacity=".55"/><ellipse cx="22.4" cy="17.4" rx="1.9" ry="1.4" fill="%23f0b9b3" opacity=".55"/></svg>') 15 15, auto;
+    margin:0; background:var(--paper); color:var(--ink);
+    font-family:-apple-system,"Segoe UI","Malgun Gothic","맑은 고딕",sans-serif;
+    font-size:15px; line-height:1.65;
+  }
+  header{
+    border-bottom:2px solid var(--ink); padding:18px 24px;
+    display:flex; align-items:baseline; gap:14px; flex-wrap:wrap;
+  }
+  header h1{font-size:17px; margin:0; letter-spacing:-.02em; font-weight:700}
+  header .sub{font-size:12.5px; color:var(--note)}
+
+  .wrap{display:grid; grid-template-columns:1fr 1fr; gap:0; min-height:calc(100vh - 62px)}
+  @media (max-width:900px){ .wrap{grid-template-columns:1fr} }
+
+  .left{padding:22px 24px; border-right:1px solid var(--rule)}
+  .right{padding:22px 24px; background:#fbfbf8}
+
+  /* 입력 */
+  textarea{
+    width:100%; min-height:88px; padding:12px 13px; resize:vertical;
+    border:1px solid var(--rule); border-radius:3px; background:var(--card);
+    font:inherit; color:inherit;
+  }
+  textarea:focus{outline:2px solid var(--accent); outline-offset:1px; border-color:transparent}
+  .row{display:flex; gap:9px; margin-top:10px; align-items:center; flex-wrap:wrap}
+  select{
+    padding:8px 10px; border:1px solid var(--rule); border-radius:3px;
+    background:var(--card); font:inherit;
+  }
+  button,.eg,.cite,.ref,.mini,.hist li{cursor:url('data:image/svg+xml;utf8,<svg xmlns="http://www.w3.org/2000/svg" width="30" height="30" viewBox="0 0 30 30"><ellipse cx="9" cy="8" rx="3.4" ry="3.8" fill="%23d9b38a"/><ellipse cx="20" cy="9" rx="3.4" ry="3.8" fill="%23d9b38a"/><ellipse cx="9" cy="8.4" rx="1.8" ry="2.1" fill="%23e8b7b0"/><ellipse cx="20" cy="9.4" rx="1.8" ry="2.1" fill="%23e8b7b0"/><ellipse cx="14.5" cy="15" rx="11" ry="9.6" fill="%23e8c9a4"/><ellipse cx="14.5" cy="18.6" rx="7.2" ry="5.6" fill="%23f7ecdb"/><ellipse cx="10.3" cy="13.4" rx="1.55" ry="1.8" fill="%23262019"/><ellipse cx="18.7" cy="13.4" rx="1.55" ry="1.8" fill="%23262019"/><circle cx="10.85" cy="12.75" r=".55" fill="%23fff"/><circle cx="19.25" cy="12.75" r=".55" fill="%23fff"/><ellipse cx="14.5" cy="16.6" rx="1.15" ry=".85" fill="%23c98b86"/><path d="M14.5 17.4v1.1M14.5 18.5q-1.5 1.2-2.7 0M14.5 18.5q1.5 1.2 2.7 0" stroke="%238a6a52" stroke-width=".85" fill="none" stroke-linecap="round"/><ellipse cx="6.6" cy="17.4" rx="1.9" ry="1.4" fill="%23f0b9b3" opacity=".55"/><ellipse cx="22.4" cy="17.4" rx="1.9" ry="1.4" fill="%23f0b9b3" opacity=".55"/></svg>') 15 15, pointer}
+  button{
+    padding:9px 18px; border:none; border-radius:3px; background:var(--ink);
+    color:#fff; font:inherit; font-weight:600; cursor:pointer;
+  }
+  button:hover{background:#000}
+  button:disabled{background:#9b9990; cursor:default}
+  button:focus-visible, select:focus-visible{outline:2px solid var(--accent); outline-offset:2px}
+
+  .warn{
+    margin-top:12px; padding:9px 12px; border-left:3px solid var(--seal);
+    background:#fdf5f4; font-size:12.5px; color:#6d2e2a;
+  }
+
+  h2{
+    font-size:11.5px; letter-spacing:.13em; text-transform:uppercase;
+    color:var(--note); margin:26px 0 10px; font-weight:700;
+  }
+  h2:first-child{margin-top:0}
+
+  /* 진행 단계 */
+  .steps{font-size:12.5px; color:var(--note)}
+  .steps div{padding:3px 0; border-bottom:1px dotted var(--rule)}
+
+  /* 답변 */
+  .answer{
+    background:var(--card); border:1px solid var(--rule); border-radius:3px;
+    padding:16px 17px; white-space:pre-wrap;
+  }
+
+  /* 답변 안의 강조.
+     서버가 **수치** / __의무__ 로 표시한 것을 화면에서 눈에 띄게 합니다.
+     오래 안 보이던 이유는 CSS 가 아니라 서버의 출력 정리 단계(_clean_output)가
+     `**` 마커를 지우고 있었기 때문입니다 — v1.27 에서 수정. */
+  .answer b.num{ font-weight:700; color:#1a1a1a;
+                 background:#fff6d6; padding:0 3px; border-radius:2px }
+  .answer u.duty{ text-decoration:none; border-bottom:2px solid #c9a227;
+                  padding-bottom:1px }
+  .answer mark.key{ background:#ffe9a8; color:#1a1a1a; padding:0 3px }
+
+  /* 【결론】【근거】【설명】 소제목 */
+  .answer .ansh{
+    display:block; margin:16px 0 7px; font-size:12px; font-weight:700;
+    letter-spacing:.08em; color:var(--accent);
+  }
+
+  /* 【결론】 — 담당자가 여기만 읽어도 되도록 맨 위에 눈에 띄게 둡니다. */
+  .concl{
+    background:#f2f7f8; border:1px solid #cfdfe2; border-left:3px solid var(--accent);
+    border-radius:3px; padding:12px 14px; margin-bottom:15px; line-height:1.75;
+  }
+  .concl .ansh{ margin-top:0 }
+
+  /* --- 효력 배지: 이 화면의 핵심 --- */
+  .seal{
+    display:inline-flex; align-items:center; gap:7px;
+    border:1.5px solid var(--seal); color:var(--seal);
+    border-radius:2px; padding:3px 9px; font-size:12px; font-weight:700;
+    font-variant-numeric:tabular-nums; letter-spacing:.01em;
+  }
+  .seal::before{content:"施"; font-size:11px; opacity:.85}
+
+  /* 조문 원문 */
+  .law{
+    background:var(--card); border:1px solid var(--rule);
+    border-radius:3px; margin-bottom:14px; overflow:hidden;
+  }
+  .law-head{
+    padding:11px 14px; border-bottom:1px solid var(--rule); background:#f4f4ef;
+    display:flex; justify-content:space-between; align-items:center; gap:10px; flex-wrap:wrap;
+  }
+  .law-head strong{font-size:14.5px}
+  .law-body{
+    padding:13px 15px; max-height:440px; overflow:auto;
+    font-family:"Nanum Myeongjo",Batang,"바탕",Georgia,serif;
+    font-size:14px; line-height:1.85;
+  }
+  .art{padding:7px 0; border-bottom:1px solid #eceae2}
+  .art:last-child{border-bottom:none}
+  .art.bp{background:#fbfaf4;border-left:2px solid #c9a227;padding-left:9px}
+  .art.bp b{color:#7a6410}
+  .art .dl{font-size:11.5px;color:var(--accent);margin-left:7px}
+  .art .hang{display:block;margin:5px 0 0;padding-left:1.05em;text-indent:-1.05em}
+  .art .hang:first-of-type{margin-top:7px}
+  .art .amend{color:var(--note);font-size:.88em}
+  .cite{overflow:visible}
+  .cite b{line-height:1.5}
+  .cite .ti{line-height:1.5;word-break:keep-all}
+  .fullbtn{display:inline-block;margin-top:9px;font-size:12px;color:var(--accent);
+           font-weight:600;cursor:pointer;font-family:-apple-system,"Segoe UI","Malgun Gothic",sans-serif}
+  .fullbtn::before{content:"▸ "}
+  .fulltext{display:none;margin-top:7px;padding-top:7px;border-top:1px dashed var(--rule)}
+  .cite.full .fulltext{display:block}
+  .cite.full .fullbtn::before{content:"▾ "}
+  .cite .src{display:block;font-size:11px;color:var(--note);margin-top:3px}
+  .empty-law{opacity:.62}
+  .empty-law .law-head{background:#f7f7f2}
+  .art b{
+    display:block; font-family:-apple-system,"Segoe UI","Malgun Gothic",sans-serif;
+    font-size:12.5px; color:var(--accent); font-variant-numeric:tabular-nums;
+  }
+
+  /* 이력 */
+  .hist{font-size:13px}
+  .hist li{
+    padding:7px 0; border-bottom:1px solid var(--rule);
+    cursor:pointer; list-style:none;
+  }
+  .hist li:hover{color:var(--seal)}
+  .hist ul{margin:0; padding:0}
+  .hist .t{font-size:11.5px; color:var(--note); font-variant-numeric:tabular-nums}
+  /* 되묻기에서 고른 조건. 같은 질문을 조건만 바꿔 조회했을 때 구분됩니다. */
+  .hist .hcond{font-size:11.5px; color:var(--accent); margin:2px 0 1px;
+               padding-left:7px; border-left:2px solid var(--rule)}
+
+  .empty{color:var(--note); font-size:13px; padding:14px 0}
+  /* 조회 중 표시 */
+  .loading{display:flex;align-items:center;gap:11px;padding:16px 4px;color:var(--note);font-size:13.5px}
+  .spin{width:19px;height:19px;border:2.5px solid var(--rule);border-top-color:var(--seal);
+        border-radius:50%;animation:sp .8s linear infinite;flex:none}
+  @keyframes sp{to{transform:rotate(360deg)}}
+  @media (prefers-reduced-motion:reduce){ .spin{animation-duration:2.4s} }
+  .dots::after{content:"";animation:dt 1.4s steps(4,end) infinite}
+  @keyframes dt{0%{content:""}25%{content:"."}50%{content:".."}75%{content:"..."}}
+
+  /* 근거 조문 배지 — 답변 맨 위 */
+  .cites{margin-bottom:14px}
+  .cite{display:block;width:100%;text-align:left;background:var(--card);
+        border:1px solid var(--rule);border-left:3px solid var(--accent);
+        border-radius:3px;margin-bottom:6px;font:inherit;color:inherit}
+  .cite-head{padding:9px 12px;cursor:pointer;user-select:none}
+  .cite-head:hover{background:#f2f4f4}
+  .cite-head::after{content:"▸";float:right;color:var(--note);font-size:11px;margin-top:3px}
+  .cite.open .cite-head::after{content:"▾"}
+  .cite-body{padding:0 12px 11px;user-select:text}
+  .cite b{font-size:14.5px;font-variant-numeric:tabular-nums;color:var(--accent)}
+  .cite .nm{font-size:12px;color:var(--note);margin-left:6px}
+  .cite .ti{display:block;font-size:12.5px;color:var(--note);margin-top:2px}
+  .cite.bad{border-left-color:var(--seal);background:#fdf5f4}
+  .cite.bad b{color:var(--seal)}
+  .cite-body{display:none;border-top:1px solid var(--rule);margin-top:2px;padding-top:9px;
+             font-family:"Nanum Myeongjo",Batang,serif;font-size:13.5px;line-height:1.8}
+  .cite.open .cite-body{display:block}
+
+  /* 하단 정보 */
+  footer{border-top:1px solid var(--rule); margin-top:34px; padding:16px 0 26px;
+         font-size:12px; color:var(--note); line-height:1.9}
+  footer b{color:var(--ink); font-size:12px; font-weight:700;
+           letter-spacing:.1em; text-transform:uppercase; display:block; margin-bottom:7px}
+  footer a{color:var(--accent)}
+  footer .k{color:var(--ink); font-weight:600}
+  footer .cav{margin-top:11px; padding-left:9px; border-left:2px solid var(--seal); color:#6d2e2a}
+
+  /* 한도 초과 팝업 */
+  .modal{position:fixed;inset:0;background:rgba(26,28,32,.45);display:none;
+         align-items:center;justify-content:center;padding:20px;z-index:50}
+  .modal.on{display:flex}
+  .modal-box{background:var(--card);border:1px solid var(--rule);border-radius:4px;
+             max-width:400px;width:100%;padding:26px 26px 22px;
+             box-shadow:0 14px 40px rgba(0,0,0,.18)}
+  .modal-box h3{margin:0 0 9px;font-size:16.5px}
+  .modal-box p{margin:0;font-size:13.5px;color:var(--note);line-height:1.75}
+  .modal-box .cd{margin-top:13px;font-size:22px;font-weight:700;color:var(--seal);
+                 font-variant-numeric:tabular-nums}
+  .modal-box button{margin-top:18px;width:100%}
+
+  /* 도구 모음 */
+  .tools{display:flex;gap:7px;align-items:center;margin-bottom:9px;flex-wrap:wrap}
+  .tools input{flex:1;min-width:130px;padding:6px 9px;border:1px solid var(--rule);
+               border-radius:3px;font:inherit;font-size:13px;background:var(--card)}
+  .mini{padding:6px 11px;font-size:12.5px;background:var(--card);color:var(--ink);
+        border:1px solid var(--rule);border-radius:3px;cursor:pointer;font-weight:600}
+  .mini:hover{background:#f0efe9}
+  mark{background:#fdf0a8;color:inherit}
+
+  /* 예시 질문 */
+  .egs{display:flex;gap:6px;flex-wrap:wrap;margin-top:9px}
+  .eg{padding:5px 10px;font-size:12.5px;background:var(--card);border:1px solid var(--rule);
+      border-radius:14px;cursor:pointer;color:var(--note);font-family:inherit}
+  .eg:hover{border-color:var(--accent);color:var(--accent)}
+
+  /* 최근 개정 경고 */
+  .fresh{display:inline-block;margin-left:6px;padding:1px 7px;border-radius:2px;
+         background:#fdf0a8;color:#6b5800;font-size:11px;font-weight:700}
+  /* 관련 법령 */
+  .refs{display:flex;gap:6px;flex-wrap:wrap}
+  .ref{padding:4px 9px;font-size:12.5px;background:var(--card);border:1px solid var(--rule);
+       border-radius:3px;cursor:pointer;font-family:inherit;color:var(--ink)}
+  .ref:hover{border-color:var(--accent);color:var(--accent)}
+
+  /* 햄스터 */
+  #hammy{position:fixed;bottom:6px;left:40px;width:52px;height:44px;z-index:40;
+         pointer-events:auto;cursor:pointer;transition:transform .25s;
+         filter:drop-shadow(0 2px 3px rgba(0,0,0,.16))}
+  #hammy.flip{transform:scaleX(-1)}
+  #hammy .body{animation:hop .42s ease-in-out infinite}
+  #hammy.idle .body{animation:breathe 2.6s ease-in-out infinite}
+  #hammy.happy .body{animation:spin .7s ease-in-out}
+  @keyframes hop{0%,100%{transform:translateY(0)}50%{transform:translateY(-2.5px)}}
+  @keyframes breathe{0%,100%{transform:scale(1)}50%{transform:scale(1.035)}}
+  @keyframes spin{0%{transform:translateY(0) rotate(0)}
+                  40%{transform:translateY(-11px) rotate(-14deg)}
+                  100%{transform:translateY(0) rotate(0)}}
+  #hammy .leg{animation:scoot .21s linear infinite alternate}
+  #hammy.idle .leg{animation:none}
+  @keyframes scoot{from{transform:translateX(-1.4px)}to{transform:translateX(1.4px)}}
+  .seed{position:fixed;bottom:9px;font-size:15px;z-index:39;
+        animation:fade 2.4s ease-out forwards;pointer-events:none}
+  @keyframes fade{0%{opacity:0;transform:translateY(-9px) scale(.5)}
+                  22%{opacity:1;transform:translateY(0) scale(1)}
+                  100%{opacity:0;transform:translateY(2px) scale(.85)}}
+  @media (prefers-reduced-motion:reduce){
+    #hammy{transition:none} #hammy *{animation:none !important}
+  }
+
+  /* 되묻기 */
+  .clarify{background:var(--card);border:1px solid var(--rule);border-left:3px solid var(--accent);
+           border-radius:3px;padding:16px 17px;margin-bottom:12px}
+  .clarify h4{margin:0 0 3px;font-size:14px}
+  .clarify .sub{font-size:12.5px;color:var(--note);margin-bottom:14px}
+  .cq{margin-bottom:13px}
+  .cq p{margin:0 0 7px;font-size:13.5px;font-weight:600}
+  .cq label{display:inline-flex;align-items:center;gap:6px;margin:0 12px 6px 0;
+            font-size:13.5px;cursor:pointer}
+  .cq.note{margin-top:15px;padding-top:13px;border-top:1px dashed var(--rule)}
+  .cq.note .opt{font-weight:400;color:var(--note);font-size:12px}
+  .cq.note input{width:100%;padding:8px 10px;border:1px solid var(--rule);
+                 border-radius:3px;font:inherit;font-size:13.5px;background:var(--card)}
+  .cq.note input:focus{outline:2px solid var(--accent);outline-offset:1px;border-color:transparent}
+  .cq.note .hint{margin-top:5px;font-size:11.5px;color:var(--seal)}
+
+  .clarify .acts{display:flex;gap:8px;margin-top:4px;flex-wrap:wrap}
+
+  /* 조문 그룹 */
+  .grp{font-size:11.5px;letter-spacing:.1em;color:var(--note);font-weight:700;
+       margin:18px 0 8px;text-transform:uppercase}
+  .grp:first-child{margin-top:0}
+  a.cmp{margin-left:auto;margin-right:9px;padding:3px 9px;border-radius:2px;
+        border:1px solid var(--accent);color:var(--accent);font-size:11.5px;
+        font-weight:700;text-decoration:none;white-space:nowrap}
+  a.cmp:hover{background:var(--accent);color:#fff}
+  a.cmp::before{content:"⇄ ";font-size:11px}
+
+  .lvl{display:inline-block;margin-left:7px;padding:1px 7px;border-radius:2px;
+       background:#e7edee;color:var(--accent);font-size:11px;font-weight:700}
+  details.more{margin-top:9px}
+  details.more>summary{cursor:pointer;font-size:12.5px;color:var(--accent);
+                       padding:6px 0;list-style:none;font-weight:600}
+  details.more>summary::-webkit-details-marker{display:none}
+  details.more>summary::before{content:"▸ ";font-size:11px}
+  details.more[open]>summary::before{content:"▾ "}
+
+  .err{border-left:3px solid var(--seal); background:#fdf5f4; padding:11px 13px; font-size:13.5px}
+
+  /* 근거를 확인하지 못한 내용에 대한 경고.
+     별표 본문을 못 받았는데 답변이 그 별표의 수치를 말한 경우 등.
+     담당자가 그냥 지나치면 안 되므로 답변 맨 위에 눈에 띄게 둡니다. */
+  .warnbox{border:1px solid #d9a441; border-left:3px solid #b8791a; background:#fdf8ee;
+           padding:11px 13px; margin-bottom:13px; font-size:13px; line-height:1.65}
+  .warnbox b{color:#8a5a10; display:block; margin-bottom:4px; font-size:13px}
+  .warnbox a{color:#8a5a10; word-break:break-all}
+  .warnbox div+div{margin-top:5px}
+
+  /* ── 인쇄 / PDF 저장 ─────────────────────────────────────
+     브라우저의 "PDF로 저장" 은 텍스트를 그대로 남깁니다.
+     복사가 안 됐다면 화면 캡처였거나 "그림으로 인쇄" 가 켜져 있던 것입니다. */
+  /* 브라우저 인쇄용. 다만 "PDF 저장" 버튼이 더 깔끔합니다
+     (서버가 문서를 직접 만들어 URL·머리말·페이지번호가 섞이지 않습니다). */
+  @media print{
+    @page{ size:A4; margin:14mm 12mm; }
+
+    /* 화면에서만 쓰는 것들은 인쇄에서 제외 */
+    #hammy, .seed, .modal, .egs, .tools, .acts, .clarify,
+    #copy, #clearhist, #pdf, .fullbtn, .hist, footer .cav{ display:none !important; }
+    textarea, select, button{ display:none !important; }
+
+    body{ background:#fff; color:#000; font-size:10.5pt; cursor:auto }
+    .wrap{ display:block; min-height:0 }
+    .left, .right{ border:none; padding:0; background:#fff }
+    .right{ margin-top:10mm }
+    header{ border-bottom:1.5pt solid #000; padding:0 0 4mm; margin-bottom:6mm }
+
+    /* 접힌 조문도 모두 펼쳐서 인쇄 */
+    details.more{ display:block !important }
+    details.more>summary{ display:none }
+    details.more>*{ display:block !important }
+    .cite-body, .fulltext{ display:block !important }
+
+    /* 카드가 페이지 중간에서 잘리지 않게 */
+    .law, .cite{ break-inside:avoid; page-break-inside:avoid;
+                 border:.5pt solid #999; box-shadow:none }
+    .law-body{ max-height:none !important; overflow:visible !important }
+    .grp{ break-after:avoid; page-break-after:avoid }
+
+    /* 링크는 이름만 남깁니다. 주소를 붙이면 문장이 URL 로 뒤덮여 읽을 수 없습니다.
+       (출처가 필요하면 "PDF 저장" 버튼을 쓰세요 — 서버가 문서로 만들어 줍니다) */
+    a.lawref{ color:#000; text-decoration:none; border-bottom:.5pt dotted #999 }
+    a.cmp{ display:none }
+
+    .seal{ border-color:#000; color:#000 }
+    mark.key{ background:#eee; color:#000 }
+    .answer b.num{ color:#000 }
+  }
+</style>
+</head>
+<body class="notranslate">
+
+<header>
+  <h1>법령 조회 도우미</h1>
+  <span class="sub" id="vbadge"></span>
+  <span class="sub">국가법령정보 OPEN API · 답변은 아래 조문 원문만을 근거로 생성됩니다</span>
+</header>
+
+<div class="wrap">
+  <!-- 왼쪽: 질문과 답변 -->
+  <div class="left">
+    <h2>질문</h2>
+    <textarea id="q" placeholder="예) 주유소 토양오염도검사에서 우려기준을 넘으면 어떤 절차를 밟아야 하나"></textarea>
+    <div class="row">
+      <select id="target">
+        <option value="auto">전체 (법령·시행령·규칙·고시)</option>
+        <option value="admrul">행정규칙만</option>
+        <option value="ordin">성남시 조례만</option>
+        <option value="expc">법령해석례만</option>
+      </select>
+      <button id="go"><span id="btnspin" style="display:none">◌ </span><span id="btntext">조문 찾기</span></button>
+    </div>
+    <div class="egs">
+      <button class="eg" type="button">주유소 토양오염도검사에서 우려기준을 넘으면 어떤 절차를 밟아야 하나</button>
+      <button class="eg" type="button">특정토양오염관리대상시설 신고는 언제 해야 하나</button>
+      <button class="eg" type="button">토양정밀조사 명령 이행기간과 연장 기준</button>
+      <button class="eg" type="button">오염토양 정화조치 명령을 안 따르면 어떻게 되나</button>
+    </div>
+
+    <div class="warn">민원인 성명·주민등록번호·연락처 등 개인정보는 입력하지 마세요. 입력 내용은 외부 AI 서비스로 전송됩니다.</div>
+
+    <div id="steps-wrap" style="display:none">
+      <h2>처리 과정</h2>
+      <div class="steps" id="steps"></div>
+    </div>
+
+    <div id="clarify"></div>
+
+    <h2>근거 조문</h2>
+    <div id="cites"><div class="empty">검색하면 여기에 표시됩니다.</div></div>
+
+        <h2>답변
+      <button class="mini" id="pdf" type="button" style="float:right;margin-top:-3px;margin-left:6px">PDF 저장</button>
+      <button class="mini" id="copy" type="button" style="float:right;margin-top:-3px">복사</button>
+    </h2>
+    <div id="answer" class="empty">질문을 입력하고 조문 찾기를 누르세요.</div>
+
+    <h2>관련 법령 (조문에 인용된 다른 법)</h2>
+    <div class="refs" id="refs"><div class="empty">검색하면 표시됩니다.</div></div>
+
+    <h2>조회 이력 <button class="mini" id="clearhist" type="button" style="float:right;margin-top:-3px">비우기</button></h2>
+    <div class="hist" id="hist"><div class="empty">아직 없습니다.</div></div>
+
+    <footer>
+      <b>무엇으로 만들었나</b>
+      <span class="k">법령 데이터</span> — 법제처 국가법령정보 OPEN API
+      (<a href="https://open.law.go.kr" target="_blank" rel="noopener">open.law.go.kr</a>).
+      법령·시행령·시행규칙·행정규칙·자치법규를 실시간으로 가져옵니다.<br>
+      <span class="k">답변 생성</span> — Google Gemini. 위에서 가져온 조문 원문만 근거로 씁니다.<br>
+      <span class="k">서버</span> — Python / FastAPI<br>
+      <span class="k">설계 참고</span> —
+      <a href="https://github.com/ChangooLee/mcp-kr-legislation" target="_blank" rel="noopener">ChangooLee/mcp-kr-legislation</a>
+      (법제처 OPEN API를 정리한 오픈소스 MCP 서버, MIT). API 구성과 도구 분류를 참고했습니다.
+
+      <div class="cav">
+        AI 답변은 틀릴 수 있습니다. 특히 조·항·호 번호를 잘못 붙이는 경우가 있으니,
+        오른쪽 조문 원문과 반드시 대조하세요. 이 화면은 참고용이며 법령의 효력 기준은 관보입니다.
+      </div>
+    </footer>
+  </div>
+
+  <!-- 오른쪽: 조문 원문 -->
+  <div class="right">
+    <h2>조문 원문</h2>
+    <div id="laws"><div class="empty">검색하면 근거 조문이 여기에 표시됩니다. 답변과 반드시 대조하세요.</div></div>
+  </div>
+</div>
+
+<svg id="hammy" class="idle" viewBox="0 0 64 54" aria-hidden="true">
+  <g class="body">
+    <ellipse cx="21" cy="13" rx="6.4" ry="7" fill="#d9b38a"/>
+    <ellipse cx="43" cy="13" rx="6.4" ry="7" fill="#d9b38a"/>
+    <ellipse cx="21" cy="13.8" rx="3.4" ry="3.9" fill="#e8b7b0"/>
+    <ellipse cx="43" cy="13.8" rx="3.4" ry="3.9" fill="#e8b7b0"/>
+    <ellipse cx="32" cy="30" rx="23" ry="19.5" fill="#e8c9a4"/>
+    <ellipse cx="32" cy="37" rx="15" ry="11.5" fill="#f7ecdb"/>
+    <ellipse cx="23.5" cy="26.5" rx="3.1" ry="3.6" fill="#262019"/>
+    <ellipse cx="40.5" cy="26.5" rx="3.1" ry="3.6" fill="#262019"/>
+    <circle cx="24.6" cy="25.2" r="1.1" fill="#fff"/>
+    <circle cx="41.6" cy="25.2" r="1.1" fill="#fff"/>
+    <ellipse cx="32" cy="33" rx="2.3" ry="1.7" fill="#c98b86"/>
+    <path d="M32 34.6v2.2M32 36.8q-3 2.4-5.4 0M32 36.8q3 2.4 5.4 0"
+          stroke="#8a6a52" stroke-width="1.7" fill="none" stroke-linecap="round"/>
+    <ellipse cx="15" cy="34" rx="3.9" ry="2.8" fill="#f0b9b3" opacity=".55"/>
+    <ellipse cx="49" cy="34" rx="3.9" ry="2.8" fill="#f0b9b3" opacity=".55"/>
+    <path d="M9 29h9M9 32.5h9M55 29h-9M55 32.5h-9"
+          stroke="#c9ab88" stroke-width=".9" stroke-linecap="round"/>
+    <g class="leg">
+      <ellipse cx="24" cy="49" rx="4.4" ry="2.7" fill="#d9b38a"/>
+      <ellipse cx="40" cy="49" rx="4.4" ry="2.7" fill="#d9b38a"/>
+    </g>
+  </g>
+</svg>
+
+<div class="modal" id="quota">
+  <div class="modal-box">
+    <h3 id="q-title">사용 한도에 도달했습니다</h3>
+    <p id="q-msg"></p>
+    <div class="cd" id="q-cd" style="display:none"></div>
+    <button type="button" id="q-close">확인</button>
+  </div>
+</div>
+
+<script>
+const $ = id => document.getElementById(id);
+const HKEY = "lawfinder_history_v1";
+// 브라우저에 저장합니다. 이 PC, 이 브라우저에서만 보입니다. 서버에는 안 남습니다.
+let history = [];
+try { history = JSON.parse(localStorage.getItem(HKEY) || "[]"); } catch(e) { history = []; }
+function saveHistory(){
+  try { localStorage.setItem(HKEY, JSON.stringify(history.slice(0, 30))); } catch(e) {}
+}
+
+function esc(s){
+  return String(s ?? "").replace(/[&<>"]/g, c => ({"&":"&amp;","<":"&lt;",">":"&gt;",'"':"&quot;"}[c]));
+}
+
+// 조문 하나를 화면용 HTML 로. 태그 이름이 확정됐으므로 단순해졌습니다.
+// 조문 본문을 항(①②③)·호(1. 2. 3.) 단위로 줄바꿈합니다.
+// 법제처 원문은 이것들이 한 줄로 붙어 있어 그대로 두면 읽을 수가 없습니다.
+function formatBody(text){
+  if(!text) return "";
+  let t = String(text);
+
+  // 조문 제목("제13조(토양오염검사)")이 본문 앞에 중복되면 제거
+  t = t.replace(/^제\d+조(의\d+)?\s*\([^)]*\)\s*/, "");
+
+  // 잘린 끝부분에 남은 조각 정리 (본문을 길이로 자를 때 "<개정 2017." 같은 게 남음)
+  // ★ 2026-08-19 — 예전에는 닫히지 않은 "<" 뒤를 **문자열 끝까지 전부** 지웠습니다.
+  //   "1,000리터 이상 <2,000리터 미만인 시설" 같은 본문에서 조건의 상한이
+  //   통째로 사라졌습니다. 연혁 표기로 보일 때만 지웁니다.
+  t = t.replace(/[<〈](개정|신설|삭제|본조신설|전문개정|제목개정)[^>〉]*$/, "").trim();
+
+  // ①~⑮ 앞에서 줄바꿈. 앞에 공백이 없어도 잡아야 합니다.
+  //   원문이 "…받지 아니한다.<개정 2017.11.28>② 제1항…" 처럼 붙어 오는 경우가 많습니다.
+  t = t.replace(/\s*([①②③④⑤⑥⑦⑧⑨⑩⑪⑫⑬⑭⑮])\s*/g, "\n$1 ");
+
+  // "1. " "2. " 형태의 호. 앞이 공백이든 문장부호든 모두 처리합니다.
+  //   단, "2011.9.30" 같은 날짜와 "제1항" 은 건드리면 안 됩니다.
+  //   앞 글자에 한글도 포함해야 "…받을 것2. 설치 후…" 처럼 붙은 것이 잡힙니다.
+  //   숫자·점이 앞에 오는 경우(2011.9.30)는 제외되므로 날짜는 안전합니다.
+  //   ★ 2026-08-19 — pre 문자군에 "." 과 공백이 들어 있어서 **날짜의 마지막
+  //     조각**이 그대로 걸렸습니다. "이 고시는 2017. 12. 26. 개정된…" 이
+  //     "…2017. 12." / "26. 개정된…" 두 줄로 쪼개져 시행일을 잘못 읽게 됩니다.
+  //     앞이 숫자·점이면 제외하는 룩비하인드를 답니다.
+  t = t.replace(/(^|[가-힣\s.>”"』」\)])(?<!\d\.)(?<!\d\.\s)(\d{1,2})\.\s*(?=[가-힣“"'(「『])/g,
+                (mm, pre, no) => `${pre === "\n" ? "" : pre}\n${no}. `);
+
+  // "가. 나. 다." 형태의 목
+  // ★ [가-하] 로 쓰면 안 됩니다. 한글 음절 전체를 잡아서
+  //   "받을 것." 같은 평범한 문장까지 목으로 오인합니다. 실제 목 글자만 나열합니다.
+  t = t.replace(/(^|[\s.>”"』」\)])([가나다라마바사아자차카타파하])\.\s*(?=[가-힣“"'(「『])/g,
+                (mm, pre, ch) => `${pre === "\n" ? "" : pre}\n  ${ch}. `);
+
+  return t.split("\n").map(v => v.trim()).filter(Boolean).map(line => {
+    // <개정 2017.11.28> 같은 연혁 표기는 흐리게
+    let html = esc(line).replace(/(&lt;[^&]*?(개정|신설|삭제|본조신설)[^&]*?&gt;)/g,
+                                 '<span class="amend">$1</span>');
+    html = linkify(html);
+    return `<span class="hang">${html}</span>`;
+  }).join("");
+}
+
+function articleView(a){
+  if(a.조문여부 === "전문") return "";           // 장·절 제목은 건너뜀
+  const isBp = ["별표","별지","서식"].includes(a.구분);
+  const gaji = a.조문가지번호 ? "의" + a.조문가지번호 : "";
+  const num  = a.조문번호 ? `제${a.조문번호}조${gaji}` : "";
+  const head = isBp ? (a.조문제목 || "")
+                    : [num, a.조문제목 ? `(${a.조문제목})` : ""].filter(Boolean).join(" ");
+  // ★ 파일링크는 두 군데서 옵니다.
+  //   본문 조회로 딸려온 별표 : "/LSW/…" 상대경로
+  //   별표·서식 API 로 따로 받은 별표 : "https://…" 절대경로
+  //   앞에 도메인을 무조건 붙이면 두 번째가 "https://www.law.go.krhttps://…" 가 됩니다.
+  const flink = a.파일링크
+    ? (/^https?:\/\//.test(a.파일링크) ? a.파일링크 : "https://www.law.go.kr" + a.파일링크)
+    : "";
+  const dl = flink ? ` <a class="dl" href="${esc(flink)}" target="_blank" rel="noopener">원문 보기</a>` : "";
+  return `<div class="art${isBp ? " bp" : ""}">${head ? `<b>${esc(head)}${dl}</b>` : ""}${formatBody(a.조문내용)}</div>`;
+}
+
+// 시행일이 최근 6개월 이내면 경고 배지
+function freshBadge(ymd){
+  if(!ymd || ymd.length < 8) return "";
+  const y = +ymd.slice(0,4), m = +ymd.slice(4,6), d = +ymd.slice(6,8);
+  const days = (Date.now() - new Date(y, m-1, d).getTime()) / 86400000;
+  if(days < 0) return '<span class="fresh">시행 예정</span>';
+  if(days < 183) return '<span class="fresh">최근 개정</span>';
+  return "";
+}
+
+function renderRefs(rs){
+  if(!rs || !rs.length){ $("refs").innerHTML = '<div class="empty">인용된 다른 법령이 없습니다.</div>'; return; }
+  $("refs").innerHTML = rs.map(r => `<button class="ref" type="button">${esc(r)}</button>`).join("");
+  $("refs").querySelectorAll(".ref").forEach(b => b.onclick = () => {
+    $("q").value = b.textContent + " 관련 규정";
+    $("q").focus();
+  });
+}
+
+// 법제처 원문으로 가는 링크. 「법령명」 을 클릭 가능하게 만듭니다.
+// ★ 2026-08-19 — linkify 는 **이미 esc() 된 HTML** 위에서 돕니다. 그런데 여기서
+//   또 esc 를 걸어 이중 이스케이프가 났습니다. "「가스 & 석유 사업법」" 이
+//   화면에 "가스 &amp; 석유 사업법" 으로 그대로 보이고, href 도
+//   %26amp%3B 로 나가 법제처에서 404 였습니다.
+//   → 라벨은 이미 안전하므로 그대로 쓰고, href 는 엔티티를 되돌린 원문으로 만듭니다.
+function unesc(s){
+  return String(s || "").replace(/&amp;/g, "&").replace(/&lt;/g, "<")
+                       .replace(/&gt;/g, ">").replace(/&quot;/g, '"');
+}
+function lawLink(name, label){
+  const href = encodeURIComponent(unesc(name));
+  return `<a href="https://www.law.go.kr/법령/${href}"` +
+         ` target="_blank" rel="noopener" class="lawref">${label || "「" + name + "」"}</a>`;
+}
+
+// 지금 화면에 표시 중인 법령들. 조문 상호참조("법 제13조제1항")를 연결할 때 씁니다.
+let CURRENT_LAWS = [];
+let LAST_RESULT = null;   // PDF 로 만들 때 쓸 마지막 조회 결과
+let ACTIVE_QUERY = "";    // 지금 진행 중인 질문. 바뀌면 이전 상태를 모두 버립니다
+
+// 새 질문을 시작할 때 이전 질문의 흔적을 지웁니다.
+// 이것이 없으면 이전 질문의 법령·조문·조건이 그대로 남아
+// 엉뚱한 법령으로 답하게 됩니다.
+function resetQueryState(){
+  CURRENT_LAWS = [];
+  LAST_RESULT = null;
+  $("clarify").innerHTML = "";
+  $("steps").innerHTML = "";
+  $("steps-wrap").style.display = "none";
+  const note = $("cq-note");
+  if(note) note.value = "";
+}
+
+// "기후에너지환경부령", "대통령령" 같은 위임 표기 → 해당 시행규칙·시행령으로.
+// 법제처 원문에서도 이 단어들이 링크로 걸려 있습니다.
+const DELEGATE_RE = /(대통령령|[가-힣]{2,12}부령|[가-힣]{2,10}청장이 정하는 고시|총리령)/g;
+
+function baseLawName(){
+  // 현재 법령 목록에서 법률(모법) 이름을 찾습니다.
+  const law = CURRENT_LAWS.find(l => l.level === "법률") || CURRENT_LAWS[0];
+  if(!law) return "";
+  return String(law.name).replace(/\s*시행(령|규칙)$/, "").trim();
+}
+
+function delegateTarget(word){
+  const base = baseLawName();
+  if(!base) return "";
+  if(word === "대통령령") return base + " 시행령";
+  if(/부령$|총리령$/.test(word)) return base + " 시행규칙";
+  return "";
+}
+
+// "법 제13조제1항", "영 제8조제1항제2호", "제7조" → 해당 조문으로.
+// ★ 숫자와 "조/항/호" 사이에도 공백을 허용합니다.
+//   로컬 모델이 "제8 조제1 항제1 호" 처럼 띄어 쓰는 일이 잦습니다.
+//   서버에서 붙여주지만, 여기서도 받아줘야 예전 기록·다른 모델에서 링크가 삽니다.
+// ★ 2026-08-19 — 접두사 앞에 경계가 없어서 **앞 낱말의 마지막 글자**가
+//   접두사로 잡혔습니다. 한국 법령명은 거의 전부 "…법" 으로 끝나므로 치명적입니다.
+//     "위험물안전관리법 제5조" → 접두사 "법" 으로 읽고 **모법**(토양환경보전법)
+//                              제5조로 링크. 다른 법률 조문이 엉뚱하게 연결됨.
+//     "측정 방법 제3조", "환경분쟁 조정법 제4조" 도 같은 경로로 오링크.
+//   조문 오인용을 막으려고 만든 앱에서 링크가 오인용을 만들고 있었습니다.
+//   → 앞이 한글이면 접두사로 보지 않습니다(룩비하인드).
+const XREF_RE = /(?<![가-힣])(법|영|규칙)?\s*(제\s*\d+\s*조(?:\s*의\s*\d+)?(?:\s*제\s*\d+\s*항)?(?:\s*제\s*\d+\s*호)?)/g;
+
+function xrefTarget(prefix){
+  const base = baseLawName();
+  if(!base) return "";
+  if(prefix === "법") return base;
+  if(prefix === "영") return base + " 시행령";
+  if(prefix === "규칙") return base + " 시행규칙";
+  return "";                      // 접두사 없으면 같은 법령 안. 링크 걸지 않음
+}
+
+// 조문 텍스트에 링크를 입힙니다. 이미 esc() 된 HTML 을 받습니다.
+// 법제처 /법령/ 경로에 있는 것만 링크해야 합니다.
+// 「한ㆍ일 어업협정」 같은 조약·협정·고시명은 그 경로에 없어 404 가 납니다.
+const LAW_TAIL_RE = /(법|법률|령|시행령|규칙|시행규칙|조례|훈령|예규|고시|지침|규정)$/;
+
+function isLawName(name){
+  const n = String(name || "").trim();
+  if(n.length < 2 || n.length > 60) return false;
+  // 조약·협정·헌장 등은 법령 검색 경로에 없습니다.
+  if(/(협정|조약|협약|헌장|의정서|각서|선언)$/.test(n)) return false;
+  return LAW_TAIL_RE.test(n);
+}
+
+function linkify(html){
+  // 1) 「법령명」 — 실제 법령으로 보일 때만 링크합니다.
+  html = html.replace(/「([^」\n]{2,60})」/g,
+                      (m, nm) => isLawName(nm) ? lawLink(nm) : m);
+  // 2) 위임 표기 (대통령령 / ○○부령)
+  html = html.replace(DELEGATE_RE, w => {
+    const t = delegateTarget(w);
+    return t ? lawLink(t, w) : w;
+  });
+  // 3) 조문 상호참조 (법 제13조제1항)
+  html = html.replace(XREF_RE, (m, pre, jo) => {
+    if(!pre) return m;            // 접두사 없는 "제7조" 는 같은 법령 안이라 건너뜀
+    const t = xrefTarget(pre);
+    if(!t) return m;
+    const url = `https://www.law.go.kr/법령/${encodeURIComponent(t)}/${encodeURIComponent(jo.replace(/\s/g, ""))}`;
+    return `${pre} <a href="${url}" target="_blank" rel="noopener" class="lawref">${esc(jo)}</a>`;
+  });
+  return html;
+}
+
+// 답변 텍스트를 화면용 HTML 로. **굵게**, __밑줄__, !!중요!!, 「법령명」 링크.
+// 서버가 보낸 경고를 답변 위에 답니다.
+// 지금은 "별표 본문을 못 받았는데 답변이 그 별표의 수치를 말했다" 가 유일한 경우입니다.
+// 이 수치는 근거가 없으므로 담당자가 그대로 민원 안내에 쓰면 안 됩니다.
+function renderWarnings(ws){
+  if(!ws || !ws.length) return "";
+  const rows = ws.map(w => {
+    const m = String(w).match(/(https?:\/\/\S+)/);
+    if(m){
+      const url = m[1];
+      return `<div>${esc(w.replace(url, "")).trim()} ` +
+             `<a href="${esc(url)}" target="_blank" rel="noopener">${esc(url)}</a></div>`;
+    }
+    return `<div>${esc(w)}</div>`;
+  }).join("");
+  return `<div class="warnbox"><b>확인되지 않은 근거가 있습니다</b>${rows}</div>`;
+}
+
+function renderAnswer(text){
+  let h = esc(text || "");
+  h = h.replace(/&lt;!--[\s\S]*?--&gt;/g, "");
+  h = h.replace(/!!(.+?)!!/g, '<mark class="key">$1</mark>');
+  h = h.replace(/\*\*(.+?)\*\*/g, '<b class="num">$1</b>');
+  h = h.replace(/__(.+?)__/g, '<u class="duty">$1</u>');
+  h = linkify(h);
+  // 【결론】 블록은 다음 【…】 머리표 전까지를 통째로 상자에 담습니다.
+  // 담당자가 맨 위만 읽어도 답을 알 수 있게 하려는 것입니다.
+  // ※ 끝 조건의 `$(?![\s\S])` 는 "진짜 문자열 끝". m 플래그에서 `$` 만 쓰면
+  //   줄 끝마다 걸려서 첫 줄만 상자에 들어갑니다.
+  // ★ 2026-08-19 — 개행을 **선택**으로, 앞 공백도 허용합니다. 예전에는
+  //   "【결론】 8년마다…" 처럼 같은 줄에 이어 쓰면 상자도 안 생기고
+  //   소제목 정규식(^【…】$)에도 안 걸려 "【결론】" 이 날것으로 노출됐습니다.
+  h = h.replace(/^[ \t]*【결론】[ \t]*\n?([\s\S]*?)(?=\n[ \t]*【|$(?![\s\S]))/m,
+                '<div class="concl"><span class="ansh">결론</span>$1</div>');
+  // 나머지 【근거】 / 【설명】 소제목
+  h = h.replace(/^【(.+?)】\s*$/gm, '<span class="ansh">$1</span>');
+  return h;
+}
+
+function renderCites(cs){
+  if(!cs || !cs.length){ $("cites").innerHTML = '<div class="empty">인용된 조문이 없습니다.</div>'; return; }
+
+  // 법률 → 시행령 → 시행규칙 → 그 외 순으로 묶어 소제목을 답니다.
+  const ord = ["법률","시행령","시행규칙"];
+  const groups = {};
+  cs.forEach(c => {
+    const g = c.ok ? (c.level || "기타") : "확인 안 됨";
+    (groups[g] = groups[g] || []).push(c);
+  });
+  const keys = Object.keys(groups).sort((a,b) => {
+    const ia = ord.indexOf(a), ib = ord.indexOf(b);
+    if(a === "확인 안 됨") return 1;
+    if(b === "확인 안 됨") return -1;
+    return (ia < 0 ? 99 : ia) - (ib < 0 ? 99 : ib);
+  });
+
+  const card = c =>
+    `<div class="cite${c.ok ? "" : " bad"}">
+     <div class="cite-head">
+       <b>${esc(c.label)}</b><span class="nm">${esc(c.law || "확인 안 됨")}</span>
+       ${c.level ? `<span class="lvl">${esc(c.level)}</span>` : ""}
+       <span class="ti">${esc(c.ok ? (c.title || "제목 없음") : "실제 조문에서 찾지 못했습니다 — 원문을 직접 확인하세요")}</span>
+       ${c.mismatch ? `<span class="warnline">${esc(c.mismatch)}</span>` : ""}
+     </div>
+       ${c.text ? `<div class="cite-body">${formatBody(c.text)}${
+          c.full && c.full.length > c.text.length
+            ? `<span class="fullbtn" data-full="1">조문 전체 보기</span>
+               <div class="fulltext">${formatBody(c.full)}</div>` : ""
+       }</div>` : ""}
+     </div>`;
+
+  $("cites").innerHTML = keys.map(k =>
+    `<div class="grp">${esc(k)}</div><div class="cites">${groups[k].map(card).join("")}</div>`
+  ).join("");
+  // 헤더를 눌러야 접히고 펼쳐집니다. 본문은 드래그해서 복사할 수 있습니다.
+  $("cites").querySelectorAll(".cite").forEach(card => {
+    const head = card.querySelector(".cite-head");
+    if(head) head.onclick = () => card.classList.toggle("open");
+    const fb = card.querySelector(".fullbtn");
+    if(fb) fb.onclick = e => { e.stopPropagation(); card.classList.toggle("full"); };
+  });
+}
+
+function renderLaws(laws, citedKeys){
+  CURRENT_LAWS = laws || [];
+  if(!laws || !laws.length){
+    $("laws").innerHTML = '<div class="empty">근거 조문을 찾지 못했습니다.</div>';
+    return;
+  }
+  const cited = new Set(citedKeys || []);
+  const order = ["법률","시행령","시행규칙"];
+  const groups = {};
+  laws.forEach(l => {
+    const g = /위임/.test(l.level || "") ? "위임 행정규칙"
+            : order.includes(l.level) ? "법령"
+            : (l.kind || "기타");
+    (groups[g] = groups[g] || []).push(l);
+  });
+
+  // 법제처 3단비교(법률·시행령·시행규칙 나란히 보기) 링크.
+  // 위임조문 매칭이 법제처 쪽에 이미 되어 있으므로 직접 만들지 않고 연결만 합니다.
+  function cmpLink(l){
+    if(!l.mst || !l.id) return "";
+    const url = `https://www.law.go.kr/lsInfoP.do?lsiSeq=${encodeURIComponent(l.mst)}` +
+                `&lsId=${encodeURIComponent(l.id)}&chrClsCd=010202` +
+                `&urlMode=lsEfInfoR&viewCls=thdCmpNewScP&ancYnChk=0`;
+    return `<a class="cmp" href="${url}" target="_blank" rel="noopener"` +
+           ` title="법률·시행령·시행규칙을 나란히 비교합니다 (법제처)">3단비교</a>`;
+  }
+
+  // 계열마다 버튼은 하나만. 법률이 있으면 법률에, 없으면 시행령·시행규칙에 답니다.
+  const cmpOwner = new Set();
+  ["법률", "시행령", "시행규칙"].forEach(lv => {
+    laws.filter(l => l.level === lv).forEach(l => {
+      const base = String(l.name).replace(/\s*시행(령|규칙)$/, "").trim();
+      if(!cmpOwner.has(base)){ cmpOwner.add(base); l._cmp = true; }
+    });
+  });
+
+  const block = l => {
+    const arts = (l.articles || []);
+    // 법령명까지 포함해 비교합니다. 법률 제3조와 시행령 제3조는 다른 조문입니다.
+    const isHit = a => cited.size && a.조문번호 &&
+                       cited.has(`${l.name}|${a.조문번호}|${a.조문가지번호 || ""}`);
+    const hits = cited.size ? arts.filter(isHit) : [];
+    const rest = cited.size ? arts.filter(a => !isHit(a)) : arts;
+
+    const seal = l.enforced
+      ? `<span class="seal">시행 ${esc(l.enforced)}${l.promulgation_no ? " · 공포 " + esc(l.promulgation_no) : ""}</span>` + freshBadge(l.enforced)
+      : `<span class="seal">시행일 미확인</span>`;
+    const lvl = l.level ? `<span class="lvl">${esc(l.level)}</span>` : "";
+    const warn = l.warning ? `<div class="art" style="color:var(--seal)">${esc(l.warning)}</div>` : "";
+
+    const empty = !hits.length;
+    const main = hits.length ? hits.map(articleView).join("") : "";
+
+    let more = "";
+    if(rest.length){
+      more = `<details class="more"><summary>${
+        empty ? `조문 보기 (${rest.length}개) — 답변에 인용되지 않았습니다`
+              : `전체 조문 보기 (${rest.length}개)`
+      }</summary>${rest.map(articleView).join("")}</details>`;
+    } else if(empty){
+      // 조문을 하나도 못 가져온 경우. 빈 칸으로 두면 오류처럼 보입니다.
+      more = '<div class="empty">조문 본문을 가져오지 못했습니다.</div>';
+    }
+
+    return `<div class="law${empty ? " empty-law" : ""}">
+      <div class="law-head"><strong>${esc(l.name)}${lvl}</strong>${
+        l._cmp ? cmpLink(l) : ""}${seal}</div>
+      <div class="law-body">${warn}${main}${more}</div>
+    </div>`;
+  };
+
+  let html = "";
+  ["법령","위임 행정규칙","자치법규","조례","해석례","기타"].forEach(g => {
+    if(!groups[g]) return;
+    const items = groups[g].sort((a,b) =>
+      order.indexOf(a.level) - order.indexOf(b.level));
+    html += `<div class="grp">${esc(g)}</div>` + items.map(block).join("");
+    delete groups[g];
+  });
+  Object.keys(groups).forEach(g => {
+    html += `<div class="grp">${esc(g)}</div>` + groups[g].map(block).join("");
+  });
+  $("laws").innerHTML = html;
+}
+
+function renderHistory(){
+  if(!history.length){ $("hist").innerHTML = '<div class="empty">아직 없습니다.</div>'; return; }
+  // ★ 되묻기에서 고른 조건을 함께 보여줍니다.
+  //   v1.24 에서 질문 본문과 조건을 분리해 보내도록 바꾸면서, 기록에는
+  //   질문만 남고 조건이 빠졌습니다. 같은 질문을 조건만 바꿔 여러 번 조회하면
+  //   기록이 전부 똑같아 보여 어느 것이 무엇인지 구분할 수 없었습니다.
+  $("hist").innerHTML = "<ul>" + history.map((h,i) =>
+    `<li data-i="${i}"><div>${esc(h.q)}</div>` +
+    (h.answered ? `<div class="hcond">${esc(h.answered)}</div>` : "") +
+    `<div class="t">${h.time} · 근거 ${h.laws.length}건</div></li>`
+  ).join("") + "</ul>";
+  $("hist").querySelectorAll("li").forEach(li => li.onclick = () => {
+    const h = history[li.dataset.i];
+    $("q").value = h.q;
+    $("answer").innerHTML = renderAnswer(h.answer);
+    $("answer").className = "answer";
+    CURRENT_LAWS = h.laws || [];
+    LAST_RESULT = {
+      question: h.q, answered: h.answered || "", answer: h.answer || "",
+      citations: h.citations || [], laws: h.laws || [],
+    };
+    renderCites(h.citations);
+    renderRefs(h.references);
+    renderLaws(h.laws, h.cited_keys);
+  });
+}
+
+function renderClarify(asks, round, maxRounds, prevAnswered){
+  const r = round || 1, mx = maxRounds || 10;
+  $("clarify").innerHTML = `<div class="clarify">
+    <h4>몇 가지만 확인할게요 <span class="lvl">${r} / ${mx}</span></h4>
+    <div class="sub">답이 갈릴 수 있는 부분입니다. 고르면 더 정확한 조문을 찾아드립니다.${
+      prevAnswered ? `<br><span style="color:var(--accent)">지금까지: ${esc(prevAnswered)}</span>` : ""}</div>
+    ${asks.map((a,i) => `<div class="cq"><p>${esc(a.question)}</p>${
+      a.options.map((o,j) => {
+        // "모름" 이 있으면 그것을 기본 선택. 없으면 마지막 보기.
+        // 확실한 것만 고르게 해야 잘못된 조건이 섞이지 않습니다.
+        const idx = a.options.findIndex(x => /^모름|모르|확인 안|미확인/.test(x));
+        const def = idx >= 0 ? idx : a.options.length - 1;
+        return `<label><input type="radio" name="cq${i}" value="${esc(o)}"${
+          j === def ? " checked" : ""}>${esc(o)}</label>`;
+      }).join("")}</div>`).join("")}
+    <div class="cq note">
+      <p>추가로 알려줄 내용 <span class="opt">(선택)</span></p>
+      <input id="cq-note" placeholder="보기에 없는 내용이나 정확한 수치를 적어주세요 (예: 저장용량 48,000L)">
+      <div class="hint">민원인 성명·연락처 등 개인정보는 적지 마세요.</div>
+    </div>
+    <div class="acts">
+      <button type="button" id="cq-go">이대로 검색</button>
+      <button type="button" class="mini" id="cq-skip">건너뛰고 그냥 검색</button>
+    </div>
+  </div>`;
+
+  $("cq-go").onclick = () => {
+    const picked = asks.map((a,i) => {
+      const el = document.querySelector(`input[name="cq${i}"]:checked`);
+      return el ? `${a.question}: ${el.value}` : "";
+    }).filter(Boolean).join(" / ");
+    const noteEl = $("cq-note");
+    const note = noteEl ? noteEl.value.trim() : "";
+    const merged = [prevAnswered, picked, note && `추가 설명: ${note}`]
+                     .filter(Boolean).join(" / ");
+    $("clarify").innerHTML = "";
+    // skipClarify=false 로 보내야 다음 라운드를 더 물어볼 수 있습니다.
+    ask(false, merged, r);
+  };
+  $("cq-skip").onclick = () => { $("clarify").innerHTML = ""; ask(true, prevAnswered); };
+}
+
+// 오른쪽/근거 패널을 비웁니다. 오류 시 스피너가 계속 도는 것을 막습니다.
+function clearPanels(msg){
+  const m = `<div class="empty">${esc(msg || "표시할 내용이 없습니다.")}</div>`;
+  $("cites").innerHTML = m;
+  $("laws").innerHTML  = m;
+  $("refs").innerHTML  = m;
+}
+
+async function ask(skipClarify, extra, round){
+  const base = $("q").value.trim();
+  if(!base) return;
+
+  // 진행 중이던 질문과 다르면 새 질문입니다. 이전 상태를 모두 버립니다.
+  if(base !== ACTIVE_QUERY){
+    resetQueryState();
+    ACTIVE_QUERY = base;
+    extra = "";        // 이전 질문의 되묻기 답변을 물려받지 않습니다
+    round = 0;
+  }
+
+  $("go").disabled = true;
+  $("btnspin").style.display = "inline";
+  $("btntext").textContent = "조회 중";
+  $("answer").className = "";
+  $("answer").innerHTML =
+    '<div class="loading"><div class="spin"></div>' +
+    '<div>법제처에서 조문을 가져와 답변을 만들고 있습니다<span class="dots"></span><br>' +
+    '<span style="font-size:12px">보통 10~30초 걸립니다</span></div></div>';
+  $("cites").innerHTML = '<div class="loading"><div class="spin"></div><div>조문 번호를 대조하는 중<span class="dots"></span></div></div>';
+  $("laws").innerHTML =
+    '<div class="loading"><div class="spin"></div><div>조문 원문을 불러오는 중<span class="dots"></span></div></div>';
+  $("clarify").innerHTML = "";
+  $("steps-wrap").style.display = "none";
+  if(window.hammyBusy) window.hammyBusy(true);
+
+  try{
+    const res = await fetch("/api/ask", {
+      method:"POST",
+      headers:{"Content-Type":"application/json"},
+      // question 에는 질문 본문만 넣습니다. 조건은 answered 로 따로 보냅니다.
+      // (질문에 조건을 섞으면 서버의 검색 캐시 키가 매번 달라집니다)
+      body: JSON.stringify({question: base, target: $("target").value,
+                            skip_clarify: !!skipClarify,
+                            answered: extra || "", round: round || 0})
+    });
+    // 서버가 NDJSON 스트림으로 보냅니다. 한 줄씩 읽어 진행 상황을 표시하고,
+    // 마지막 "result" 줄을 최종 결과로 씁니다.
+    // (한 번에 응답하면 Cloudflare 가 100초에서 끊어 524 가 납니다)
+    if(!res.body || !(res.headers.get("content-type") || "").includes("ndjson")){
+      const raw = await res.text();
+      try{
+        data = JSON.parse(raw);
+      }catch(_){
+        $("answer").className = "err";
+        if(res.status === 401 || /login|로그인/i.test(raw)){
+          $("answer").innerHTML = '세션이 만료되었습니다. <a href="/login">다시 로그인</a> 후 시도해 주세요.';
+        }else{
+          $("answer").textContent =
+            `서버가 예상과 다른 응답을 보냈습니다 (HTTP ${res.status}). ` +
+            `잠시 후 다시 시도해 주세요.`;
+        }
+        clearPanels("조회하지 못했습니다.");
+        return;
+      }
+    }else{
+      const reader = res.body.getReader();
+      const dec = new TextDecoder();
+      const live = [];
+      let buf = "";
+      data = null;
+
+      for(;;){
+        const {done, value} = await reader.read();
+        if(done) break;
+        buf += dec.decode(value, {stream: true});
+        const lines = buf.split("\n");
+        buf = lines.pop();                 // 마지막 조각은 다음 청크와 합칩니다
+        for(const ln of lines){
+          if(!ln.trim()) continue;
+          let msg;
+          try{ msg = JSON.parse(ln); }catch(_){ continue; }
+          if(msg.ping) continue;
+          if(msg.progress){
+            live.push(msg.progress);
+            $("steps-wrap").style.display = "block";
+            $("steps").innerHTML = live.map(st =>
+              `<div>${esc(st.name)} — ${esc(
+                 typeof st.detail === "object" ? JSON.stringify(st.detail) : st.detail)}</div>`
+            ).join("") + '<div style="color:var(--accent)">처리 중…</div>';
+            continue;
+          }
+          if(msg.result) data = msg.result;
+          else if(msg.error) data = {error: msg.error};
+        }
+      }
+      if(!data){
+        $("answer").className = "err";
+        $("answer").textContent = "서버 응답이 중간에 끊겼습니다. 잠시 후 다시 시도해 주세요.";
+        clearPanels("조회하지 못했습니다.");
+        return;
+      }
+    }
+
+    if(data.quota){
+      showQuota(data.quota);
+      refreshKeys();
+      $("answer").className = "empty";
+      $("answer").textContent = "사용 한도로 조회하지 못했습니다.";
+      clearPanels("사용 한도로 조회하지 못했습니다.");
+      return;
+    }
+
+    if(data.clarify){
+      renderClarify(data.clarify, data.round, data.max_rounds, data.answered);
+      $("answer").className = "empty";
+      $("answer").textContent = "위에서 선택해 주세요.";
+      clearPanels("선택 후 조회됩니다.");
+      return;
+    }
+
+    if(data.error){
+      $("answer").className = "err";
+      $("answer").textContent = data.error;
+      clearPanels("조회하지 못했습니다.");
+      return;
+    }
+
+    if(data.steps){
+      $("steps-wrap").style.display = "block";
+      $("steps").innerHTML = data.steps.map(s =>
+        `<div>${esc(s.name)} — ${esc(typeof s.detail === "object" ? JSON.stringify(s.detail) : s.detail)}</div>`
+      ).join("");
+    }
+
+    $("answer").className = "answer";
+    // 근거를 확인하지 못한 내용이 있으면 답변 위에 먼저 경고를 답니다.
+    $("answer").innerHTML = renderWarnings(data.warnings) + renderAnswer(data.answer);
+    CURRENT_LAWS = data.laws || [];
+    // PDF 는 결재·민원 안내에 쓰이는 기록입니다.
+    // 화면에만 경고를 띄우고 PDF 에 빠지면, 근거 없는 수치가 그대로 문서로 남습니다.
+    // 그래서 경고를 답변 맨 앞에 붙여 PDF·복사에도 함께 나가도록 합니다.
+    const warnHead = (data.warnings && data.warnings.length)
+      ? "【확인되지 않은 근거】\n" + data.warnings.join("\n") + "\n\n"
+      : "";
+    LAST_RESULT = {
+      question: base, answered: extra || "",
+      answer: warnHead + (data.answer || ""),
+      citations: data.citations || [], laws: data.laws || [],
+    };
+    renderCites(data.citations);
+    renderRefs(data.references);
+    renderLaws(data.laws, data.cited_keys);
+    applyFind();
+
+    history.unshift({
+      q: base,
+      // 되묻기에서 고른 조건. 기록 목록에 함께 표시합니다.
+      answered: extra || "",
+      // 기록에서 다시 열어볼 때도 경고가 함께 보이도록 붙여 저장합니다.
+      answer: warnHead + (data.answer || ""),
+      laws: data.laws || [],
+      citations: data.citations || [],
+      references: data.references || [],
+      cited_keys: data.cited_keys || [],
+      time: new Date().toLocaleTimeString("ko-KR", {hour:"2-digit", minute:"2-digit"})
+    });
+    saveHistory();
+    renderHistory();
+
+  }catch(e){
+    $("answer").className = "err";
+    $("answer").textContent = "서버에 연결하지 못했습니다: " + e.message;
+    clearPanels("조회하지 못했습니다.");
+  }finally{
+    $("go").disabled = false;
+    $("btnspin").style.display = "none";
+    $("btntext").textContent = "조문 찾기";
+  }
+}
+
+// ── 한도 초과 팝업 ──────────────────────────────
+let cdTimer = null;
+function showQuota(q){
+  $("q-title").textContent = q.title;
+  $("q-msg").textContent = q.message;
+  clearInterval(cdTimer);
+  if(q.scope === "minute" && q.retry_after > 0){
+    let left = q.retry_after;
+    $("q-cd").style.display = "block";
+    const tick = () => {
+      $("q-cd").textContent = left + "초";
+      if(left-- <= 0){ clearInterval(cdTimer); $("q-cd").textContent = "다시 시도할 수 있습니다"; }
+    };
+    tick(); cdTimer = setInterval(tick, 1000);
+  } else {
+    $("q-cd").style.display = "none";
+  }
+  $("quota").classList.add("on");
+}
+$("q-close").onclick = () => { $("quota").classList.remove("on"); clearInterval(cdTimer); };
+$("quota").onclick = e => { if(e.target === $("quota")) $("q-close").click(); };
+
+// ── PDF 저장 ────────────────────────────────────
+// 서버에서 직접 PDF 를 만들어 내려받습니다.
+// 브라우저 인쇄를 쓰면 사용자가 대화상자에서 대상을 "PDF로 저장" 으로
+// 바꿔야 하는데, 기본값(Microsoft Print to PDF)으로 저장하면
+// 화면이 이미지가 되어 텍스트 복사가 되지 않습니다.
+$("pdf").onclick = async () => {
+  if(!LAST_RESULT){ alert("먼저 조문을 검색해 주세요."); return; }
+  const btn = $("pdf");
+  const label = btn.textContent;
+  btn.disabled = true; btn.textContent = "만드는 중…";
+  try{
+    const res = await fetch("/api/pdf", {
+      method: "POST",
+      headers: {"Content-Type": "application/json"},
+      body: JSON.stringify(LAST_RESULT),
+    });
+    const type = res.headers.get("content-type") || "";
+    if(!type.includes("pdf")){
+      const t = await res.text();
+      let msg = "PDF 를 만들지 못했습니다.";
+      try { msg = JSON.parse(t).error || msg; } catch(_) {}
+      alert(msg);
+      return;
+    }
+    const blob = await res.blob();
+    // Content-Disposition 의 파일명을 씁니다. 없으면 날짜로 만듭니다.
+    const cd = res.headers.get("content-disposition") || "";
+    const m = cd.match(/filename\*=UTF-8''([^;]+)/);
+    const name = m ? decodeURIComponent(m[1])
+                   : `법령조회_${new Date().toISOString().slice(0,10)}.pdf`;
+    const url = URL.createObjectURL(blob);
+    const a = document.createElement("a");
+    a.href = url; a.download = name;
+    document.body.appendChild(a); a.click(); a.remove();
+    setTimeout(() => URL.revokeObjectURL(url), 1000);
+  }catch(e){
+    alert("PDF 요청에 실패했습니다: " + e.message);
+  }finally{
+    btn.disabled = false; btn.textContent = label;
+  }
+};
+
+// ── 복사 ────────────────────────────────────────
+$("copy").onclick = async () => {
+  const cs = $("cites").innerText.trim();
+  const an = $("answer").innerText.trim();
+  try{
+    await navigator.clipboard.writeText(cs + "\n\n" + an);
+    $("copy").textContent = "복사됨";
+    setTimeout(() => $("copy").textContent = "복사", 1400);
+  }catch(e){ alert("복사에 실패했습니다. 직접 선택해 복사해 주세요."); }
+};
+
+// 드래그해서 Ctrl+C 로 복사할 때 하이퍼링크·서식이 딸려가지 않게 합니다.
+//
+// 위 "복사" 버튼은 writeText 라서 원래 순수 텍스트입니다.
+// 문제는 마우스로 긁어 복사하는 경우입니다. 브라우저가 text/html 도 함께
+// 클립보드에 넣기 때문에, 한글·워드에 붙이면 화면이 만들어 붙인
+// 「법령명」 링크가 파란 밑줄로 그대로 따라갑니다.
+// (답변 원문에는 링크가 없습니다. linkify() 가 화면용으로 붙인 것입니다.)
+//
+// → 답변·근거·조문 영역 안에서 복사할 때는 text/html 을 우리가 직접
+//   덮어써서 링크를 없앱니다. 줄바꿈은 살립니다.
+document.addEventListener("copy", (e) => {
+  const sel = document.getSelection();
+  if(!sel || sel.isCollapsed || !e.clipboardData) return;
+
+  const node = sel.anchorNode;
+  if(!node) return;
+  const inPanel = ["answer", "cites", "laws", "refs"].some(id => {
+    const el = $(id);
+    return el && el.contains(node);
+  });
+  if(!inPanel) return;
+
+  const plain = sel.toString();
+  if(!plain.trim()) return;
+  e.clipboardData.setData("text/plain", plain);
+  // 링크 없는 단순 HTML 로 바꿔 넣습니다. 이것이 없으면 브라우저 기본 동작이
+  // 원래 서식(=링크 포함)을 그대로 넣습니다.
+  e.clipboardData.setData(
+    "text/html",
+    "<div>" + esc(plain).replace(/\r?\n/g, "<br>") + "</div>");
+  e.preventDefault();
+});
+
+// ── 조문 내 검색 ────────────────────────────────
+function applyFind(){
+  const box = $("find");
+  if(!box) return;                 // 검색창을 제거했으므로 아무것도 하지 않습니다
+  const kw = box.value.trim();
+  $("laws").querySelectorAll("mark").forEach(m => m.replaceWith(m.textContent));
+  if(!kw) return;
+  const walker = document.createTreeWalker($("laws"), NodeFilter.SHOW_TEXT);
+  const hits = [];
+  let n;
+  while(n = walker.nextNode()){ if(n.nodeValue.includes(kw)) hits.push(n); }
+  hits.forEach(node => {
+    const frag = document.createDocumentFragment();
+    node.nodeValue.split(kw).forEach((part, i) => {
+      if(i){ const m = document.createElement("mark"); m.textContent = kw; frag.appendChild(m); }
+      frag.appendChild(document.createTextNode(part));
+    });
+    node.replaceWith(frag);
+  });
+  const first = $("laws").querySelector("mark");
+  if(first) first.scrollIntoView({block:"center", behavior:"smooth"});
+}
+
+// ── 예시 질문 ───────────────────────────────────
+document.querySelectorAll(".eg").forEach(b => b.onclick = () => { $("q").value = b.textContent; $("q").focus(); });
+
+// ── 이력 비우기 ─────────────────────────────────
+$("clearhist").onclick = () => {
+  if(!confirm("조회 이력을 모두 지울까요?")) return;
+  history = []; saveHistory(); renderHistory();
+};
+
+// ── 햄스터 ──────────────────────────────────────
+(function(){
+  const h = $("hammy");
+  if(!h) return;
+  const reduce = matchMedia("(prefers-reduced-motion: reduce)").matches;
+  let x = 40, dir = 1, walking = false, timer = null;
+
+  function edge(){ return Math.max(20, innerWidth - 80); }
+
+  function stroll(){
+    if(reduce) return;
+    walking = true;
+    h.classList.remove("idle");
+    const dist = 90 + Math.random() * 260;
+    const target = Math.min(edge(), Math.max(10, x + dir * dist));
+    const dur = Math.abs(target - x) * 13;   // 종종걸음 속도
+    h.style.transition = `left ${dur}ms linear`;
+    h.style.left = target + "px";
+    x = target;
+    if(x >= edge() || x <= 10) dir *= -1;
+    h.classList.toggle("flip", dir < 0);
+    clearTimeout(timer);
+    timer = setTimeout(rest, dur + 60);
+  }
+
+  function rest(){
+    walking = false;
+    h.classList.add("idle");
+    clearTimeout(timer);
+    timer = setTimeout(() => { if(Math.random() < .7) dir *= -1; stroll(); },
+                       1600 + Math.random() * 3400);
+  }
+
+  // 클릭하면 폴짝 + 해바라기씨
+  h.onclick = () => {
+    h.classList.remove("happy");
+    void h.offsetWidth;              // 애니메이션 재시작
+    h.classList.add("happy");
+    const s = document.createElement("div");
+    s.className = "seed";
+    s.textContent = ["🌻","🥜","🌰","🍎"][Math.floor(Math.random()*4)];
+    const r = h.getBoundingClientRect();   // 애니메이션 중 실제 위치
+    s.style.left = (r.left + 20) + "px";
+    document.body.appendChild(s);
+    setTimeout(() => s.remove(), 2400);
+    setTimeout(() => h.classList.remove("happy"), 750);
+  };
+
+  window.hammyBusy = on => {
+    // 조회 중에는 부지런히 왔다갔다
+    if(on){ clearTimeout(timer); stroll(); }
+  };
+
+  setTimeout(rest, 900);
+})();
+
+// 서버 버전 확인 — 화면과 서버가 다른 버전이면 경고
+const UI_VERSION = "1.26";
+fetch("/api/version").then(r => r.json()).then(d => {
+  if(d.version !== UI_VERSION){
+    $("vbadge").innerHTML =
+      `<span style="color:var(--seal);font-weight:700">
+        서버 v${esc(d.version)} / 화면 v${UI_VERSION} — 파이썬 파일도 교체하세요
+       </span> · `;
+  } else {
+    const k = d.keys || {};
+    const keyTxt = k.total > 1
+      ? ` · 키 <b style="color:${k.live ? "var(--accent)" : "var(--seal)"}">${k.live}/${k.total}</b>`
+      : "";
+    const bk = d.backends || {};
+    const localCnt = Object.values(bk).filter(v => v === "local").length;
+    const localTxt = localCnt
+      ? ` · <b style="color:var(--accent)">로컬 ${localCnt}/4</b>` : "";
+    $("vbadge").innerHTML = `v${esc(d.version)}${keyTxt}${localTxt} · `;
+    if(k.blocked && k.blocked.length){
+      $("vbadge").title = "대기 중: " +
+        k.blocked.map(b => `…${b.tail} (${b.wait}초)`).join(", ");
+    }
+  }
+}).catch(() => {});
+
+// 한도 팝업이 뜬 뒤에는 키 상태를 갱신합니다.
+function refreshKeys(){
+  fetch("/api/version").then(r => r.json()).then(d => {
+    const k = d.keys || {};
+    if(k.total > 1){
+      $("vbadge").innerHTML = `v${esc(d.version)} · 키 <b style="color:${
+        k.live ? "var(--accent)" : "var(--seal)"}">${k.live}/${k.total}</b> · `;
+    }
+  }).catch(() => {});
+}
+
+renderHistory();   // 저장된 이력 복원
+$("go").onclick = () => ask(false);
+$("q").addEventListener("keydown", e => {
+  if(e.key === "Enter" && (e.ctrlKey || e.metaKey)) ask(false);
+});
+</script>
+</body>
+</html>
