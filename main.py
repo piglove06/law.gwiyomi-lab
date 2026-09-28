@@ -777,6 +777,19 @@ def _is_repeat_question(q: str, already: set) -> bool:
     for a in already:
         if len(a) >= 8 and (n.startswith(a) or a.startswith(n)):
             return True
+    # ★ 2026-09-29 — 표현만 조금 바꿔 다시 묻는 경우가 3~4라운드 이어졌습니다.
+    #     "누출검사를 언제 받았습니까?" → "마지막 누출검사를 언제 받았습니까?"
+    #     → "주유소 지하 저장시설 누출검사를 언제 받았습니까?"
+    #     "시설 규모는 어떻게 됩니까" → "세차장 규모는 어떻게 됩니까"
+    #   한쪽이 다른 쪽을 통째로 품거나, 글자 유사도가 0.72 이상이면 같은 질문으로 봅니다.
+    #   (실측: 서로 다른 질문끼리는 0.3~0.65, 표현만 바꾼 질문은 0.78 이상)
+    from difflib import SequenceMatcher
+    for a in already:
+        if len(a) >= 6 and len(n) >= 6:
+            if a in n or n in a:
+                return True
+            if SequenceMatcher(None, a, n).ratio() >= 0.72:
+                return True
     return False
 
 

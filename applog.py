@@ -116,7 +116,18 @@ class Session:
 def _new_rid() -> str:
     day = f"{now():%m%d}"
     if _counter["day"] != day:
-        _counter["day"], _counter["n"] = day, 0
+        # 서버가 코드 수정으로 다시 뜨면 번호가 001 부터 다시 시작해 같은 번호가
+        # 겹쳤습니다. 오늘 로그 파일에서 마지막 번호를 찾아 이어서 씁니다.
+        last = 0
+        try:
+            import re
+            path = os.path.join(RUNS, f"lawfinder_{now():%Y%m%d}.log")
+            with open(path, encoding="utf-8", errors="ignore") as f:
+                for m in re.finditer(rf"#{day}-(\d{{3,}})", f.read()):
+                    last = max(last, int(m.group(1)))
+        except OSError:
+            pass
+        _counter["day"], _counter["n"] = day, last
     _counter["n"] += 1
     return f"{day}-{_counter['n']:03d}"
 

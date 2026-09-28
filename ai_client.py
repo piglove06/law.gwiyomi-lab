@@ -1362,6 +1362,15 @@ def clarify(question: str, answered: str = "", catalog: str = "") -> list[dict]:
         # 단 "예"/"네" 는 한 글자여도 정상 보기입니다.
         left = [o for o in left
                 if len(o.strip()) >= 2 or o.strip() in ("예", "네")]
+        # ★ 2026-09-29 — "모름" 계열 보기가 둘 이상이면("모르겠음 / 모름") 하나만 남겨 맨 뒤로.
+        unk = [o for o in left if _is_unknown_option(o)]
+        if unk:
+            left = [o for o in left if not _is_unknown_option(o)] + ["모름"]
+        # ★ 2026-09-29 — 물음이 아닌 질문("우려기준 초과")은 버립니다.
+        #   사용자가 무엇을 골라야 하는지 알 수 없습니다.
+        if not re.search(r"(\?|？|까|요|나|가|지|니|죠)\s*$", item["question"].strip()):
+            _dbg(f"[clarify] 물음이 아닌 질문 제거: {item['question'][:40]}")
+            continue
         # ★ 2026-09-29 — "어느 법이 적용되냐" 를 묻는 항목은 버립니다.
         #   질문자는 법을 모르고, 법을 가리는 건 이 도구의 일입니다.
         #   실제 사례: 질문 "토양환경보전법" / 보기 "광산피해의 … 법률 | 모름"
