@@ -13,6 +13,14 @@
     "지금 한 번 더 돌려봐" 가 필요하면 `_eval\\RUN` 이라는 빈 파일만
     만들어 두면 됩니다. 버튼을 누를 사람이 필요 없습니다.
 
+    커밋 (★ 2026-09-29 개편)
+      · 소스 변경/RUN → 테스트를 **먼저** 돌리고, 결과를 메시지 끝에 붙여 커밋·푸시
+          예) fix: 소스 수정 (main.py) [eval 6/7]
+        서버가 꺼져 있으면 테스트 없이 커밋합니다 ([eval 생략]).
+      · `_eval\\COMMIT` 파일 → 그 안에 적힌 메시지로 바로 커밋·푸시하고 파일을 지웁니다.
+        클로드는 PC 에서 git 을 직접 못 돌리므로, 수정 후 이 파일로 커밋을 요청합니다.
+      · 그 밖의 파일(README, .bat 등)만 바뀌어도 60초 동안 더 안 바뀌면 커밋합니다.
+
     결과는 항상 같은 이름으로도 남깁니다.
         _eval\\latest.md      ← 최신 보고서 (덮어씀. 이것만 보면 됩니다)
         _eval\\latest.json
@@ -42,11 +50,13 @@ import time
 import urllib.error
 import urllib.parse
 import urllib.request
-from datetime import datetime
+from datetime import datetime, timedelta, timezone
 
 HERE = os.path.dirname(os.path.abspath(__file__))
 OUTDIR = os.path.join(HERE, "_eval")
 RUNFILE = os.path.join(OUTDIR, "RUN")
+COMMITFILE = os.path.join(OUTDIR, "COMMIT")
+KST = timezone(timedelta(hours=9))
 STATEFILE = os.path.join(OUTDIR, "_watch_state.json")
 
 # ★ 2026-08-20 — main.py 에 비밀번호 로그인(APP_PASSWORD)이 생긴 뒤로
@@ -114,7 +124,8 @@ WATCH = [
 
 
 def log(msg: str) -> None:
-    print(f"[{datetime.now():%H:%M:%S}] {msg}", flush=True)
+    # 서버 로그와 같은 모양 — 서울 시간 [MM-DD HH:MM:SS]
+    print(f"[{datetime.now(KST):%m-%d %H:%M:%S}] {msg}", flush=True)
 
 
 def snapshot() -> dict:
@@ -212,7 +223,7 @@ def auto_message(files: list[str]) -> str:
     return f"{head} ({shown})"
 
 
-def git_commit_push(push: bool = True) -> None:
+def git_commit_push(push: bool = True, message: str = "", suffix: str = "") -> bool:
     """
     검사 → 커밋 → 푸시. git 이 없거나 저장소가 아니면 조용히 넘어갑니다.
 
@@ -220,14 +231,14 @@ def git_commit_push(push: bool = True) -> None:
       한 번 올라간 키는 지워도 커밋 이력에 남습니다.
     """
     if not os.path.isdir(os.path.join(HERE, ".git")) or not shutil.which("git"):
-        return
+        return False
     try:
         subprocess.run(["git", "add", "-A"], cwd=HERE,
                        capture_output=True, timeout=60)
         r = subprocess.run(["git", "diff", "--cached", "--quiet"], cwd=HERE,
                            capture_output=True, timeout=60)
         if r.returncode == 0:
-            return                               # 바뀐 것 없음
+            return False                         # 바뀐 것 없음
 
         guard = os.path.join(HERE, "check_secrets.py")
         if os.path.exists(guard):
@@ -240,9 +251,9 @@ def git_commit_push(push: bool = True) -> None:
                     print("    " + line, flush=True)
                 subprocess.run(["git", "reset"], cwd=HERE,
                                capture_output=True, timeout=60)
-                return
+                return False
 
-        msg = auto_message(changed_files())
+        msg = (message.strip() or auto_message(changed_files())) + (f" {suffix}" if suffix else "")
         subprocess.run(["git", "commit", "-m", msg], cwd=HERE,
                        capture_output=True, timeout=60)
         log(f"커밋: {msg}")
@@ -258,8 +269,29 @@ def git_commit_push(push: bool = True) -> None:
                 log("push 실패(커밋은 로컬에 남아 있습니다): "
                     + (err[-1][:160] if err else "원인 불명"))
                 log("  첫 push 라면 한 번만: git push -u origin main")
+        return True
     except Exception as e:                       # noqa: BLE001
         log(f"커밋/푸시 건너뜀: {e}")
+        return False
+
+
+def git_status() -> str:
+    """커밋 안 된 변경 목록(git status --porcelain). git 이 없으면 빈 문자열."""
+    if not os.path.isdir(os.path.join(HERE, ".git")) or not shutil.which("git"):
+        return ""
+    try:
+        p = subprocess.run(["git", "status", "--porcelain"], cwd=HERE, capture_output=True,
+                           text=True, encoding="utf-8", errors="replace", timeout=60)
+        return (p.stdout or "").strip()
+    except Exception:                            # noqa: BLE001
+        return ""
+
+
+def eval_score(text: str) -> str:
+    """eval_run.py 출력에서 'N/M 시나리오 통과' 를 찾아 [eval N/M] 으로."""
+    import re
+    m = re.search(r"(\d+)/(\d+) 시나리오 통과", text or "")
+    return f"[eval {m.group(1)}/{m.group(2)}]" if m else "[eval 실패]"
 
 
 def python_exe() -> str:
@@ -267,8 +299,8 @@ def python_exe() -> str:
     return venv if os.path.exists(venv) else sys.executable
 
 
-def run_eval(base: str) -> tuple[int, str]:
-    """eval_run.py 를 돌리고 (종료코드, 최신 보고서 경로) 를 돌려줍니다."""
+def run_eval(base: str) -> tuple[int, str, str]:
+    """eval_run.py 를 돌리고 (종료코드, 최신 보고서 경로, 출력) 을 돌려줍니다."""
     cmd = [python_exe(), os.path.join(HERE, "eval_run.py"), "--base", base]
     log("테스트 시작…")
     try:
@@ -277,11 +309,15 @@ def run_eval(base: str) -> tuple[int, str]:
                            timeout=3600)
     except subprocess.TimeoutExpired:
         log("테스트가 1시간을 넘겨 중단했습니다.")
-        return 3, ""
+        return 3, "", ""
     for line in (p.stdout or "").splitlines():
         print("    " + line, flush=True)
-    if p.returncode not in (0, 1) and p.stderr:
-        print("    " + (p.stderr or "")[:2000], flush=True)
+    # returncode 0/1 은 eval_run.py 가 스스로 정한 "정상 종료"(전체 통과/일부 실패) 값입니다.
+    # 그 외(예: 3 = 처리 안 된 예외로 죽음)는 진짜 크래시이니 원인을 보여줍니다.
+    if p.returncode not in (0, 1):
+        log(f"eval_run.py 가 비정상 종료했습니다 (종료코드 {p.returncode})")
+        if p.stderr:
+            print("    " + (p.stderr or "")[:2000], flush=True)
 
     # 가장 최근 보고서를 latest 로 복사합니다. 늘 같은 경로를 보면 되도록.
     try:
@@ -294,10 +330,10 @@ def run_eval(base: str) -> tuple[int, str]:
             js = src[:-3] + ".json"
             if os.path.exists(js):
                 shutil.copyfile(js, os.path.join(OUTDIR, "latest.json"))
-            return p.returncode, src
+            return p.returncode, src, p.stdout or ""
     except Exception as e:                       # noqa: BLE001
         log(f"보고서 정리 실패: {e}")
-    return p.returncode, ""
+    return p.returncode, "", p.stdout or ""
 
 
 def main() -> int:
@@ -325,12 +361,30 @@ def main() -> int:
         log("로그인 완료 (APP_PASSWORD)" if _AUTH_COOKIE
             else "로그인 실패 — 서버가 뜨면 자동으로 재시도합니다.")
 
+    log(f"  커밋만 요청하려면 이 파일에 메시지를 적으세요 → {COMMITFILE}")
     prev = snapshot()
     pending_since = 0.0
+    last_status, status_since, last_status_check = git_status(), time.time(), time.time()
 
     while True:
         try:
             time.sleep(args.interval)
+
+            # ── (A) 커밋 요청 파일 ─────────────────────────────
+            if os.path.exists(COMMITFILE) and not args.no_commit:
+                try:
+                    with open(COMMITFILE, encoding="utf-8", errors="replace") as f:
+                        msg = f.read().strip().splitlines()
+                    os.remove(COMMITFILE)
+                except OSError:
+                    msg = []
+                title = msg[0].strip() if msg else ""
+                log(f"── 커밋 요청 (COMMIT 파일): {title or '(메시지 없음)'}")
+                if not git_commit_push(push=not args.no_push, message=title):
+                    log("커밋할 변경이 없습니다.")
+                last_status, status_since = git_status(), time.time()
+                prev = snapshot()
+                continue
 
             reason = ""
             if os.path.exists(RUNFILE):
@@ -352,20 +406,36 @@ def main() -> int:
                     reason = "소스 변경"
                     pending_since = 0.0
 
+            # ── (C) 소스 외 파일만 바뀐 경우: 60초 동안 그대로면 커밋 ──
+            if not reason and not pending_since and not args.no_commit \
+                    and time.time() - last_status_check >= 30:
+                last_status_check = time.time()
+                st = git_status()
+                if st != last_status:
+                    last_status, status_since = st, time.time()
+                elif st and time.time() - status_since >= 60:
+                    log("── 소스 외 파일 변경을 커밋합니다")
+                    git_commit_push(push=not args.no_push)
+                    last_status, status_since = git_status(), time.time()
+
             if not reason:
                 continue
 
+            # ── (B) 테스트 → 결과를 붙여 커밋 ──────────────────
             log(f"── 실행 ({reason}) " + "─" * 30)
             if not wait_for_server(args.base):
-                log("서버가 응답하지 않아 이번 실행은 건너뜁니다.")
+                log("서버가 응답하지 않아 테스트는 건너뜁니다.")
                 _write_note("서버가 응답하지 않았습니다. start.bat 으로 서버를 켜 주세요.")
+                if not args.no_commit:
+                    git_commit_push(push=not args.no_push, suffix="[eval 생략: 서버 꺼짐]")
+                last_status, status_since = git_status(), time.time()
                 continue
 
+            rc, path, out = run_eval(args.base)
             if not args.no_commit:
-                git_commit_push(push=not args.no_push)
-
-            rc, path = run_eval(args.base)
+                git_commit_push(push=not args.no_push, suffix=eval_score(out))
             prev = snapshot()                    # 커밋이 mtime 을 건드려도 되돌립니다
+            last_status, status_since = git_status(), time.time()
             log(f"완료 (종료코드 {rc}) → _eval\\latest.md")
             log("─" * 46)
 
@@ -383,7 +453,7 @@ def _write_note(msg: str) -> None:
         os.makedirs(OUTDIR, exist_ok=True)
         with open(os.path.join(OUTDIR, "latest.md"), "w", encoding="utf-8") as f:
             f.write(f"# 자동 테스트 — 실행하지 못했습니다\n\n"
-                    f"- 시각: {datetime.now():%Y-%m-%d %H:%M:%S}\n"
+                    f"- 시각: {datetime.now(KST):%Y-%m-%d %H:%M:%S}\n"
                     f"- 사유: {msg}\n")
     except Exception:                            # noqa: BLE001
         pass

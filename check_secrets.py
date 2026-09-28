@@ -40,7 +40,7 @@ ALLOWED_ENV = re.compile(
 
 # 키처럼 생긴 문자열
 PATTERNS = [
-    ("Gemini/Google API 키", re.compile(r"\bAIza[A-Za-z0-9_\-]{30,}")),
+    ("Google API 키",        re.compile(r"\bAIza[A-Za-z0-9_\-]{30,}")),
     ("Google OAuth 토큰",    re.compile(r"\bAQ\.[A-Za-z0-9_\-]{20,}")),
     ("OpenAI 키",           re.compile(r"\bsk-[A-Za-z0-9]{20,}")),
     ("GitHub 토큰",         re.compile(r"\bgh[pousr]_[A-Za-z0-9]{30,}")),

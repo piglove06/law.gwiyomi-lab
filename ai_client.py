@@ -1,16 +1,17 @@
 """
-LLM 호출부. Gemini 와 로컬 모델(Ollama 등)을 단계별로 골라 쓸 수 있습니다.
+LLM 호출부. 로컬 LLM 서버를 OpenAI 호환 API(/v1/chat/completions)로 부릅니다.
 
-  .env 예시 — 답변 생성만 로컬로 돌리고 나머지는 Gemini
-    LLM_BACKEND=gemini
-    LLM_BACKEND_ANSWER=local
-    LOCAL_BASE_URL=http://localhost:11434/v1
-    LOCAL_MODEL=qwen3.5:9b-q4_K_M
+  현재 구성: llama.cpp 의 llama-server + Qwen3.6-35B-A3B (Q4_K_M)
+    - start.bat 이 llama-server 를 같이 띄웁니다 (포트 8080, 컨텍스트 -c 16384).
+    - .env
+        LOCAL_BASE_URL=http://localhost:8080/v1
+        LOCAL_MODEL=Qwen3.6-35B-A3B     (llama-server 는 모델 하나만 쓰므로 표시용)
 
-[검증 상태]
-  - 엔드포인트 URL 과 모델명은 제 기억 기반입니다. 반드시 확인하세요.
-    https://ai.google.dev/gemini-api/docs  에서 현재 모델명을 보고 MODEL 을 맞추세요.
-    모델명이 틀리면 404 가 납니다.
+  Ollama 도 OpenAI 호환 API 를 제공하므로 LOCAL_BASE_URL 을 11434 포트로 바꾸면
+  그대로 쓸 수 있습니다 (LOCAL_MODEL 에 ollama 모델 이름을 넣으세요).
+
+  ★ 2026-09-29 — 클라우드 LLM 경로를 모두 걷어냈습니다. 로컬 전용입니다.
+    키 순회·한도(429) 처리·대체 모델·단계별 백엔드 선택 코드가 함께 빠졌습니다.
 """
 
 import os
@@ -19,132 +20,55 @@ import time
 
 import httpx
 
-# ── 인증키 ────────────────────────────────────────────────────
-# 쉼표로 여러 개를 넣을 수 있습니다. 앞의 키가 한도(429)에 걸리면 다음 키로 넘어갑니다.
-#   GEMINI_API_KEY=키1,키2,키3
-# 한도에 걸린 키는 쿨다운 시간이 지나면 자동으로 다시 후보에 들어옵니다.
-API_KEYS = [k.strip() for k in os.getenv("GEMINI_API_KEY", "").split(",") if k.strip()]
-# 한도(429)에 걸린 키를 쉬게 할 시간(초).
-# 분당 한도(TPM/RPM)는 1분이면 회복되므로 길게 잡을 이유가 없습니다.
-# 짧게 두면 키를 빠르게 돌려쓸 수 있고, 응답에 retryDelay 가 오면 그 값을 우선합니다.
-KEY_COOLDOWN = float(os.getenv("GEMINI_KEY_COOLDOWN", "15"))
-
-# 키별 쿨다운 해제 시각 {키: unix time}
-_key_blocked: dict[str, float] = {}
-
-
-def _live_keys() -> list[str]:
-    """지금 쓸 수 있는 키 목록. 쿨다운이 끝난 키는 자동 복귀합니다."""
-    now = time.time()
-    live = [k for k in API_KEYS if _key_blocked.get(k, 0) <= now]
-    return live or API_KEYS          # 전부 막혔으면 그래도 한 번은 시도
-
-
-def _block_key(key: str, seconds: float = 0, scope: str = ""):
-    # 일일 한도(RPD)는 오늘 안에 안 풀리므로 길게 재웁니다.
-    if scope == "day":
-        seconds = max(seconds, 3600)
-    _key_blocked[key] = time.time() + (seconds or KEY_COOLDOWN)
-    alive = len(_live_keys())
-    print(f"[gemini] 키 …{key[-6:]} 한도 초과 → {int(seconds or KEY_COOLDOWN)}초 대기 "
-          f"(사용 가능 키 {alive}/{len(API_KEYS)})")
-
-
-def key_status() -> dict:
-    """화면에 표시할 키 상태."""
-    now = time.time()
-    return {
-        "total": len(API_KEYS),
-        "live": len(_live_keys()) if API_KEYS else 0,
-        "blocked": [
-            {"tail": k[-6:], "wait": int(_key_blocked[k] - now)}
-            for k in API_KEYS if _key_blocked.get(k, 0) > now
-        ],
-    }
-
-
-# ── 모델 ──────────────────────────────────────────────────────
-# 단계마다 필요한 능력이 다릅니다. 비싼 모델이 필요한 곳에만 쓰세요.
-#   용어 변환 : 쉬움   — 값싼 모델로 충분
-#   되묻기    : 어려움 — 어디서 조문이 갈리는지 판단해야 함
-#   답변 생성 : 중간   — 토큰을 가장 많이 먹는 단계
-MODEL = os.getenv("GEMINI_MODEL", "gemini-2.5-flash")
-MODEL_TERMS   = os.getenv("GEMINI_MODEL_TERMS",   "") or MODEL
-MODEL_CLARIFY = os.getenv("GEMINI_MODEL_CLARIFY", "") or MODEL
-MODEL_ANSWER  = os.getenv("GEMINI_MODEL_ANSWER",  "") or MODEL
-MODEL_SELECT  = os.getenv("GEMINI_MODEL_SELECT",  "") or MODEL
-
-# 주 모델이 과부하(503)일 때 순서대로 시도할 대체 모델.
-FALLBACKS = [m.strip() for m in os.getenv("GEMINI_FALLBACK", "").split(",") if m.strip()]
+import applog
 
 # ── 출력 토큰 상한 ────────────────────────────────────────────
 # 상한이 없으면 모델이 계속 생성합니다.
-# 실측: 용어 변환(두 줄이면 충분)에 4,243 토큰 55초, 되묻기에 9,551 토큰 127초.
 # 단계마다 필요한 분량이 다르므로 따로 잡습니다.
+# (llama-server 에서는 남은 컨텍스트보다 크면 자동으로 줄여서 보냅니다)
 MAXTOK_TERMS   = int(os.getenv("MAXTOK_TERMS",   "300"))    # 두 줄
-MAXTOK_SELECT  = int(os.getenv("MAXTOK_SELECT",  "200"))    # 숫자 나열
+MAXTOK_SELECT  = int(os.getenv("MAXTOK_SELECT",  "400"))    # 번호 나열
 MAXTOK_CLARIFY = int(os.getenv("MAXTOK_CLARIFY", "800"))    # 질문 몇 줄
 MAXTOK_ANSWER  = int(os.getenv("MAXTOK_ANSWER",  "4000"))   # 근거 + 설명
 
-RETRIES = 3          # 503 재시도 횟수
-BACKOFF = 2.0        # 재시도 간격(초). 시도마다 2배로 늘어납니다.
+# 조문 선별에서 받아들일 최대 개수. 프롬프트도 5~20개를 요구합니다.
+# ★ 2026-09-29 — 예전에는 40개까지 받아서, 답변 프롬프트가 컨텍스트(16,384)를
+#   넘는 원인 중 하나였습니다.
+SELECT_MAX = int(os.getenv("SELECT_MAX", "20"))
 
-BASE = "https://generativelanguage.googleapis.com/v1beta/models"
-TIMEOUT = 60.0
-
-# ── 로컬 LLM (Ollama 등 OpenAI 호환 서버) ─────────────────────
-# Ollama 는 /v1 경로로 OpenAI 호환 API 를 제공합니다.
-#   LOCAL_BASE_URL=http://localhost:11434/v1
-#   LOCAL_MODEL=qwen3.5:9b-q4_K_M
-LOCAL_BASE_URL = os.getenv("LOCAL_BASE_URL", "http://localhost:11434/v1").rstrip("/")
-LOCAL_MODEL = os.getenv("LOCAL_MODEL", "")
+# ── 로컬 LLM 서버 ─────────────────────────────────────────────
+LOCAL_BASE_URL = os.getenv("LOCAL_BASE_URL", "http://localhost:8080/v1").rstrip("/")
+LOCAL_MODEL = os.getenv("LOCAL_MODEL", "Qwen3.6-35B-A3B")
 LOCAL_TIMEOUT = float(os.getenv("LOCAL_TIMEOUT", "300"))   # 로컬은 느리므로 넉넉히
+# 서버에서 컨텍스트 길이를 읽지 못할 때 쓸 값. llama-server 의 -c 와 맞추세요.
+LOCAL_CTX_FALLBACK = int(os.getenv("LOCAL_CTX", "16384"))
 
 # 사고 과정(Thinking)을 끌지. 이 프로그램은 형식 준수가 중요하지
 # 추론이 필요한 작업이 아니므로 끄는 편이 훨씬 빠릅니다.
-# 1 이면 Ollama 네이티브 /api/chat 에 think=false 를 보냅니다.
-# (프롬프트에 /no_think 를 붙이는 방식은 Qwen3.5 에서 듣지 않았습니다)
-# Ollama 가 아닌 서버를 쓰면 0 으로 두세요.
+# (프롬프트에 /no_think 를 붙이는 방식은 Qwen 계열에서 듣지 않았습니다)
+#   · llama-server: /v1/chat/completions 에
+#                   chat_template_kwargs={"enable_thinking": false} 를 보냅니다.
+#   · Ollama      : 네이티브 /api/chat 에 think=false 를 보냅니다.
 LOCAL_NO_THINK = os.getenv("LOCAL_NO_THINK", "1") not in ("0", "", "false", "False")
 
-# 1 이면 프롬프트와 응답 전문을 서버 콘솔에 찍습니다.
-# 로컬 모델이 형식을 어떻게 어기는지 확인할 때 켜세요.
+# 어느 서버인지. 비워두면 주소로 판별합니다 (포트 11434 → ollama, 그 외 → llamacpp).
+# llama-server 에는 Ollama 전용 /api/chat 이 없어서 구분이 필요합니다.
+_srv = os.getenv("LOCAL_SERVER", "").strip().lower()
+LOCAL_SERVER = _srv if _srv in ("ollama", "llamacpp") else (
+    "ollama" if ":11434" in LOCAL_BASE_URL else "llamacpp")
+
+# 1 이면 프롬프트와 응답 전문을 _runs/llm_debug_YYYYMMDD.log 에 남깁니다.
+# (콘솔에는 찍지 않습니다 — 콘솔이 읽을 수 없을 만큼 길어졌습니다)
 LLM_DEBUG = os.getenv("LLM_DEBUG", "0") not in ("0", "", "false", "False")
-
-
-# 단계별로 어느 백엔드를 쓸지. gemini | local
-# 비워두면 LLM_BACKEND 값을 따르고, 그것도 없으면 gemini 입니다.
-_DEFAULT_BACKEND = os.getenv("LLM_BACKEND", "gemini").strip().lower()
-
-
-def _backend(stage: str) -> str:
-    v = os.getenv(f"LLM_BACKEND_{stage.upper()}", "").strip().lower()
-    return v or _DEFAULT_BACKEND
-
-
-BACKEND_TERMS   = _backend("terms")
-BACKEND_SELECT  = _backend("select")
-BACKEND_CLARIFY = _backend("clarify")
-BACKEND_ANSWER  = _backend("answer")
-
-# 로컬 백엔드에서 쓸 모델. 단계별로 다르게 지정할 수 있습니다.
-LOCAL_MODEL_TERMS   = os.getenv("LOCAL_MODEL_TERMS",   "") or LOCAL_MODEL
-LOCAL_MODEL_SELECT  = os.getenv("LOCAL_MODEL_SELECT",  "") or LOCAL_MODEL
-LOCAL_MODEL_CLARIFY = os.getenv("LOCAL_MODEL_CLARIFY", "") or LOCAL_MODEL
-LOCAL_MODEL_ANSWER  = os.getenv("LOCAL_MODEL_ANSWER",  "") or LOCAL_MODEL
 
 
 class AiError(Exception):
     pass
 
 
-class QuotaError(AiError):
-    """무료 한도 초과. scope: "minute"(분당) | "day"(일일) | "unknown" """
-
-    def __init__(self, message: str, scope: str = "unknown", retry_after: int = 60):
-        super().__init__(message)
-        self.scope = scope
-        self.retry_after = retry_after
+def _dbg(msg: str) -> None:
+    """파싱 과정 메모. LLM_DEBUG=1 일 때 디버그 파일에만 남깁니다."""
+    applog.debug("parse", msg)
 
 
 # --- 프롬프트 --------------------------------------------------------
@@ -348,70 +272,104 @@ ANSWER_PROMPT = """너는 지방자치단체 공무원이 법령을 확인할 �
 """
 
 
-class BusyError(AiError):
-    """모델 과부하(503). 잠시 후 재시도하면 대개 풀립니다."""
-
-
-def _once(model: str, prompt: str, temperature: float, key: str,
-          max_tokens: int = 0) -> str:
-    """모델 한 번 호출. 실패는 예외로 올립니다."""
-    url = f"{BASE}/{model}:generateContent"
-    payload = {
-        "contents": [{"parts": [{"text": prompt}]}],
-        "generationConfig": {
-            "temperature": temperature,
-            **({"maxOutputTokens": max_tokens} if max_tokens else {}),
-        },
-    }
-    try:
-        resp = httpx.post(url, params={"key": key}, json=payload, timeout=TIMEOUT)
-        resp.raise_for_status()
-    except httpx.HTTPStatusError as e:
-        code = e.response.status_code
-        if code == 429:
-            raise _parse_quota(e.response) from e
-        if code in (500, 502, 503, 504):
-            raise BusyError(f"{model} 과부하/일시장애 ({code})") from e
-        raise AiError(
-            f"Gemini 호출 실패 ({code}). 모델명({model})이나 API 키를 확인하세요. "
-            f"응답: {e.response.text[:250]}"
-        ) from e
-    except httpx.HTTPError as e:
-        raise BusyError(f"{model} 연결 실패: {e}") from e
-
-    data = resp.json()
-    try:
-        return _clean_output(data["candidates"][0]["content"]["parts"][0]["text"])
-    except (KeyError, IndexError) as e:
-        raise AiError(f"Gemini 응답 형식이 예상과 다릅니다: {str(data)[:300]}") from e
-
-
-def _ollama_native_base() -> str:
-    """OpenAI 호환 주소에서 Ollama 네이티브 주소를 만듭니다.
-    http://localhost:11434/v1  ->  http://localhost:11434
+def _server_root() -> str:
+    """OpenAI 호환 주소에서 서버 루트 주소를 만듭니다.
+    http://localhost:8080/v1  ->  http://localhost:8080
     """
     return re.sub(r"/v1/?$", "", LOCAL_BASE_URL)
 
 
+_ctx_cache = {"n": 0, "t": 0.0}
+
+
+def server_ctx() -> int:
+    """
+    llama-server 의 컨텍스트 길이(-c 값). 5분 동안 기억합니다.
+
+    코드에 16384 를 박지 않고 서버에서 읽어서, start.bat 의 -c 만 바꾸면
+    나머지(토큰 예산)가 알아서 따라가게 합니다. 못 읽으면 LOCAL_CTX(기본 16384).
+    """
+    if LOCAL_SERVER != "llamacpp":
+        return LOCAL_CTX_FALLBACK
+    now = time.time()
+    if _ctx_cache["n"] and now - _ctx_cache["t"] < 300:
+        return _ctx_cache["n"]
+    n = 0
+    try:
+        d = httpx.get(f"{_server_root()}/props", timeout=5).json()
+        g = d.get("default_generation_settings") or {}
+        n = int(g.get("n_ctx") or d.get("n_ctx") or 0)
+    except Exception:                                    # noqa: BLE001
+        n = 0
+    if n > 0:
+        _ctx_cache.update(n=n, t=now)
+        return n
+    return LOCAL_CTX_FALLBACK
+
+
+def count_tokens(text: str) -> int:
+    """
+    토큰 수. llama-server 의 /tokenize 로 정확히 셉니다 (빠릅니다, 수 ms).
+    실패하면 글자 수를 그대로 씁니다 — 한국어 법령은 대개 토큰이 글자보다
+    적어서, 넘치지 않는 쪽(과대추정)으로 안전합니다.
+    """
+    if not text:
+        return 0
+    if LOCAL_SERVER == "llamacpp":
+        try:
+            r = httpx.post(f"{_server_root()}/tokenize", json={"content": text}, timeout=30)
+            toks = r.json().get("tokens")
+            if isinstance(toks, list):
+                return len(toks)
+        except Exception:                                # noqa: BLE001
+            pass
+    return len(text)
+
+
+def _call(prompt: str, temperature: float = 0.3, max_tokens: int = 0,
+          stage: str = "llm") -> str:
+    """LLM 한 번 호출. stage 는 로그에 찍힐 단계 이름입니다."""
+    return _call_local(prompt, temperature, LOCAL_MODEL, max_tokens, stage)
+
+
 def _call_local(prompt: str, temperature: float, model: str,
-                max_tokens: int = 0) -> str:
+                max_tokens: int = 0, stage: str = "llm") -> str:
     """
     로컬 LLM 에 요청합니다.
 
-    LOCAL_NO_THINK=1 이면 Ollama 네이티브 API(/api/chat)를 쓰고 think=false 를 보냅니다.
-      · 프롬프트에 /no_think 를 붙이는 방식은 Qwen3.5 에서 동작하지 않았습니다.
-        (server.log 확인 결과 사고 과정이 그대로 생성됨)
-      · think 는 API 파라미터라 모델 지시문과 달리 확실히 적용됩니다.
-    그 외에는 OpenAI 호환 /chat/completions 를 씁니다.
+    LOCAL_SERVER=ollama 이고 LOCAL_NO_THINK=1 이면 Ollama 네이티브 API(/api/chat)를
+    쓰고 think=false 를 보냅니다. 그 외(llama-server 포함)에는 OpenAI 호환
+    /chat/completions 를 씁니다.
+
+    ★ 2026-09-29 — llama-server 는 컨텍스트를 넘는 요청을 잘라서 실행하지 않고
+      400 으로 거절합니다(예전 Ollama 는 **앞부분 지시문을 잘라낸 채** 조용히
+      실행했습니다). 보내기 전에 토큰을 세서
+        · 입력이 컨텍스트를 넘으면 → 보내지 않고 이유를 알립니다
+        · 출력 상한이 남은 자리보다 크면 → 남은 만큼으로 줄입니다
+      (출력도 같은 컨텍스트를 씁니다. 줄이지 않으면 답변 도중에 끊깁니다)
     """
     if not model:
-        raise AiError(
-            "LOCAL_MODEL 이 비어 있습니다. .env 에 LOCAL_MODEL=qwen3.5:9b-q4_K_M 처럼 넣으세요."
-        )
+        if LOCAL_SERVER == "llamacpp":
+            model = "local"          # llama-server 는 모델 하나만 서비스하므로 이름은 무시됩니다
+        else:
+            raise AiError("LOCAL_MODEL 이 비어 있습니다. .env 에 Ollama 모델 이름을 넣으세요.")
 
-    native = LOCAL_NO_THINK
+    n_prompt = None
+    if LOCAL_SERVER == "llamacpp":
+        n_prompt = count_tokens(prompt) + 32             # 채팅 템플릿이 붙이는 토큰 여유
+        ctx = server_ctx()
+        room = ctx - n_prompt
+        if room < 64:
+            applog.llm(stage, n_prompt, 0, 0.0, note="컨텍스트 초과 — 보내지 않음", sent=False)
+            raise AiError(
+                f"프롬프트({n_prompt:,}토큰)가 로컬 LLM 컨텍스트({ctx:,}토큰)를 넘습니다. "
+                f"llama-server 실행 옵션의 -c 값을 늘리거나 질문 범위를 좁혀 주세요.")
+        if not max_tokens or max_tokens > room - 16:
+            max_tokens = room - 16
+
+    native = LOCAL_NO_THINK and LOCAL_SERVER == "ollama"
     if native:
-        url = f"{_ollama_native_base()}/api/chat"
+        url = f"{_server_root()}/api/chat"
         payload = {
             "model": model,
             "messages": [{"role": "user", "content": prompt}],
@@ -432,64 +390,83 @@ def _call_local(prompt: str, temperature: float, model: str,
             "stream": False,
             **({"max_tokens": max_tokens} if max_tokens else {}),
         }
+        if LOCAL_NO_THINK and LOCAL_SERVER == "llamacpp":
+            # llama-server 를 --jinja 로 띄웠을 때 채팅 템플릿에 전달됩니다.
+            # 안 먹으면 llama-server 실행 옵션에 --reasoning-budget 0 을 추가하세요.
+            payload["chat_template_kwargs"] = {"enable_thinking": False}
 
+    applog.debug(stage, f"── 프롬프트 ({n_prompt or '?'} tok, max_tokens={max_tokens}) ──\n{prompt}")
+    t0 = time.time()
+    who = "Ollama" if LOCAL_SERVER == "ollama" else "llama-server"
     try:
         resp = httpx.post(url, json=payload, timeout=LOCAL_TIMEOUT)
         resp.raise_for_status()
     except httpx.ConnectError as e:
-        raise AiError(
-            f"로컬 LLM 서버에 연결하지 못했습니다 ({url}). "
-            f"Ollama 가 실행 중인지 확인하세요. ({e})"
-        ) from e
+        msg = f"로컬 LLM 서버에 연결하지 못했습니다 ({url}). {who} 가 실행 중인지 확인하세요."
+        applog.llm(stage, n_prompt, None, time.time() - t0, note=f"실패: {who} 연결 안 됨")
+        raise AiError(msg) from e
+    except httpx.TimeoutException as e:
+        applog.llm(stage, n_prompt, None, time.time() - t0, note="실패: 시간 초과")
+        raise AiError(f"로컬 LLM 응답이 {LOCAL_TIMEOUT:.0f}초 안에 오지 않았습니다.") from e
     except httpx.HTTPStatusError as e:
-        body = e.response.text[:300]
-        if e.response.status_code == 404:
+        code, body = e.response.status_code, e.response.text[:300]
+        applog.llm(stage, n_prompt, None, time.time() - t0, note=f"실패: HTTP {code}")
+        applog.warn(f"LLM {stage} HTTP {code}: {body}")
+        if code == 404:
+            if LOCAL_SERVER == "llamacpp":
+                raise AiError(
+                    f"llama-server 주소가 맞지 않습니다 ({url}). .env 의 LOCAL_BASE_URL 이 "
+                    f"http://localhost:8080/v1 처럼 /v1 로 끝나는지 확인하세요.") from e
+            raise AiError(f"모델 '{model}' 을(를) 찾지 못했습니다. "
+                          f"'ollama list' 로 설치된 이름을 확인하세요.") from e
+        if code == 400 and "context" in body.lower():
             raise AiError(
-                f"모델 '{model}' 을(를) 찾지 못했습니다. "
-                f"'ollama list' 로 설치된 이름을 확인하세요. 응답: {body}"
-            ) from e
-        if e.response.status_code == 400 and native:
-            raise AiError(
-                f"이 서버가 think 옵션을 받지 않습니다. "
-                f".env 에서 LOCAL_NO_THINK=0 으로 두고 다시 시도하세요. 응답: {body}"
-            ) from e
-        print(f"[local] HTTP {e.response.status_code} — 요청 model={model} "
-              f"max_tokens={max_tokens}\n  응답: {body}", flush=True)
-        raise AiError(f"로컬 LLM 오류 ({e.response.status_code}): {body}") from e
+                "프롬프트가 로컬 LLM 컨텍스트 길이를 넘었습니다. "
+                "llama-server 실행 옵션의 -c 값을 늘리세요(예: -c 24576).") from e
+        if code == 400 and native:
+            raise AiError("이 서버가 think 옵션을 받지 않습니다. "
+                          ".env 에서 LOCAL_NO_THINK=0 으로 두고 다시 시도하세요.") from e
+        raise AiError(f"로컬 LLM 오류 ({code}): {body}") from e
     except httpx.HTTPError as e:
+        applog.llm(stage, n_prompt, None, time.time() - t0, note=f"실패: {type(e).__name__}")
         raise AiError(f"로컬 LLM 호출 실패: {e}") from e
 
+    secs = time.time() - t0
     data = resp.json()
+    thinking = ""
     if native:                                   # /api/chat 응답 구조
         msg = data.get("message") or {}
         text = msg.get("content") or ""
-        if not text.strip():
-            text = msg.get("thinking") or ""
+        thinking = msg.get("thinking") or ""
     else:                                        # /chat/completions 응답 구조
         msg = (data.get("choices") or [{}])[0].get("message") or {}
         text = msg.get("content") or ""
-        if not text.strip():
-            text = msg.get("reasoning_content") or msg.get("reasoning") or ""
+        thinking = msg.get("reasoning_content") or msg.get("reasoning") or ""
+    if not text.strip():
+        text = thinking
+
+    # 사용량·속도 (llama-server: usage/timings, Ollama: *_count)
+    usage = data.get("usage") or {}
+    pt = usage.get("prompt_tokens") or data.get("prompt_eval_count") or n_prompt
+    ct = usage.get("completion_tokens") or data.get("eval_count")
+    tps = (data.get("timings") or {}).get("predicted_per_second")
+    done = data.get("done_reason") if native else \
+        ((data.get("choices") or [{}])[0].get("finish_reason"))
+    finish = "length" if done in ("length", "MAX_TOKENS") else (done or "")
+    note = ""
+    if thinking and LOCAL_NO_THINK:
+        # 생각 모드를 껐는데도 생각 과정이 나왔습니다. 느려지는 주원인입니다.
+        note = f"생각 과정 {len(thinking):,}자 생성됨(끄기 설정이 안 먹음)"
+    applog.llm(stage, pt, ct, secs, finish=finish, tps=tps, note=note)
 
     if not text.strip():
         raise AiError(f"로컬 LLM 이 빈 응답을 돌려줬습니다: {str(data)[:400]}")
 
-    # 상한에 걸려 잘렸는지 알려줍니다. 잘리면 형식이 깨져 파싱이 실패합니다.
-    done = data.get("done_reason") if native else \
-        ((data.get("choices") or [{}])[0].get("finish_reason"))
-    if done in ("length", "MAX_TOKENS"):
-        print(f"[local] ⚠ 출력이 상한({max_tokens})에서 잘렸습니다. "
-              f".env 의 MAXTOK_* 를 올리거나 프롬프트를 줄이세요.", flush=True)
-
     raw = text
     text = _clean_output(text)
-
-    if LLM_DEBUG:
-        think = (data.get("message") or {}).get("thinking") if native else None
-        print(f"\n[local:{model}] ({'native/think=false' if native else 'openai'}) "
-              f"── 응답 원문 ──\n{raw[:1200]}"
-              + (f"\n[local] ── thinking 필드 ──\n{str(think)[:300]}" if think else "")
-              + f"\n[local] ── 정리 후 ──\n{text[:600]}\n", flush=True)
+    applog.debug(stage, f"── 응답 원문 (finish={done}) ──\n{raw}"
+                 + (f"\n── 생각 과정 ──\n{thinking}" if thinking else "")
+                 + f"\n── 정리 후 ──\n{text}")
     return text
 
 
@@ -567,86 +544,6 @@ def _clean_output(text: str) -> str:
     return t.strip()
 
 
-def _call(prompt: str, temperature: float = 0.3, model: str = "",
-          backend: str = "", max_tokens: int = 0) -> str:
-    """
-    키 순회 → 모델 재시도 → 대체 모델 순으로 시도합니다.
-
-    - 429(한도 초과)  : 그 키를 쿨다운 목록에 넣고 다음 키로 넘어갑니다.
-    - 503(과부하)     : 구글 쪽 사정이라 키를 바꿔도 소용없습니다. 잠깐 쉬고 재시도.
-    """
-    if (backend or _DEFAULT_BACKEND) == "local":
-        return _call_local(prompt, temperature, model, max_tokens)
-
-    if not API_KEYS:
-        raise AiError("GEMINI_API_KEY 가 없습니다. .env 를 확인하세요.")
-
-    models = [model or MODEL] + [m for m in FALLBACKS if m != (model or MODEL)]
-    last_busy = None
-    last_quota = None
-
-    for key in _live_keys():
-        for md in models:
-            wait = BACKOFF
-            for attempt in range(RETRIES):
-                try:
-                    return _once(md, prompt, temperature, key, max_tokens)
-                except QuotaError as e:
-                    _block_key(key, e.retry_after, e.scope)
-                    last_quota = e
-                    break                       # 다음 키로
-                except BusyError as e:
-                    last_busy = e
-                    if attempt < RETRIES - 1:
-                        time.sleep(wait)
-                        wait *= 2
-            else:
-                continue                        # 재시도 소진 → 다음 모델
-            if last_quota is not None:
-                break                           # 한도면 모델 바꿔도 소용없음
-        last_quota = None                       # 다음 키에서는 새로 판단
-
-    if last_busy is not None:
-        raise AiError(
-            f"Gemini 서버가 계속 응답하지 않습니다 ({last_busy}). "
-            f"모델 과부하일 가능성이 높습니다. 잠시 후 다시 시도해 주세요."
-        )
-    st = key_status()
-    raise QuotaError(
-        f"등록된 키 {st['total']}개가 모두 한도에 도달했습니다.",
-        scope="minute",
-        retry_after=min([b["wait"] for b in st["blocked"]] or [60]),
-    )
-
-
-def _parse_quota(resp) -> QuotaError:
-    """
-    429 응답에서 분당 한도인지 일일 한도인지 가려냅니다.
-
-    Gemini 는 에러 본문에 quotaId / quotaMetric 같은 필드로 어떤 한도인지 알려주고,
-    RetryInfo 에 retryDelay 를 담아 보내는 경우가 있습니다.
-    형식이 바뀔 수 있으므로 문자열 매칭으로 방어적으로 읽습니다.
-    """
-    body = resp.text or ""
-    low = body.lower()
-
-    scope, retry = "unknown", 60
-    if "perday" in low or "per_day" in low or "daily" in low:
-        scope = "day"
-    elif "perminute" in low or "per_minute" in low or "perminute" in low:
-        scope = "minute"
-        retry = 60
-
-    # retryDelay: "37s" 형태
-    m = re.search(r'"retrydelay"\s*:\s*"(\d+)s"', low)
-    if m:
-        retry = int(m.group(1))
-        if scope == "unknown":
-            scope = "minute" if retry <= 300 else "day"
-
-    return QuotaError("무료 사용 한도에 도달했습니다.", scope=scope, retry_after=retry)
-
-
 # 라벨 표기 흔들림 대응. 모델마다 "법령명" 을 "법령", "법률명" 등으로 씁니다.
 _LABEL_LAW = ("법령명", "법령", "법률명", "법률", "law")
 _LABEL_TERM = ("용어", "법령용어", "키워드", "term", "keyword")
@@ -685,7 +582,9 @@ def _looks_like_law(s: str) -> bool:
     #   헛 조회로 끝나긴 하지만 용어 목록에서 빠져 검색 품질이 떨어집니다.
     if re.search(r"(방법|용법|기법|공법|수법|요법)$", s):
         return False
-    return bool(re.search(r"(법|령|규칙|조례|고시|지침|예규|훈령)$", s))
+    # ★ 2026-09-29 — "…에 관한 법률" 은 '률' 로 끝나서 법령명으로 안 잡혔습니다.
+    #   되묻기 보기에 "광산피해의 방지 및 복구에 관한 법률" 이 그대로 나갔습니다.
+    return bool(re.search(r"(법|법률|령|규칙|조례|고시|지침|예규|훈령)$", s))
 
 
 def extract_terms(question: str) -> dict:
@@ -696,8 +595,7 @@ def extract_terms(question: str) -> dict:
     없으면 줄 단위로 훑어 법령처럼 생긴 것과 아닌 것을 나눕니다.
     """
     raw = _call(TERM_PROMPT.format(question=question), temperature=0,
-                model=(LOCAL_MODEL_TERMS if BACKEND_TERMS == "local" else MODEL_TERMS),
-                backend=BACKEND_TERMS, max_tokens=MAXTOK_TERMS)
+                max_tokens=MAXTOK_TERMS, stage="terms")
 
     out = {"법령명": [], "용어": []}
 
@@ -755,7 +653,7 @@ def extract_terms(question: str) -> dict:
     out["용어"] = out["용어"][:6]
 
     if LLM_DEBUG:
-        print(f"[terms] 파싱 결과: {out}", flush=True)
+        _dbg(f"[terms] 파싱 결과: {out}")
 
     return out
 
@@ -763,8 +661,7 @@ def extract_terms(question: str) -> dict:
 def answer(question: str, context: str) -> str:
     """조문 원문을 근거로 답변 생성."""
     return _call(ANSWER_PROMPT.format(question=question, context=context),
-                 model=(LOCAL_MODEL_ANSWER if BACKEND_ANSWER == "local" else MODEL_ANSWER),
-                 backend=BACKEND_ANSWER, max_tokens=MAXTOK_ANSWER)
+                 max_tokens=MAXTOK_ANSWER, stage="answer")
 
 
 CLARIFY_PROMPT = """너는 지방자치단체 환경 담당 공무원의 법령 질문을 다듬는 도구다.
@@ -782,6 +679,11 @@ CLARIFY_PROMPT = """너는 지방자치단체 환경 담당 공무원의 법령 
 - 용어는 조문에 적힌 **정식 명칭 그대로** 쓴다.
   예) "특정토양오염유발시설"(X) → "특정토양오염관리대상시설"(O)
 - 조문에서 근거를 찾을 수 없는 구분은 묻지 마라.
+- **어느 법령이 적용되는지 묻지 마라. 법령 이름을 질문이나 보기로 쓰지 마라.**
+  질문자는 법을 모른다. 어느 법인지 가리는 것은 이 도구가 할 일이다.
+  나쁜 예) 토양환경보전법|광산피해의 방지 및 복구에 관한 법률|모름
+  대신 그 법들을 가르는 **현장 사실**을 물어라.
+  좋은 예) 오염이 발생한 곳이 어디입니까?|주유소|광산|모름
 
 ━━ 무엇을 물을지 고르는 순서 ━━━━━━━━━━━━━━━━━━━
 아래 A→D 순서로 따진다. **A 가 비어 있으면 A 부터 묻는다.**
@@ -1354,15 +1256,14 @@ def clarify(question: str, answered: str = "", catalog: str = "") -> list[dict]:
     raw = _call(CLARIFY_PROMPT.format(
         question=question, answered=answered or "(없음)",
         catalog=catalog or "(아직 수집된 조문이 없습니다. 일반적인 표현으로만 물으세요.)"),
-        model=(LOCAL_MODEL_CLARIFY if BACKEND_CLARIFY == "local" else MODEL_CLARIFY),
-        backend=BACKEND_CLARIFY, max_tokens=MAXTOK_CLARIFY).strip()
+        max_tokens=MAXTOK_CLARIFY, stage="clarify").strip()
 
     # "OK" 만 나오면 더 물을 게 없다는 뜻입니다.
     # 로컬 모델은 "OK." "OK 입니다" 처럼 덧붙이기도 합니다.
     head = raw.strip().splitlines()[0].strip() if raw.strip() else ""
     if re.match(r"^ok\b", head, re.I) or "|" not in raw:
         if LLM_DEBUG:
-            print(f"[clarify] 더 물을 것 없음 (응답: {head[:60]})", flush=True)
+            _dbg(f"[clarify] 더 물을 것 없음 (응답: {head[:60]})")
         return []
 
     out = []
@@ -1394,7 +1295,7 @@ def clarify(question: str, answered: str = "", catalog: str = "") -> list[dict]:
         #   이걸 안 하면 아래 보정들이 모두 오염된 질문을 기준으로 돕니다.
         q2 = _clean_question(q, opts)
         if q2 != q and LLM_DEBUG:
-            print(f"[clarify] 질문 정리: {q}  →  {q2}", flush=True)
+            _dbg(f"[clarify] 질문 정리: {q}  →  {q2}")
         q = q2
         if len(q) < 4:
             continue
@@ -1408,8 +1309,7 @@ def clarify(question: str, answered: str = "", catalog: str = "") -> list[dict]:
         todo_split = _promote_todo_options(q, opts)
         if todo_split:
             if LLM_DEBUG:
-                print(f"[clarify] 보기가 '할 일' 문장 → 질문 {len(todo_split)}개로 폄",
-                      flush=True)
+                _dbg(f"[clarify] 보기가 '할 일' 문장 → 질문 {len(todo_split)}개로 폄")
             out.extend(todo_split)
             continue
 
@@ -1419,8 +1319,8 @@ def clarify(question: str, answered: str = "", catalog: str = "") -> list[dict]:
         fixed = _repair_all_questions(q, opts)
         if fixed:
             if LLM_DEBUG:
-                print(f"[clarify] 질문·보기가 모두 물음 → 보기로 재구성: "
-                      f"{fixed['question']} / {', '.join(fixed['options'])}", flush=True)
+                _dbg(f"[clarify] 질문·보기가 모두 물음 → 보기로 재구성: "
+                      f"{fixed['question']} / {', '.join(fixed['options'])}")
             out.append(fixed)
             continue
 
@@ -1441,18 +1341,28 @@ def clarify(question: str, answered: str = "", catalog: str = "") -> list[dict]:
     for item in out:
         left = [o for o in item["options"] if not _is_todo_option(o)]
         if len(left) < len(item["options"]) and LLM_DEBUG:
-            print(f"[clarify] '할 일' 보기 {len(item['options']) - len(left)}개 제거: "
-                  f"{item['question'][:30]}", flush=True)
+            _dbg(f"[clarify] '할 일' 보기 {len(item['options']) - len(left)}개 제거: "
+                  f"{item['question'][:30]}")
         # 잘린 조각이 남지 않게 너무 짧은 보기도 버립니다.
         # 단 "예"/"네" 는 한 글자여도 정상 보기입니다.
         left = [o for o in left
                 if len(o.strip()) >= 2 or o.strip() in ("예", "네")]
+        # ★ 2026-09-29 — "어느 법이 적용되냐" 를 묻는 항목은 버립니다.
+        #   질문자는 법을 모르고, 법을 가리는 건 이 도구의 일입니다.
+        #   실제 사례: 질문 "토양환경보전법" / 보기 "광산피해의 … 법률 | 모름"
+        q_bare = re.sub(r"[\s?？.]+$", "", item["question"])
+        law_opts = [o for o in left if _looks_like_law(o.strip())]
+        if _looks_like_law(q_bare) or law_opts:
+            if LLM_DEBUG:
+                _dbg(f"[clarify] 법령 이름을 묻는 항목 제거: {item['question'][:30]} "
+                      f"/ {', '.join(left)[:60]}")
+            continue
         if len(left) >= 2 and re.search(r"[가-힣]", item["question"]):
             cleaned.append({"question": item["question"], "options": left})
     out = cleaned
 
     if LLM_DEBUG:
-        print(f"[clarify] {len(out)}개 질문 파싱 (원문 {len(raw.splitlines())}줄)", flush=True)
+        _dbg(f"[clarify] {len(out)}개 질문 파싱 (원문 {len(raw.splitlines())}줄)")
     return out[:6]
 
 
@@ -1462,7 +1372,9 @@ SELECT_PROMPT = """너는 대한민국 법령 조문을 골라내는 도구다.
 [질문] 에 답하려면 어떤 조문의 본문을 읽어야 하는지 고르라.
 
 출력 형식 — 고른 번호만 쉼표로 나열한다. 다른 말은 쓰지 않는다.
-3,7,12,25
+**질문에 답하는 데 가장 중요한 조문부터** 순서대로 적는다.
+(분량이 넘치면 뒤에 적은 것부터 뺀다)
+25,7,3,12
 
 가장 중요한 규칙 — 조문 제목을 반드시 읽어라:
 - **제목이 질문과 무관하면 절대 고르지 마라.** 번호가 비슷하다고 고르면 안 된다.
@@ -1503,9 +1415,7 @@ def select_articles(question: str, catalog: str) -> list[int]:
     반환: 고른 번호 목록. 실패하면 빈 목록(=전체 사용).
     """
     raw = _call(SELECT_PROMPT.format(question=question, catalog=catalog),
-                temperature=0,
-                model=(LOCAL_MODEL_SELECT if BACKEND_SELECT == "local" else MODEL_SELECT),
-                backend=BACKEND_SELECT, max_tokens=MAXTOK_SELECT)
+                temperature=0, max_tokens=MAXTOK_SELECT, stage="select")
     # 숫자만 뽑습니다. 모델이 설명을 덧붙여도 번호는 건집니다.
     # 다만 "제8조" 같은 조문 번호가 섞이지 않도록, 조/항/호 앞뒤 숫자는 제외합니다.
     cleaned = re.sub(r"제\s*\d+\s*(조|항|호)", " ", raw)
@@ -1516,5 +1426,7 @@ def select_articles(question: str, catalog: str) -> list[int]:
             nums.append(n)
 
     if LLM_DEBUG:
-        print(f"[select] 원문: {raw[:200]}\n[select] 선택: {nums[:40]}", flush=True)
-    return nums[:40]
+        _dbg(f"[select] 원문: {raw[:200]}\n[select] 선택: {nums[:SELECT_MAX]}")
+    if len(nums) > SELECT_MAX:
+        applog.step("조문 선별 상한", f"모델이 {len(nums)}개를 골라 앞 {SELECT_MAX}개만 씁니다")
+    return nums[:SELECT_MAX]

@@ -37,6 +37,17 @@ import urllib.parse
 import urllib.request
 from datetime import datetime
 
+# ★ 2026-08-20 — watch_and_test.py 가 이 파일을 서브프로세스로 돌리면 stdout 이
+#   콘솔이 아니라 파이프로 리다이렉트됩니다. 그러면 Windows 에서 인코딩이
+#   cp949(콘솔 코드페이지)로 잡혀서 ✅/❌/✗ 같은 문자를 못 쓰고 UnicodeEncodeError 로
+#   죽었습니다 (5번째 시나리오에서 처음 실패 항목이 나오며 거기서 죽었습니다).
+#   출력 인코딩을 강제로 UTF-8 로 고정합니다.
+try:
+    sys.stdout.reconfigure(encoding="utf-8", errors="replace")
+    sys.stderr.reconfigure(encoding="utf-8", errors="replace")
+except Exception:                                 # noqa: BLE001
+    pass
+
 HERE = os.path.dirname(os.path.abspath(__file__))
 CASES = os.path.join(HERE, "eval_cases.json")
 
@@ -191,6 +202,7 @@ def run_case(base: str, case: dict, verbose: bool = True) -> dict:
 
     answered = ""
     rounds = []
+    clar_items = []          # 되묻기로 받은 질문·보기 원본 (채점용)
     t0 = time.time()
     data = ask(base, {"question": q, "target": case.get("target", "auto"),
                       "answered": "", "round": 0})
@@ -200,6 +212,7 @@ def run_case(base: str, case: dict, verbose: bool = True) -> dict:
         r += 1
         picked = []
         for a in data["clarify"]:
+            clar_items.append({"question": a.get("question", ""), "options": a.get("options", [])})
             choice = pick_option(a["question"], a.get("options", []), answers, default)
             picked.append(f"{a['question']}: {choice}")
             if verbose:
@@ -215,6 +228,7 @@ def run_case(base: str, case: dict, verbose: bool = True) -> dict:
     data["_elapsed"] = round(time.time() - t0, 1)
     data["_rounds"] = rounds
     data["_answered"] = answered
+    data["_clarify_items"] = clar_items
     return data
 
 
@@ -236,6 +250,8 @@ def grade(case: dict, data: dict) -> dict:
       expect_no_warning : true 면 별표 경고가 뜨면 실패
       expect_warning    : true 면 경고가 없으면 실패
       all_cites_ok      : true 면 인용 검증이 전부 통과해야 함
+      no_law_in_clarify : true 면 되묻기 질문·보기에 법령 이름이 있으면 실패
+                          (2026-09-29 — "토양환경보전법 / 광산피해…법률 / 모름" 사고)
     """
     checks = []
 
@@ -282,6 +298,17 @@ def grade(case: dict, data: dict) -> dict:
         bad = [c for c in cites if not c.get("ok")]
         ck("인용 검증 전부 통과", not bad,
            ", ".join(f"{c.get('law','')} {c.get('label','')}" for c in bad)[:200])
+
+    if case.get("no_law_in_clarify"):
+        def _law_like(t: str) -> bool:
+            t = re.sub(r"[\s?？.]+$", "", str(t or ""))
+            if re.search(r"(방법|용법|기법|공법|수법|요법)$", t):
+                return False
+            return bool(re.search(r"(법|법률|시행령|시행규칙)$", t)) and len(t) >= 4
+        bad = [f"{it['question']} [{' / '.join(it.get('options') or [])}]"
+               for it in (data.get("_clarify_items") or [])
+               if _law_like(it.get("question")) or any(_law_like(o) for o in it.get("options") or [])]
+        ck("되묻기에 법령 이름 없음", not bad, " | ".join(bad)[:200])
 
     if not checks:                               # 기대값을 안 적었으면 최소 확인
         ck("답변이 비어 있지 않음", len(answer.strip()) > 20)
@@ -441,4 +468,13 @@ def main():
 
 
 if __name__ == "__main__":
-    sys.exit(main())
+    try:
+        sys.exit(main())
+    except Exception:                             # noqa: BLE001
+        # ★ 2026-08-20 — 여기서 안 잡으면 파이썬 기본 종료코드가 1 이라,
+        #   "일부 시나리오 실패"(return 1) 랑 "진짜 크래시" 를 구분할 수 없었습니다.
+        #   watch_and_test.py 가 그 둘을 구분해서 크래시일 때만 stderr 를 보여주도록
+        #   크래시는 3 으로 구분해서 종료합니다.
+        import traceback
+        traceback.print_exc()
+        sys.exit(3)

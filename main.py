@@ -13,21 +13,51 @@ import hashlib
 import hmac
 import json
 import urllib.parse
-from datetime import datetime
+from datetime import datetime, timedelta, timezone
 import logging
 import os
 import secrets
 
-# 서버 로그 앞에 시각(연-월-일 시:분:초)을 붙입니다.
+# ── 서버 로그 형식 ──────────────────────────────────────────────
+# ★ 2026-09-29 — 시각을 서울 시간(KST) "[MM-DD HH:MM:SS]" 로 통일합니다.
+#   PC 시간대 설정과 무관하게 찍히고, 질문 블록 로그(applog.py)와 모양이 같습니다.
 logging.basicConfig(
     level=logging.INFO,
-    format="%(asctime)s  %(levelname)-7s %(message)s",
-    datefmt="%Y-%m-%d %H:%M:%S",
+    format="[%(asctime)s] %(levelname)-7s %(message)s",
+    datefmt="%m-%d %H:%M:%S",
 )
+_KST = timezone(timedelta(hours=9))
+for _h in logging.getLogger().handlers:
+    if _h.formatter:
+        _h.formatter.converter = lambda secs: datetime.fromtimestamp(secs, _KST).timetuple()
 for _n in ("uvicorn", "uvicorn.access", "uvicorn.error"):
     _lg = logging.getLogger(_n)
     _lg.handlers.clear()          # uvicorn 기본 포맷을 제거하고
     _lg.propagate = True          # 위 설정을 따르게 합니다
+
+
+class _QuietAccess(logging.Filter):
+    """
+    접근 로그에서 반복되는 정상 요청을 숨깁니다.
+      /static·/favicon  화면 파일
+      /api/version      화면과 자동 테스트 감시자가 수시로 부름
+      /api/ask          질문은 applog 의 START/END 블록으로 따로 보여줌
+    오류(4xx/5xx)는 항상 보여줍니다.
+    """
+    QUIET = ("/static/", "/favicon", "/api/version", "/api/ask")
+
+    def filter(self, record):
+        try:
+            path, status = str(record.args[2]), int(record.args[4])
+            return not (status < 400 and path.startswith(self.QUIET))
+        except Exception:                                  # noqa: BLE001
+            return True
+
+
+logging.getLogger("uvicorn.access").addFilter(_QuietAccess())
+# LLM·법제처 호출마다 찍히던 "HTTP Request: POST …" 줄을 숨깁니다 (오류는 그대로 보임).
+for _n in ("httpx", "httpcore"):
+    logging.getLogger(_n).setLevel(logging.WARNING)
 
 from dotenv import load_dotenv
 
@@ -45,20 +75,24 @@ from fastapi.staticfiles import StaticFiles  # noqa: E402
 from pydantic import BaseModel  # noqa: E402
 
 import ai_client  # noqa: E402
+import applog  # noqa: E402
 import law_client  # noqa: E402
 import pdf_maker  # noqa: E402
 
 # 되묻기 최대 라운드. .env 의 CLARIFY_ROUNDS 로 조절합니다.
-# 라운드마다 Gemini 호출이 1회 늘어납니다. 무료 한도가 넉넉해지면 올리세요.
+# 라운드마다 LLM 호출이 1회 늘어납니다.
 CLARIFY_ROUNDS = int(os.getenv("CLARIFY_ROUNDS", "6"))
 
 # 되묻기 판단에 넘길 조문 목록 줄 수.
 # 로컬 모델은 입력이 길수록 급격히 느려지므로 앞부분만 보여줍니다.
 CLARIFY_CATALOG_LINES = int(os.getenv("CLARIFY_CATALOG_LINES", "60"))
 
-# 답변 생성에 넣을 조문 최대 글자 수. 이것이 토큰 사용량을 좌우합니다.
-# 무료 등급은 분당 토큰(TPM)이 병목이라, 이 값을 줄이는 것이 가장 효과가 큽니다.
-CONTEXT_LIMIT = int(os.getenv("CONTEXT_LIMIT", "60000"))
+# 답변 생성 때 출력(답변)용으로 남겨 둘 토큰 수.
+# ★ 2026-09-29 — 예전에는 조문을 "6만 자" 로 잘랐습니다(CONTEXT_LIMIT, 클라우드 모델 시절 값).
+#   로컬 LLM 컨텍스트(16,384토큰)에는 처음부터 안 맞아 답변 단계가 400 으로 실패했습니다.
+#   이제 llama-server 의 컨텍스트 길이에서 [지시문 + 이 값] 을 뺀 만큼만 조문을 넣습니다.
+#   (MAXTOK_ANSWER 보다 크게 잡을 필요는 없습니다)
+ANSWER_RESERVE = int(os.getenv("ANSWER_RESERVE", "3000"))
 
 # 조문 선별 사용 여부. 0 이면 예전처럼 전체 조문을 넣습니다.
 SELECT_ARTICLES = os.getenv("SELECT_ARTICLES", "1") not in ("0", "false", "False")
@@ -68,7 +102,7 @@ SELECT_ARTICLES = os.getenv("SELECT_ARTICLES", "1") not in ("0", "false", "False
 # 조회 후 지자체기관명으로 한 번 더 걸러냅니다.
 LOCAL_GOV = os.getenv("LOCAL_GOV", "성남시").strip()
 
-VERSION = "1.26"
+VERSION = "1.29"
 
 app = FastAPI(title="법령 조회 도우미", version=VERSION)
 
@@ -436,7 +470,7 @@ def _bp_used_as_basis(text: str) -> set:
 #   게다가 사용자는 "설치 15년 경과" 라고만 했지 날짜를 준 적이 없습니다.
 #   2010년 9월 23일은 모델이 지어낸 날짜입니다.
 #
-#   산수는 프롬프트로 고쳐지지 않습니다. 9B 모델에게 연도 덧셈을 정확히
+#   산수는 프롬프트로 고쳐지지 않습니다. 로컬 모델에게 연도 덧셈을 정확히
 #   시키는 것보다, **나온 답을 코드가 검산**하는 편이 확실합니다.
 _CALC_BLOCK_RE = re.compile(r"【계산】(.*?)(?=【|\Z)", re.S)
 _CALC_DATE_RE = re.compile(r"(\d{4})\s*[년\-\.\/]\s*(\d{1,2})\s*[월\-\.\/]\s*(\d{1,2})\s*일?")
@@ -757,23 +791,9 @@ def _err(msg: str):
     ★ 상태 코드를 200 으로 둡니다.
       Cloudflare 등 프록시가 5xx 응답 본문을 자체 HTML 오류 페이지로 교체해버려,
       실제 오류 메시지가 사용자에게 전달되지 않기 때문입니다.
-      화면은 상태 코드가 아니라 error/quota 필드를 보고 판단합니다.
+      화면은 상태 코드가 아니라 error 필드를 보고 판단합니다.
     """
     return JSONResponse({"error": msg}, status_code=200)
-
-
-def _quota_response(e):
-    """무료 한도 초과를 화면 팝업용 형식으로 돌려줍니다."""
-    if e.scope == "day":
-        title, msg = "오늘 사용 한도를 다 썼습니다", "무료 한도는 하루 단위로 초기화됩니다. 내일 다시 이용해 주세요."
-    elif e.scope == "minute":
-        title, msg = "잠시만 기다려 주세요", f"짧은 시간에 요청이 몰렸습니다. 약 {e.retry_after}초 뒤에 다시 시도해 주세요."
-    else:
-        title, msg = "사용 한도에 도달했습니다", "분당 한도인지 일일 한도인지 확인되지 않았습니다. 5분 뒤에 다시 시도해 보시고, 그래도 안 되면 내일 이용해 주세요."
-    return JSONResponse(
-        {"quota": {"title": title, "message": msg, "scope": e.scope, "retry_after": e.retry_after}},
-        status_code=200,
-    )
 
 
 class PdfRequest(BaseModel):
@@ -814,20 +834,18 @@ def api_pdf(req: PdfRequest):
 
 @app.get("/api/version")
 def api_version():
-    """화면과 서버 버전, 인증키 상태."""
+    """화면·서버 버전과 로컬 LLM 정보. (watch_and_test.py 가 서버 확인용으로도 부릅니다)
+
+    ★ 2026-09-29 — 예전에는 클라우드 API 키 상태(키 끝 6자리 포함)를 돌려줬습니다.
+      로그인을 없앤 뒤로 누구나 볼 수 있어서 뺐습니다.
+      이 주소는 자주 불리므로 llama-server 에 새로 묻지 않고 알고 있는 값만 씁니다.
+    """
     return {
         "version": VERSION,
-        "keys": ai_client.key_status(),
-        "models": {
-            "terms": ai_client.MODEL_TERMS,
-            "clarify": ai_client.MODEL_CLARIFY,
-            "answer": ai_client.MODEL_ANSWER,
-        },
-        "backends": {
-            "terms": ai_client.BACKEND_TERMS,
-            "select": ai_client.BACKEND_SELECT,
-            "clarify": ai_client.BACKEND_CLARIFY,
-            "answer": ai_client.BACKEND_ANSWER,
+        "llm": {
+            "server": ai_client.LOCAL_SERVER,
+            "model": ai_client.LOCAL_MODEL,
+            "ctx": ai_client._ctx_cache.get("n") or ai_client.LOCAL_CTX_FALLBACK,
         },
     }
 
@@ -907,11 +925,11 @@ async def api_ask(req: AskRequest):
     """
     from fastapi.responses import StreamingResponse
 
-    progress: list = []          # _ask_sync 가 단계마다 채웁니다
+    progress = _LoggedSteps()    # _ask_sync 가 단계마다 채웁니다 (서버 로그에도 자동 기록)
 
     async def gen():
         loop = asyncio.get_running_loop()
-        task = loop.run_in_executor(None, _ask_sync, req, progress)
+        task = loop.run_in_executor(None, _ask_logged, req, progress)
         sent = 0
         idle = 0
         while not task.done():
@@ -937,8 +955,8 @@ async def api_ask(req: AskRequest):
             yield json.dumps({"progress": progress[sent]}, ensure_ascii=False) + "\n"
             sent += 1
 
-        # ★ 2026-08-19 — _ask_sync 는 오류·한도 경로에서 JSONResponse **객체**를
-        #   돌려줍니다(_err / _quota_response). 이 엔드포인트는 예전에는 그것을
+        # ★ 2026-08-19 — _ask_sync 는 오류 경로에서 JSONResponse **객체**를
+        #   돌려줍니다(_err). 이 엔드포인트는 예전에는 그것을
         #   그대로 반환했지만 지금은 NDJSON 으로 직렬화하므로,
         #   "TypeError: Object of type JSONResponse is not JSON serializable" 가
         #   여기서 터집니다. 그것도 try 밖이라 스트림이 중간에 끊기고, 화면에는
@@ -959,6 +977,60 @@ async def api_ask(req: AskRequest):
                              ensure_ascii=False) + "\n"
 
     return StreamingResponse(gen(), media_type="application/x-ndjson")
+
+
+class _LoggedSteps(list):
+    """steps.append 할 때마다 서버 로그에도 한 줄 남깁니다 (applog.step)."""
+
+    def append(self, item):
+        super().append(item)
+        try:
+            applog.step(item.get("name", ""), item.get("detail"))
+        except Exception:                                  # noqa: BLE001
+            pass
+
+
+def _ask_logged(req: AskRequest, progress: list):
+    """
+    _ask_sync 를 질문 블록 로그로 감쌉니다.
+
+      ▶ START  새 질문(round 0)
+        │ 단계들 …
+        │ ? 되묻기 N차 — 사용자 응답 대기     ← 블록을 닫지 않음
+        │ ↩ 되묻기 N차 응답 …                ← 같은 번호로 이어서
+      ■ END    최종 답변 또는 오류
+    """
+    sess = applog.begin((req.question.strip(), req.target), req.question.strip(),
+                        req.round, req.answered or "", req.note or "")
+    try:
+        result = _ask_sync(req, progress)
+    except Exception as e:
+        applog.end(sess, error=f"{type(e).__name__}: {e}")
+        raise
+    try:
+        if isinstance(result, JSONResponse):
+            body = json.loads(bytes(result.body).decode("utf-8"))
+            applog.end(sess, error=body.get("error") or "오류 응답")
+        elif isinstance(result, dict) and result.get("clarify"):
+            applog.pause(sess, result["clarify"], result.get("round"))
+        elif isinstance(result, dict):
+            cites = result.get("citations") or []
+            ans = str(result.get("answer") or "")
+            if cites:
+                ok = sum(1 for c in cites if c.get("ok"))
+                summary = f"답변 {len(ans):,}자 · 인용 검증 {ok}/{len(cites)}"
+            elif result.get("laws") and len(ans) > 100:
+                summary = f"답변 {len(ans):,}자 · 인용 없음"
+            else:
+                summary = f"결과: {ans[:60]}"
+            if result.get("warnings"):
+                summary += f" · 경고 {len(result['warnings'])}건"
+            applog.end(sess, summary=summary)
+        else:
+            applog.clear()
+    except Exception:                                      # noqa: BLE001
+        applog.clear()
+    return result
 
 
 def _ask_sync(req: AskRequest, progress: list):
@@ -989,8 +1061,6 @@ def _ask_sync(req: AskRequest, progress: list):
     # --- 1단계: 법령 용어로 변환 ----------------------------------
     try:
         terms = ai_client.extract_terms(req.question + (f"\n(조건: {answered})" if answered else ""))
-    except ai_client.QuotaError as e:
-        return _quota_response(e)
     except ai_client.AiError as e:
         return _err(str(e))
     steps.append({"name": "검색어 변환", "detail": terms})
@@ -1087,27 +1157,63 @@ def _ask_sync(req: AskRequest, progress: list):
                     except law_client.LawApiError:
                         pass
 
-            if not hit and words:
-                recovered = []
+            # ★ 2026-08-20 — 여기까지는 "AI 가 추측한 이름이 법제처에 있는지"만 봤습니다.
+            #   그런데 **존재는 하지만 엉뚱한 법**을 추측하면(예: 음식점 폐식용유 질문에
+            #   "방사성폐기물 관리법") hit=True 로 확정되고 끝나버립니다. 로컬 모델은
+            #   이런 지식 기반 실수를 대형 클라우드 모델보다 훨씬 자주 냅니다.
+            #   그래서 hit 여부와 무관하게, 추출된 용어로 본문검색을 걸어서
+            #   "실제 조문에 이 말이 들어 있는 법" 과 AI 추측을 항상 교차검증합니다.
+            #   AI 지식이 아니라 법제처 원문이 최종 판단 기준이 됩니다.
+            # ★ 2026-09-29 — 본문검색 결과는 관련도 순이 아니라 **법령명 가나다순**입니다.
+            #   예전엔 상위 3개만 봐서, "토양오염" 으로 찾으면 "광산피해의 방지…"(ㄱ) 가
+            #   "토양환경보전법"(ㅌ) 보다 앞에 와서 맞는 추측을 틀렸다고 뒤집었습니다.
+            #   → 결과 100개 전체를 보고, 여러 용어에 반복해서 걸린 법을 앞세웁니다.
+            hits: dict[str, int] = {}
+            if words:
                 for w in words[:3]:
                     try:
-                        rows = law_client.search(LAW_T, w, scope=2)   # 본문 검색
+                        rows = law_client.search(LAW_T, w, display=100, scope=2)   # 본문 검색
                     except law_client.LawApiError:
                         continue
-                    for r in rows[:3]:
+                    seen_w = set()
+                    for r in rows:
                         nm = law_client.row_name(LAW_T, r)
                         # 시행령·시행규칙은 체계도가 알아서 따라옵니다. 본법만 모읍니다.
                         nm = re.sub(r"\s*(시행령|시행규칙)$", "", nm).strip()
-                        if nm and nm not in recovered and nm not in cand:
-                            recovered.append(nm)
-                if recovered:
+                        if nm and nm not in seen_w:
+                            seen_w.add(nm)
+                            hits[nm] = hits.get(nm, 0) + 1
+            # 많이 걸린 순. 같으면 검색 결과 순서 유지(sorted 는 안정 정렬).
+            recovered = sorted(hits, key=lambda n: -hits[n])
+
+            def _same(a: str, b: str) -> bool:
+                # 부분 일치로 비교하면 "폐기물관리법" 이 "방사성폐기물관리법" 과
+                # 같다고 나옵니다. 공백·하위법령 꼬리만 떼고 정확히 비교합니다.
+                def norm(x: str) -> str:
+                    x = re.sub(r"\s*(시행령|시행규칙)$", "", x.strip())
+                    return x.replace(" ", "")
+                return norm(a) == norm(b)
+
+            if not hit:
+                fresh = [nm for nm in recovered if not any(_same(nm, c) for c in cand)]
+                if fresh:
                     steps.append({
                         "name": "법령명 복구(본문 검색)",
                         "detail": f"'{', '.join(cand)}' 로 체계도를 찾지 못해 "
                                   f"'{', '.join(words[:3])}' 본문 검색 → "
-                                  + ", ".join(recovered[:3]),
+                                  + ", ".join(fresh[:3]),
                     })
-                    cand = recovered[:2] + cand
+                    cand = fresh[:2] + cand
+            elif recovered and not any(_same(nm, c) for nm in recovered for c in cand):
+                # AI 가 추측한 법이 존재는 하지만, 그 용어들이 들어 있는 법 100개 중
+                # 어디에도 없습니다. 본문검색에서 가장 많이 걸린 법을 앞세우되,
+                # 추측도 버리지 않고 2순위로 남깁니다(조문 선별 단계가 가립니다).
+                steps.append({
+                    "name": "법령명 교차검증 실패 → 본문 검색 우선",
+                    "detail": f"AI 추측 '{', '.join(cand)}' 이(가) '{', '.join(words[:3])}' "
+                              f"본문검색 결과에 없어 '{recovered[0]}' 을(를) 먼저 봅니다.",
+                })
+                cand = recovered[:1] + cand
 
         # v1.3 의 조문 선별이 붙어 토큰 부담이 크게 줄었으므로 후보를 2개로 되돌립니다.
         # 1개만 쓰면 "누출검사" 처럼 여러 법에 쓰이는 용어에서 엉뚱한 법 하나만
@@ -1305,9 +1411,8 @@ def _ask_after_search(req, steps, answered, found, flat, catalog, refs):
             brief += f"\n… (외 {len(catalog.splitlines()) - CLARIFY_CATALOG_LINES}개)"
         try:
             asks = ai_client.clarify(req.question, answered, brief)
-        except ai_client.QuotaError as e:
-            return _quota_response(e)
-        except ai_client.AiError:
+        except ai_client.AiError as e:
+            applog.warn(f"되묻기 판단 실패 — 건너뜁니다: {e}")
             asks = []          # 판단 실패는 그냥 통과시킵니다
 
         if asks:
@@ -1316,9 +1421,7 @@ def _ask_after_search(req, steps, answered, found, flat, catalog, refs):
             already = _asked_questions(answered)
             fresh = [a for a in asks if not _is_repeat_question(a["question"], already)]
             if not fresh:
-                if ai_client.LLM_DEBUG:
-                    print(f"[clarify] 이미 물은 질문 {len(asks)}개 반복 감지 → 되묻기 종료",
-                          flush=True)
+                applog.debug("clarify", f"이미 물은 질문 {len(asks)}개 반복 감지 → 되묻기 종료")
                 steps.append({"name": "되묻기 종료",
                               "detail": "같은 질문이 반복돼 다음 단계로 진행"})
             asks = fresh
@@ -1339,11 +1442,23 @@ def _ask_after_search(req, steps, answered, found, flat, catalog, refs):
     picked = None
     if SELECT_ARTICLES and len(flat) > 12:
         try:
-            nums = ai_client.select_articles(req.question, catalog)
+            # ★ 2026-09-29 — 법령이 여럿이면 조문 목록만으로도 수천 토큰입니다.
+            #   컨텍스트를 넘으면 목록 뒤쪽을 잘라서 보냅니다(번호는 그대로라 매핑 유지).
+            cat_sel = catalog
+            n_sel = ai_client.count_tokens(
+                ai_client.SELECT_PROMPT.format(question=req.question, catalog=catalog))
+            lim = ai_client.server_ctx() - ai_client.MAXTOK_SELECT - 64
+            if n_sel > lim:
+                lines = catalog.splitlines()
+                keep_n = max(20, int(len(lines) * lim / n_sel * 0.95))
+                cat_sel = "\n".join(lines[:keep_n])
+                steps.append({"name": "조문 목록 축소",
+                              "detail": f"선별 입력 {n_sel:,}토큰 > 한도 {lim:,} — "
+                                        f"목록 {len(lines)}줄 중 앞 {keep_n}줄만 보냄"})
+            nums = ai_client.select_articles(req.question, cat_sel)
             picked = [flat[n - 1] for n in nums if 1 <= n <= len(flat)]
-        except ai_client.QuotaError as e:
-            return _quota_response(e)
-        except ai_client.AiError:
+        except ai_client.AiError as e:
+            applog.warn(f"조문 선별 실패 — 전체 조문을 씁니다: {e}")
             picked = None                      # 실패하면 전체를 씁니다
         if picked:
             steps.append({"name": "조문 선별",
@@ -1472,99 +1587,145 @@ def _ask_after_search(req, steps, answered, found, flat, catalog, refs):
                               + " — 첨부파일로만 제공되어 수치 확인 불가",
                 })
 
-    # 법령별로 다시 묶어 컨텍스트를 만듭니다.
-    by_law = {}
-    for f, a in use:
-        by_law.setdefault(id(f), (f, []))[1].append(a)
-
+    # ── 조문 본문 렌더링 (use 순서 = 우선순위) ───────────────────
     delegated_hits = 0     # 위임법령 힌트를 실제로 붙인 조문 수 (처리 과정 표시용)
-    context_parts = []
-    for f, arts in by_law.values():
-        lines = []
-        for a in arts:
-            body = a.get("조문내용", "")
-            if a.get("구분") in ("별표", "별지", "서식"):
-                body = body[:2000]
+    units = []             # (법령, 조문, 컨텍스트에 들어갈 텍스트)
+    for f, a in use:
+        body = a.get("조문내용", "")
+        if a.get("구분") in ("별표", "별지", "서식"):
+            body = body[:2000]
 
-            # ★ 위임법령(lsDelegated) 힌트 — 이 조문이 위임한 하위법령 조문번호를
-            #   법제처 데이터로 못박아 둡니다. AI가 시행령·시행규칙 조문번호를
-            #   짐작해서 틀리는 것을 막으려는 목적이라, 조문 개수가 많아도
-            #   법률 조문에만(연결이 있을 때만) 붙습니다.
-            #   ★ 2026-08-18 — 위임 대상은 종류마다 필드 이름이 다르고
-            #     (위임법령제목 / 위임행정규칙제목 / 위임자치법규제목 …),
-            #     행정규칙·자치법규는 조문번호를 아예 주지 않습니다.
-            #     law_client.get_delegated() 가 _kind_raw / _title / _jo 로
-            #     정규화해 주므로 그것을 씁니다.
-            #   ★ `인용법령` 은 위임이 아니라 단순 상호참조입니다. 실측상
-            #     건수가 압도적(455건 중 354건)이라 문장을 나눠 씁니다 —
-            #     한 덩어리로 "위임됩니다" 라고 쓰면 AI가 상호참조를
-            #     하위법령으로 오해합니다.
-            dele = (f.get("delegated") or {}).get(
-                law_client.dele_key(a.get("조문번호", ""), a.get("조문가지번호", "")))
-            if dele:
-                def _cite(d):
-                    title = d.get("_title") or d.get("위임법령제목", "")
-                    if not title:
-                        return ""
-                    jo = (d.get("_jo") or "").lstrip("0")
-                    gaji = (d.get("_jo_gaji") or "").lstrip("0")
-                    if jo:
-                        return f"「{title}」 제{jo}조" + (f"의{gaji}" if gaji else "")
-                    # 행정규칙·자치법규·규정·조약 — 조문번호 없이 이름만 옵니다.
-                    # 조문번호를 지어내지 못하게 "미제공" 이라고 못박습니다.
-                    return f"「{title}」({d.get('_kind_raw') or d.get('_kind') or '위임'}, 조문번호 미제공)"
+        # ★ 위임법령(lsDelegated) 힌트 — 이 조문이 위임한 하위법령 조문번호를
+        #   법제처 데이터로 못박아 둡니다. AI가 시행령·시행규칙 조문번호를
+        #   짐작해서 틀리는 것을 막으려는 목적이라, 조문 개수가 많아도
+        #   법률 조문에만(연결이 있을 때만) 붙습니다.
+        #   ★ 2026-08-18 — 위임 대상은 종류마다 필드 이름이 다르고
+        #     (위임법령제목 / 위임행정규칙제목 / 위임자치법규제목 …),
+        #     행정규칙·자치법규는 조문번호를 아예 주지 않습니다.
+        #     law_client.get_delegated() 가 _kind_raw / _title / _jo 로
+        #     정규화해 주므로 그것을 씁니다.
+        #   ★ `인용법령` 은 위임이 아니라 단순 상호참조입니다. 실측상
+        #     건수가 압도적(455건 중 354건)이라 문장을 나눠 씁니다 —
+        #     한 덩어리로 "위임됩니다" 라고 쓰면 AI가 상호참조를
+        #     하위법령으로 오해합니다.
+        dele = (f.get("delegated") or {}).get(
+            law_client.dele_key(a.get("조문번호", ""), a.get("조문가지번호", "")))
+        if dele:
+            def _cite(d):
+                title = d.get("_title") or d.get("위임법령제목", "")
+                if not title:
+                    return ""
+                jo = (d.get("_jo") or "").lstrip("0")
+                gaji = (d.get("_jo_gaji") or "").lstrip("0")
+                if jo:
+                    return f"「{title}」 제{jo}조" + (f"의{gaji}" if gaji else "")
+                # 행정규칙·자치법규·규정·조약 — 조문번호 없이 이름만 옵니다.
+                # 조문번호를 지어내지 못하게 "미제공" 이라고 못박습니다.
+                return f"「{title}」({d.get('_kind_raw') or d.get('_kind') or '위임'}, 조문번호 미제공)"
 
-                # 위임(시행령·시행규칙·고시…) 과 인용(상호참조) 을 갈라 담습니다.
-                # get_delegated() 가 위임을 앞으로 정렬해 주므로 앞에서 자릅니다.
-                dele_hints, ref_hints = [], []
-                for d in dele:
-                    c = _cite(d)
-                    if not c:
-                        continue
-                    if d.get("_kind_raw") == "인용법령":
-                        if len(ref_hints) < 3 and c not in ref_hints:
-                            ref_hints.append(c)
-                    elif len(dele_hints) < 4 and c not in dele_hints:
-                        dele_hints.append(c)
+            # 위임(시행령·시행규칙·고시…) 과 인용(상호참조) 을 갈라 담습니다.
+            # get_delegated() 가 위임을 앞으로 정렬해 주므로 앞에서 자릅니다.
+            dele_hints, ref_hints = [], []
+            for d in dele:
+                c = _cite(d)
+                if not c:
+                    continue
+                if d.get("_kind_raw") == "인용법령":
+                    if len(ref_hints) < 3 and c not in ref_hints:
+                        ref_hints.append(c)
+                elif len(dele_hints) < 4 and c not in dele_hints:
+                    dele_hints.append(c)
 
-                note = ""
-                if dele_hints:
-                    note += ("\n(※ 법제처 위임법령 데이터: 이 조문은 "
-                             + ", ".join(dele_hints) +
-                             "에 위임됩니다. 하위법령을 인용할 때는 위 이름과 "
-                             "조문번호를 그대로 쓰고, 다른 번호를 짐작해서 쓰지 "
-                             "마십시오. '조문번호 미제공' 이라고 적힌 것은 "
-                             "조문번호를 빼고 이름만 쓰십시오.")
-                if ref_hints:
-                    note += (("\n(※ " if not note else " 또한 ")
-                             + "법제처 데이터상 이 조문이 참조하는 조문: "
-                             + ", ".join(ref_hints)
-                             + " — 이것은 위임이 아니라 상호참조이므로 "
-                               "'하위법령' 이라고 쓰지 마십시오.")
-                if note:
-                    body += note + ")"
-                    delegated_hits += 1
+            note = ""
+            if dele_hints:
+                note += ("\n(※ 법제처 위임법령 데이터: 이 조문은 "
+                         + ", ".join(dele_hints) +
+                         "에 위임됩니다. 하위법령을 인용할 때는 위 이름과 "
+                         "조문번호를 그대로 쓰고, 다른 번호를 짐작해서 쓰지 "
+                         "마십시오. '조문번호 미제공' 이라고 적힌 것은 "
+                         "조문번호를 빼고 이름만 쓰십시오.")
+            if ref_hints:
+                note += (("\n(※ " if not note else " 또한 ")
+                         + "법제처 데이터상 이 조문이 참조하는 조문: "
+                         + ", ".join(ref_hints)
+                         + " — 이것은 위임이 아니라 상호참조이므로 "
+                           "'하위법령' 이라고 쓰지 마십시오.")
+            if note:
+                body += note + ")"
+                delegated_hits += 1
 
-            # ★ 조문마다 법령명을 앞에 붙입니다.
-            #   구분선만 두면 AI 가 아래로 내려갈수록 어느 법령인지 잊고
-            #   법률 제8조를 "시행령 제8조" 로 인용하는 오류가 납니다.
-            lines.append(f"[{f['name']}] {label_of(a)}\n{body}")
-        context_parts.append(
-            f"=== 여기부터는 「{f['name']}」 조문입니다 "
-            f"(시행 {f.get('enforced', '?')}) ===\n" + "\n\n".join(lines)
-        )
+        # ★ 조문마다 법령명을 앞에 붙입니다.
+        #   구분선만 두면 AI 가 아래로 내려갈수록 어느 법령인지 잊고
+        #   법률 제8조를 "시행령 제8조" 로 인용하는 오류가 납니다.
+        units.append((f, a, f"[{f['name']}] {label_of(a)}\n{body}"))
     if delegated_hits:
         steps.append({"name": "위임법령 힌트 추가",
                       "detail": f"법률 조문 {delegated_hits}개에 위임 조문번호 힌트 붙임"})
 
-    context = "\n\n".join(context_parts)
-    raw_len = len(context)
-    if raw_len > CONTEXT_LIMIT:
-        context = context[:CONTEXT_LIMIT] + "\n…(이하 생략)"
+    def _assemble(sel):
+        """법령별로 묶어 컨텍스트 텍스트를 만듭니다 (법령 순서는 use 에 처음 나온 순서)."""
+        by_law = {}
+        for f, a, txt in sel:
+            by_law.setdefault(id(f), (f, []))[1].append(txt)
+        # ★ 조문마다 법령명을 앞에 붙입니다(위 txt). 구분선만 두면 AI 가 아래로
+        #   내려갈수록 어느 법령인지 잊고 법률 제8조를 "시행령 제8조" 로 인용합니다.
+        return "\n\n".join(
+            f"=== 여기부터는 「{f['name']}」 조문입니다 "
+            f"(시행 {f.get('enforced', '?')}) ===\n" + "\n\n".join(txts)
+            for f, txts in by_law.values()), len(by_law)
+
+    # ── 토큰 예산 ────────────────────────────────────────────────
+    # ★ 2026-09-29 — 로컬 LLM 컨텍스트 = 지시문 + 질문 + 조문 + **답변(출력)**.
+    #   예산을 넘으면 중간을 뚝 자르지 않고, 우선순위가 낮은 조문부터 통째로 뺍니다.
+    #   우선순위: 조문 선별이 고른 순서(선별 프롬프트가 중요한 것부터 적게 함).
+    #   별표는 수치가 들어 있어 맨 나중에 뺍니다. 최소 3개는 남깁니다.
+    q_for_answer = req.question + (f"\n(확인된 조건: {answered})" if answered else "")
+    ctx_n = ai_client.server_ctx()
+    overhead = ai_client.count_tokens(
+        ai_client.ANSWER_PROMPT.format(question=q_for_answer, context=""))
+    budget = ctx_n - overhead - min(ai_client.MAXTOK_ANSWER, ANSWER_RESERVE) - 96
+
+    def _is_bp(u):
+        a = u[1]
+        return a.get("구분") in ("별표", "별지", "서식") or \
+            str(a.get("조문제목", "")).startswith(("[별표", "[별지", "[서식"))
+
+    keep = list(units)
+    context, n_laws = _assemble(keep)
+    n_tok = ai_client.count_tokens(context)
+    dropped = []
+    if n_tok > budget:
+        order = [u for u in reversed(keep) if not _is_bp(u)] + \
+                [u for u in reversed(keep) if _is_bp(u)]
+        for _ in range(5):
+            ratio = n_tok / max(1, len(context))          # 글자당 토큰 (실측)
+            need = (n_tok - budget) * 1.1
+            while need > 0 and order and len(keep) > 3:
+                u = order.pop(0)
+                keep.remove(u)
+                dropped.append(u)
+                need -= len(u[2]) * ratio
+            context, n_laws = _assemble(keep)
+            n_tok = ai_client.count_tokens(context)
+            if n_tok <= budget or len(keep) <= 3 or not order:
+                break
+        if n_tok > budget:                                # 최후 수단: 글자 단위로 자름
+            cut = int(len(context) * budget / n_tok * 0.95)
+            context = context[:cut] + "\n…(분량 제한으로 이하 생략)"
+            n_tok = ai_client.count_tokens(context)
+        if dropped:
+            names = [f"「{f['name']}」 {label_of(a)}" for f, a, _ in dropped]
+            # 빠진 조문이 있다는 사실을 모델에게 알립니다. 모르면 그 내용을 기억으로 채웁니다.
+            context += ("\n\n(※ 분량 제한으로 다음 조문은 넣지 못했습니다: " + ", ".join(names[:15])
+                        + (" 외" if len(names) > 15 else "")
+                        + ". 이 조문의 내용이 필요하면 추측하지 말고 원문 확인이 필요하다고 답하십시오.)")
+            steps.append({"name": "조문 분량 조절",
+                          "detail": f"예산 {budget:,}토큰 초과 — {len(dropped)}개 제외: "
+                                    + ", ".join(names[:5]) + (" 외" if len(names) > 5 else "")})
     steps.append({
         "name": "조문 수집",
-        "detail": (f"{len(by_law)}개 법령 / {raw_len}자"
-                   + (f" → {CONTEXT_LIMIT}자로 축소" if raw_len > CONTEXT_LIMIT else "")),
+        "detail": f"{n_laws}개 법령 / 조문 {len(keep)}개 / {n_tok:,}토큰 "
+                  f"(예산 {budget:,}, 컨텍스트 {ctx_n:,})",
     })
     if not context.strip():
         return {"steps": steps, "answer": "조문 본문을 가져오지 못했습니다.", "laws": found}
@@ -1573,8 +1734,6 @@ def _ask_after_search(req, steps, answered, found, flat, catalog, refs):
     try:
         text = ai_client.answer(
             req.question + (f"\n(확인된 조건: {answered})" if answered else ""), context)
-    except ai_client.QuotaError as e:
-        return _quota_response(e)
     except ai_client.AiError as e:
         return _err(str(e))
 

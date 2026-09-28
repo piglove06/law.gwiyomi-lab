@@ -203,19 +203,6 @@
   footer .k{color:var(--ink); font-weight:600}
   footer .cav{margin-top:11px; padding-left:9px; border-left:2px solid var(--seal); color:#6d2e2a}
 
-  /* 한도 초과 팝업 */
-  .modal{position:fixed;inset:0;background:rgba(26,28,32,.45);display:none;
-         align-items:center;justify-content:center;padding:20px;z-index:50}
-  .modal.on{display:flex}
-  .modal-box{background:var(--card);border:1px solid var(--rule);border-radius:4px;
-             max-width:400px;width:100%;padding:26px 26px 22px;
-             box-shadow:0 14px 40px rgba(0,0,0,.18)}
-  .modal-box h3{margin:0 0 9px;font-size:16.5px}
-  .modal-box p{margin:0;font-size:13.5px;color:var(--note);line-height:1.75}
-  .modal-box .cd{margin-top:13px;font-size:22px;font-weight:700;color:var(--seal);
-                 font-variant-numeric:tabular-nums}
-  .modal-box button{margin-top:18px;width:100%}
-
   /* 도구 모음 */
   .tools{display:flex;gap:7px;align-items:center;margin-bottom:9px;flex-wrap:wrap}
   .tools input{flex:1;min-width:130px;padding:6px 9px;border:1px solid var(--rule);
@@ -322,7 +309,7 @@
     @page{ size:A4; margin:14mm 12mm; }
 
     /* 화면에서만 쓰는 것들은 인쇄에서 제외 */
-    #hammy, .seed, .modal, .egs, .tools, .acts, .clarify,
+    #hammy, .seed, .egs, .tools, .acts, .clarify,
     #copy, #clearhist, #pdf, .fullbtn, .hist, footer .cav{ display:none !important; }
     textarea, select, button{ display:none !important; }
 
@@ -413,7 +400,7 @@
       <span class="k">법령 데이터</span> — 법제처 국가법령정보 OPEN API
       (<a href="https://open.law.go.kr" target="_blank" rel="noopener">open.law.go.kr</a>).
       법령·시행령·시행규칙·행정규칙·자치법규를 실시간으로 가져옵니다.<br>
-      <span class="k">답변 생성</span> — Google Gemini. 위에서 가져온 조문 원문만 근거로 씁니다.<br>
+      <span class="k">답변 생성</span> — 이 서버에서 직접 돌리는 로컬 AI 모델(Qwen3.6-35B-A3B). 질문 내용이 외부로 나가지 않으며, 위에서 가져온 조문 원문만 근거로 씁니다.<br>
       <span class="k">서버</span> — Python / FastAPI<br>
       <span class="k">설계 참고</span> —
       <a href="https://github.com/ChangooLee/mcp-kr-legislation" target="_blank" rel="noopener">ChangooLee/mcp-kr-legislation</a>
@@ -458,15 +445,6 @@
     </g>
   </g>
 </svg>
-
-<div class="modal" id="quota">
-  <div class="modal-box">
-    <h3 id="q-title">사용 한도에 도달했습니다</h3>
-    <p id="q-msg"></p>
-    <div class="cd" id="q-cd" style="display:none"></div>
-    <button type="button" id="q-close">확인</button>
-  </div>
-</div>
 
 <script>
 const $ = id => document.getElementById(id);
@@ -1013,15 +991,6 @@ async function ask(skipClarify, extra, round){
       }
     }
 
-    if(data.quota){
-      showQuota(data.quota);
-      refreshKeys();
-      $("answer").className = "empty";
-      $("answer").textContent = "사용 한도로 조회하지 못했습니다.";
-      clearPanels("사용 한도로 조회하지 못했습니다.");
-      return;
-    }
-
     if(data.clarify){
       renderClarify(data.clarify, data.round, data.max_rounds, data.answered);
       $("answer").className = "empty";
@@ -1089,28 +1058,6 @@ async function ask(skipClarify, extra, round){
     $("btntext").textContent = "조문 찾기";
   }
 }
-
-// ── 한도 초과 팝업 ──────────────────────────────
-let cdTimer = null;
-function showQuota(q){
-  $("q-title").textContent = q.title;
-  $("q-msg").textContent = q.message;
-  clearInterval(cdTimer);
-  if(q.scope === "minute" && q.retry_after > 0){
-    let left = q.retry_after;
-    $("q-cd").style.display = "block";
-    const tick = () => {
-      $("q-cd").textContent = left + "초";
-      if(left-- <= 0){ clearInterval(cdTimer); $("q-cd").textContent = "다시 시도할 수 있습니다"; }
-    };
-    tick(); cdTimer = setInterval(tick, 1000);
-  } else {
-    $("q-cd").style.display = "none";
-  }
-  $("quota").classList.add("on");
-}
-$("q-close").onclick = () => { $("quota").classList.remove("on"); clearInterval(cdTimer); };
-$("quota").onclick = e => { if(e.target === $("quota")) $("q-close").click(); };
 
 // ── PDF 저장 ────────────────────────────────────
 // 서버에서 직접 PDF 를 만들어 내려받습니다.
@@ -1287,7 +1234,7 @@ $("clearhist").onclick = () => {
 })();
 
 // 서버 버전 확인 — 화면과 서버가 다른 버전이면 경고
-const UI_VERSION = "1.26";
+const UI_VERSION = "1.29";
 fetch("/api/version").then(r => r.json()).then(d => {
   if(d.version !== UI_VERSION){
     $("vbadge").innerHTML =
@@ -1295,32 +1242,10 @@ fetch("/api/version").then(r => r.json()).then(d => {
         서버 v${esc(d.version)} / 화면 v${UI_VERSION} — 파이썬 파일도 교체하세요
        </span> · `;
   } else {
-    const k = d.keys || {};
-    const keyTxt = k.total > 1
-      ? ` · 키 <b style="color:${k.live ? "var(--accent)" : "var(--seal)"}">${k.live}/${k.total}</b>`
-      : "";
-    const bk = d.backends || {};
-    const localCnt = Object.values(bk).filter(v => v === "local").length;
-    const localTxt = localCnt
-      ? ` · <b style="color:var(--accent)">로컬 ${localCnt}/4</b>` : "";
-    $("vbadge").innerHTML = `v${esc(d.version)}${keyTxt}${localTxt} · `;
-    if(k.blocked && k.blocked.length){
-      $("vbadge").title = "대기 중: " +
-        k.blocked.map(b => `…${b.tail} (${b.wait}초)`).join(", ");
-    }
+    const m = (d.llm && d.llm.model) ? ` · <b style="color:var(--accent)">${esc(d.llm.model)}</b>` : "";
+    $("vbadge").innerHTML = `v${esc(d.version)}${m} · `;
   }
 }).catch(() => {});
-
-// 한도 팝업이 뜬 뒤에는 키 상태를 갱신합니다.
-function refreshKeys(){
-  fetch("/api/version").then(r => r.json()).then(d => {
-    const k = d.keys || {};
-    if(k.total > 1){
-      $("vbadge").innerHTML = `v${esc(d.version)} · 키 <b style="color:${
-        k.live ? "var(--accent)" : "var(--seal)"}">${k.live}/${k.total}</b> · `;
-    }
-  }).catch(() => {});
-}
 
 renderHistory();   // 저장된 이력 복원
 $("go").onclick = () => ask(false);
