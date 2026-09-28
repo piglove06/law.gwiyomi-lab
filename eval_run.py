@@ -250,6 +250,9 @@ def grade(case: dict, data: dict) -> dict:
       expect_no_warning : true 면 별표 경고가 뜨면 실패
       expect_warning    : true 면 경고가 없으면 실패
       all_cites_ok      : true 면 인용 검증이 전부 통과해야 함
+      expect_primary_law: 수집된 법령 중 **첫 번째**(주 법령)에 이 말이 있어야 함
+                          (2026-09-29 — 맞는 법이 2순위로 밀려도 expect_laws 는 통과해서
+                           방사성폐기물·가덕도신공항 법으로 답한 것을 못 잡았습니다)
       no_law_in_clarify : true 면 되묻기 질문·보기에 법령 이름이 있으면 실패
                           (2026-09-29 — "토양환경보전법 / 광산피해…법률 / 모름" 사고)
     """
@@ -283,6 +286,10 @@ def grade(case: dict, data: dict) -> dict:
         ck(f"본문 없어야: {bad}", bad not in answer)
     for want in case.get("expect_laws", []):
         ck(f"법령 수집: {want}", any(want in l for l in laws), ", ".join(laws))
+    if case.get("expect_primary_law"):
+        want = case["expect_primary_law"]
+        first = laws[0] if laws else ""
+        ck(f"주 법령: {want}", bool(first) and want in first, first or "(수집된 법령 없음)")
     for bad in case.get("forbid_laws", []):
         ck(f"법령 제외: {bad}", not any(bad in l for l in laws), ", ".join(laws))
 

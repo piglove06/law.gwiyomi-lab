@@ -979,6 +979,57 @@ async def api_ask(req: AskRequest):
     return StreamingResponse(gen(), media_type="application/x-ndjson")
 
 
+# ── 법령명 비교·체계도 검색 도우미 ─────────────────────────────
+_DOTS_RE = re.compile(r"[·ㆍ・‧∙]")
+
+
+def _law_key(name: str) -> str:
+    """법령명 비교용 키. 공백·가운뎃점(· / ㆍ)·하위법령 꼬리(시행령/시행규칙)를 뗍니다."""
+    n = re.sub(r"\s*(시행령|시행규칙)$", "", str(name or "").strip())
+    return _DOTS_RE.sub("", n).replace(" ", "")
+
+
+def _stmd_rows(name: str) -> list:
+    """
+    법령 체계도(lsStmd) 검색. 가운뎃점 표기가 달라 못 찾으면 바꿔서 다시 찾습니다.
+    법제처 공식 이름은 "소음ㆍ진동관리법" 처럼 ㆍ(한글 아래아)를 쓰는데,
+    AI 는 보통 ·(가운뎃점)으로 적습니다.
+    """
+    tried = []
+    for q in (name, name.replace("·", "ㆍ"), name.replace("ㆍ", "·"), _DOTS_RE.sub("", name)):
+        if not q or q in tried:
+            continue
+        tried.append(q)
+        try:
+            rows = law_client.search("lsStmd", q)
+        except law_client.LawApiError:
+            rows = []
+        if rows:
+            return rows
+    return []
+
+
+def _pick_stmd(rows: list, name: str):
+    """
+    체계도 검색 결과에서 그 법령에 해당하는 줄을 고릅니다.
+
+    ★ 2026-09-29 — 체계도 검색은 **이름 부분일치 + 가나다순**입니다.
+      "폐기물관리법" 으로 찾으면 "방사성폐기물 관리법"(ㅂ)이 "폐기물관리법"(ㅍ)보다
+      앞에 옵니다. 예전에는 첫 줄을 그대로 써서, AI 가 법령명을 **맞게** 추측했는데도
+      방사성폐기물 관리법 체계도 위에서 답했습니다. (음식점 폐식용유·사업장 폐기물
+      질문이 방사성폐기물로 빠지던 사고의 진짜 원인)
+      → 이름이 정확히 같은 줄 → 그 이름으로 끝나는 가장 짧은 줄 → 가장 짧은 줄.
+    """
+    key = _law_key(name)
+    named = [(r, _law_key(law_client.row_name("lsStmd", r))) for r in rows]
+    for r, k in named:
+        if k == key:
+            return r
+    ends = [(r, k) for r, k in named if k.endswith(key)]
+    pool = ends or named
+    return min(pool, key=lambda x: len(x[1]))[0] if pool else None
+
+
 class _LoggedSteps(list):
     """steps.append 할 때마다 서버 로그에도 한 줄 남깁니다 (applog.step)."""
 
@@ -1121,12 +1172,9 @@ def _ask_sync(req: AskRequest, progress: list):
             hit = False
             for nm in cand:
                 base = nm.replace(" 시행령", "").replace(" 시행규칙", "").strip()
-                try:
-                    if law_client.search("lsStmd", base):
-                        hit = True
-                        break
-                except law_client.LawApiError:
-                    pass
+                if _stmd_rows(base):
+                    hit = True
+                    break
 
             # ★ 약칭(법제처 공식 약칭 DB)이면 정식명으로 바꿔 한 번 더 시도합니다.
             #   본문 검색(아래)보다 가볍고 정확해서 먼저 시도합니다.
@@ -1145,7 +1193,7 @@ def _ask_sync(req: AskRequest, progress: list):
                         resolved.append(full)
                 for full in resolved:
                     try:
-                        if law_client.search("lsStmd", full):
+                        if _stmd_rows(full):
                             hit = True
                             steps.append({
                                 "name": "법령명 복구(약칭)",
@@ -1164,17 +1212,27 @@ def _ask_sync(req: AskRequest, progress: list):
             #   그래서 hit 여부와 무관하게, 추출된 용어로 본문검색을 걸어서
             #   "실제 조문에 이 말이 들어 있는 법" 과 AI 추측을 항상 교차검증합니다.
             #   AI 지식이 아니라 법제처 원문이 최종 판단 기준이 됩니다.
-            # ★ 2026-09-29 — 본문검색 결과는 관련도 순이 아니라 **법령명 가나다순**입니다.
-            #   예전엔 상위 3개만 봐서, "토양오염" 으로 찾으면 "광산피해의 방지…"(ㄱ) 가
-            #   "토양환경보전법"(ㅌ) 보다 앞에 와서 맞는 추측을 틀렸다고 뒤집었습니다.
-            #   → 결과 100개 전체를 보고, 여러 용어에 반복해서 걸린 법을 앞세웁니다.
-            hits: dict[str, int] = {}
+            # ★ 2026-09-29 — 본문검색 결과는 관련도 순이 아니라 **법령명 가나다순**이고
+            #   한 번에 최대 100개입니다. 그래서
+            #   · 결과 100개 전체를 보고, 여러 용어에 반복해서 걸린 법을 앞세웁니다.
+            #   · 결과가 100개로 꽉 찬 용어("시정명령", "신고" 같은 흔한 말)는 근거로
+            #     쓰지 않습니다. 가나다순으로 잘려 뒤쪽 법(예: ㅌ·ㅍ·ㅎ)이 안 보이므로,
+            #     "추측한 법이 결과에 없다" 는 판단이 틀립니다.
+            #     (실사고: "소음·진동관리법" 추측이 뒤집혀 "가덕도신공항 건설을 위한
+            #      특별법" 으로 답할 뻔함)
+            hits_all: dict[str, int] = {}
+            hits_info: dict[str, int] = {}
+            info_words, weak_words = [], []
             if words:
                 for w in words[:3]:
                     try:
                         rows = law_client.search(LAW_T, w, display=100, scope=2)   # 본문 검색
                     except law_client.LawApiError:
                         continue
+                    if not rows:
+                        continue
+                    informative = len(rows) < 100
+                    (info_words if informative else weak_words).append(w)
                     seen_w = set()
                     for r in rows:
                         nm = law_client.row_name(LAW_T, r)
@@ -1182,19 +1240,21 @@ def _ask_sync(req: AskRequest, progress: list):
                         nm = re.sub(r"\s*(시행령|시행규칙)$", "", nm).strip()
                         if nm and nm not in seen_w:
                             seen_w.add(nm)
-                            hits[nm] = hits.get(nm, 0) + 1
-            # 많이 걸린 순. 같으면 검색 결과 순서 유지(sorted 는 안정 정렬).
-            recovered = sorted(hits, key=lambda n: -hits[n])
+                            hits_all[nm] = hits_all.get(nm, 0) + 1
+                            if informative:
+                                hits_info[nm] = hits_info.get(nm, 0) + 1
+
+            def _ranked(h: dict) -> list:
+                # 많이 걸린 순. 같으면 검색 결과 순서 유지(sorted 는 안정 정렬).
+                return sorted(h, key=lambda n: -h[n])
 
             def _same(a: str, b: str) -> bool:
                 # 부분 일치로 비교하면 "폐기물관리법" 이 "방사성폐기물관리법" 과
-                # 같다고 나옵니다. 공백·하위법령 꼬리만 떼고 정확히 비교합니다.
-                def norm(x: str) -> str:
-                    x = re.sub(r"\s*(시행령|시행규칙)$", "", x.strip())
-                    return x.replace(" ", "")
-                return norm(a) == norm(b)
+                # 같다고 나옵니다. 공백·가운뎃점·하위법령 꼬리만 떼고 정확히 비교합니다.
+                return _law_key(a) == _law_key(b)
 
             if not hit:
+                recovered = _ranked(hits_info or hits_all)
                 fresh = [nm for nm in recovered if not any(_same(nm, c) for c in cand)]
                 if fresh:
                     steps.append({
@@ -1204,29 +1264,37 @@ def _ask_sync(req: AskRequest, progress: list):
                                   + ", ".join(fresh[:3]),
                     })
                     cand = fresh[:2] + cand
-            elif recovered and not any(_same(nm, c) for nm in recovered for c in cand):
-                # AI 가 추측한 법이 존재는 하지만, 그 용어들이 들어 있는 법 100개 중
-                # 어디에도 없습니다. 본문검색에서 가장 많이 걸린 법을 앞세우되,
-                # 추측도 버리지 않고 2순위로 남깁니다(조문 선별 단계가 가립니다).
-                steps.append({
-                    "name": "법령명 교차검증 실패 → 본문 검색 우선",
-                    "detail": f"AI 추측 '{', '.join(cand)}' 이(가) '{', '.join(words[:3])}' "
-                              f"본문검색 결과에 없어 '{recovered[0]}' 을(를) 먼저 봅니다.",
-                })
-                cand = recovered[:1] + cand
+            elif hits_info and not any(_same(nm, c) for nm in hits_info for c in cand):
+                # AI 가 추측한 법이 존재는 하지만, 드문 용어가 들어 있는 법 어디에도 없습니다.
+                # 다만 근거가 한 법에 모여 있을 때만 뒤집습니다(1등이 3개 이하).
+                # 여러 법이 똑같이 걸리면 가나다순 첫 법을 고르는 셈이라 믿을 수 없습니다.
+                ranked = _ranked(hits_info)
+                best = hits_info[ranked[0]]
+                tops = [n for n in ranked if hits_info[n] == best]
+                if len(tops) <= 3:
+                    steps.append({
+                        "name": "법령명 교차검증 실패 → 본문 검색 우선",
+                        "detail": f"AI 추측 '{', '.join(cand)}' 이(가) '{', '.join(info_words)}' "
+                                  f"본문검색 결과에 없어 '{ranked[0]}' 을(를) 먼저 봅니다.",
+                    })
+                    cand = ranked[:1] + cand
+                else:
+                    steps.append({
+                        "name": "법령명 교차검증 보류",
+                        "detail": f"'{', '.join(info_words)}' 가 든 법이 {len(tops)}개로 고르게 "
+                                  f"퍼져 근거가 약함 — AI 추측 '{', '.join(cand)}' 유지",
+                    })
 
         # v1.3 의 조문 선별이 붙어 토큰 부담이 크게 줄었으므로 후보를 2개로 되돌립니다.
         # 1개만 쓰면 "누출검사" 처럼 여러 법에 쓰이는 용어에서 엉뚱한 법 하나만
         # 잡고 끝나 답이 통째로 틀립니다. (토양환경보전법 → 위험물안전관리법)
         for nm in cand[:2]:
             base = nm.replace(" 시행령", "").replace(" 시행규칙", "").strip()
-            try:
-                rows = law_client.search("lsStmd", base)
-            except law_client.LawApiError:
-                rows = []
-            if not rows:
+            rows = _stmd_rows(base)
+            row = _pick_stmd(rows, base) if rows else None
+            if row is None:
                 continue
-            mst = law_client.pick(rows[0], "법령일련번호")
+            mst = law_client.pick(row, "법령일련번호")
             if not mst:
                 continue
             try:

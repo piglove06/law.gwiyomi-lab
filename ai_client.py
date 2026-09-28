@@ -600,7 +600,9 @@ def extract_terms(question: str) -> dict:
     out = {"법령명": [], "용어": []}
 
     def add(key: str, chunk: str):
-        for item in re.split(r"[,、/·]|\s{2,}", chunk):
+        # ★ 2026-09-29 — 가운뎃점(·)으로는 나누지 않습니다. "소음·진동관리법" 이
+        #   "소음" / "진동관리법" 으로 쪼개져 엉뚱한 법을 찾았습니다.
+        for item in re.split(r"[,、/]|\s{2,}", chunk):
             item = item.strip().strip("\"'“”‘’[]()「」『』`.")
             item = re.sub(r"^\d+[.)]\s*", "", item)      # "1. " 같은 번호 제거
             item = re.sub(r"\s*\(.*$", "", item)          # "용어2 (Wait" 같은 꼬리 제거
@@ -627,7 +629,7 @@ def extract_terms(question: str) -> dict:
             line = re.sub(r"^\d+[.)]\s*", "", line)
             if not line or len(line) > 60:
                 continue
-            for item in re.split(r"[,、/·]", line):
+            for item in re.split(r"[,、/]", line):
                 item = item.strip().strip("`\"'“”[]()")
                 if _is_junk(item):
                     continue
@@ -761,7 +763,7 @@ OK
 #   물음이 빠져 있어서, 부정 보기가 없는 채로 화면에 나갔습니다
 #   ("시설이 …로 지정되었나요?  ○ 지정됨  ○ 모름" — 아니라고 답할 방법이 없음).
 _YESNO_RE = re.compile(
-    r"(해당하나요|해당합니까|인가요|입니까|맞나요|있나요|없나요|하나요|"
+    r"(해당하나요|해당합니까|인가요|입니까|습니까|맞나요|있나요|없나요|하나요|"
     r"되나요|되었나요|됐나요|했나요|받았나요|였나요|이었나요|"
     r"인가|인지|되었는지|맞는가|있는가)\s*\??$")
 
@@ -1204,6 +1206,19 @@ def _fix_yesno(question: str, options: list) -> list:
     #   하필 이게 우리가 **최우선으로 묻게 만든** 질문이라 더 나쁩니다.
     if _WH_RE.search(q):
         return opts
+
+    # ★ 2026-09-29 — 실질 보기가 **부정 하나뿐**인 경우.
+    #   실사례: "악취배출시설이 있습니까?" → [악취배출시설이 없습니다 / 모름]
+    #   "있다" 를 고를 수 없었습니다. 부정 문장을 긍정으로 바꿔 앞에 넣습니다.
+    _UNK = ("모름", "모르겠음", "모르겠어요", "잘모름", "확인안됨", "미확인")
+    real0 = [o for o in opts if o.replace(" ", "") not in _UNK]
+    if len(real0) == 1:
+        neg = real0[0].strip()
+        for tail, pos in (("해당하지 않습니다", "해당합니다"), ("해당하지 않음", "해당함"),
+                          ("없습니다", "있습니다"), ("없음", "있음"), ("아닙니다", "맞습니다"),
+                          ("아님", "맞음"), ("않습니다", "합니다"), ("않음", "함")):
+            if neg.endswith(tail) and neg != tail:
+                return [neg[: -len(tail)] + pos, neg, "모름"]
 
     NO_WORDS = ("아니오", "아니요", "아니다", "해당없음", "해당하지않음",
                 "없음", "아님", "미해당", "비해당")
