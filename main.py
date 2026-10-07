@@ -143,6 +143,11 @@ def _fit_keep_notes(text: str, limit: int) -> str:
 #   (MAXTOK_ANSWER 보다 크게 잡을 필요는 없습니다)
 ANSWER_RESERVE = int(os.getenv("ANSWER_RESERVE", "3000"))
 
+# ★ v1.32 — 체계도로 수집할 법령(법률 + 시행령·시행규칙 묶음) 수. 2 → 3.
+#   후보: 지능형 검색 1위 → AI 추측 중 지능형 검색에도 나온 것 → 지능형 검색 2위 → 나머지 AI 추측.
+#   늘리면 정답 법령을 잡을 확률은 오르고, 조문 목록이 길어져 선별이 느려집니다(질문당 약 10~20초).
+LAW_CANDIDATES = int(os.getenv("LAW_CANDIDATES", "3"))
+
 # 조문 선별 사용 여부. 0 이면 예전처럼 전체 조문을 넣습니다.
 SELECT_ARTICLES = os.getenv("SELECT_ARTICLES", "1") not in ("0", "false", "False")
 
@@ -1357,7 +1362,7 @@ def _ask_sync(req: AskRequest, progress: list):
     # ★ v1.31 — 법제처 지능형 검색: 질문 **원문**을 넣어 관련 조문을 관련도 순으로 받습니다.
     #   로컬 LLM 의 법령명 추측(가끔 없는 법을 지어냄)과 가나다순 본문검색을 보완합니다.
     #   실패하거나 비어 있으면 예전 방식 그대로 갑니다.
-    ai_hits, ai_laws = [], []
+    ai_hits, ai_laws, ai_score = [], [], {}
     if req.target in ("auto", "law"):
         ai_rows = []
         # ★ v1.32 — 같은 질문이 어떤 때는 결과 0건으로 옵니다(실측: 21:18 20건 → 22:04 0건).
@@ -1385,6 +1390,7 @@ def _ask_sync(req: AskRequest, progress: list):
             if nm and r.get("조문번호"):
                 ai_hits.append((nm, r.get("조문번호", ""), r.get("조문가지번호", "")))
         ai_laws = sorted(score, key=lambda b: (-score[b], first[b]))
+        ai_score = score
         if ai_laws:
             steps.append({"name": "지능형 검색",
                           "detail": "관련 법령(관련도 점수 순): "
@@ -1572,8 +1578,16 @@ def _ask_sync(req: AskRequest, progress: list):
             # ★ v1.32 — 나머지 후보 중 지능형 검색에도 나온 것(교차 확인된 것)을 앞으로.
             #   본문검색 복구가 가나다순으로 올린 엉뚱한 법(건설기계 안전기준 등)이 2순위를 차지하지 않게.
             ai_keys = {_law_key(x) for x in ai_laws[:5]}
-            cand = [top] + [c for c in rest if _law_key(c) in ai_keys] \
-                + [c for c in rest if _law_key(c) not in ai_keys]
+            corr = [c for c in rest if _law_key(c) in ai_keys]
+            others = [c for c in rest if _law_key(c) not in ai_keys]
+            # ★ v1.32 — 법령 후보를 3개까지 수집합니다(2026-10-08 사용자 결정 "법령 후보 3개로 확대").
+            #   지능형 검색 2위 법령도 후보에 넣습니다. 단 점수가 낮거나(상위 5위 안 조문이 없음 ≈ 0.2 미만)
+            #   직제·고시처럼 조문 답변 근거가 될 수 없는 것은 넣지 않습니다.
+            ai2 = [b for b in ai_laws[1:3]
+                   if ai_score.get(b, 0) >= 0.2 and not re.search(r"(직제|고시|훈령|예규|규정)$", b)
+                   and not any(_law_key(b) == _law_key(c) for c in [top] + corr)]
+            cand = [top] + corr + ai2[:1] + [c for c in others
+                                              if not any(_law_key(c) == _law_key(x) for x in ai2[:1])]
 
         # v1.3 의 조문 선별이 붙어 토큰 부담이 크게 줄었으므로 후보를 2개로 되돌립니다.
         # 1개만 쓰면 "누출검사" 처럼 여러 법에 쓰이는 용어에서 엉뚱한 법 하나만
@@ -1582,7 +1596,7 @@ def _ask_sync(req: AskRequest, progress: list):
         #   답하던 문제. 실패를 처리 과정에 남기고, 성공 2개가 될 때까지 다음 후보로 넘어갑니다.
         stmd_ok, stmd_fail = 0, []
         for nm in cand:
-            if stmd_ok >= 2:
+            if stmd_ok >= LAW_CANDIDATES:
                 break
             base = nm.replace(" 시행령", "").replace(" 시행규칙", "").strip()
             rows = _stmd_rows(base)
