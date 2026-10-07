@@ -210,8 +210,10 @@ def run_case(base: str, case: dict, verbose: bool = True) -> dict:
     rounds = []
     clar_items = []          # 되묻기로 받은 질문·보기 원본 (채점용)
     t0 = time.time()
+    laws = list(case.get("laws") or [])         # v1.33 — "참고할 법령" 지정 시나리오
+    laws_mode = case.get("laws_mode", "only")   # "only" 이 법령에서만 / "prefer" 우선 참고
     data = ask(base, {"question": q, "target": case.get("target", "auto"),
-                      "answered": "", "round": 0})
+                      "answered": "", "round": 0, "laws": laws, "laws_mode": laws_mode})
 
     r = 0
     while data.get("clarify") and r < max_rounds:
@@ -229,7 +231,7 @@ def run_case(base: str, case: dict, verbose: bool = True) -> dict:
             merged.append(f"추가 설명: {note}")
         answered = " / ".join(merged)
         data = ask(base, {"question": q, "target": case.get("target", "auto"),
-                          "answered": answered, "round": r})
+                          "answered": answered, "round": r, "laws": laws, "laws_mode": laws_mode})
 
     data["_elapsed"] = round(time.time() - t0, 1)
     data["_rounds"] = rounds
@@ -331,9 +333,11 @@ def grade(case: dict, data: dict) -> dict:
             if re.search(r"(방법|용법|기법|공법|수법|요법)$", t):
                 return False
             return bool(re.search(r"(법|법률|시행령|시행규칙)$", t)) and len(t) >= 4
+        # v1.33 — 서버가 일부러 묻는 "어느 법의 규정을 찾으시나요?" 는 법령명을 보기로 쓰는 것이 정상입니다.
         bad = [f"{it['question']} [{' / '.join(it.get('options') or [])}]"
                for it in (data.get("_clarify_items") or [])
-               if _law_like(it.get("question")) or any(_law_like(o) for o in it.get("options") or [])]
+               if not str(it.get("question", "")).startswith("어느 법의 규정")
+               and (_law_like(it.get("question")) or any(_law_like(o) for o in it.get("options") or []))]
         ck("되묻기에 법령 이름 없음", not bad, " | ".join(bad)[:200])
 
     if case.get("no_conclusion_in_clarify"):

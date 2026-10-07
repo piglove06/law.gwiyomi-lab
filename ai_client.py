@@ -429,6 +429,60 @@ def call_json(prompt: str, schema: dict, temperature: float = 0,
     return obj, raw
 
 
+# ── v1.33 — 로컬 LLM 자동 재시작 (워치독) ─────────────────────────
+# 2026-10-08 새벽: llama-server 가 메모리 부족으로 두 번 꺼지고, 한 번은 로그 창이 멈춰
+# (콘솔 "빠른 편집" 선택) 응답 없이 매달렸습니다. 사람이 없으면 평가·서비스가 그대로 멈춥니다.
+# 실제 LLM 호출이 LLM_RESTART_GRACE 초 넘게 계속 실패(연결 안 됨·시간 초과)하면
+# lawfinder-llm 창과 llama-server 를 정리하고 _5_restart_llm.bat 으로 다시 켭니다.
+# Windows 에서만 동작합니다. .env 에 LLM_AUTO_RESTART=0 이면 끕니다. 10분에 한 번까지만.
+LLM_AUTO_RESTART = os.getenv("LLM_AUTO_RESTART", "1") not in ("0", "false", "False")
+LLM_RESTART_GRACE = float(os.getenv("LLM_RESTART_GRACE", "180"))
+_LLM_STATE = {"first_fail": 0.0, "last_restart": 0.0, "fails": 0}
+
+
+def _llm_health(ok: bool, why: str = "") -> None:
+    if ok:
+        _LLM_STATE["first_fail"], _LLM_STATE["fails"] = 0.0, 0
+        return
+    now = time.time()
+    _LLM_STATE["fails"] += 1
+    if not _LLM_STATE["first_fail"]:
+        _LLM_STATE["first_fail"] = now
+        return
+    if (now - _LLM_STATE["first_fail"] >= LLM_RESTART_GRACE and _LLM_STATE["fails"] >= 2
+            and now - _LLM_STATE["last_restart"] >= 600):
+        _LLM_STATE["last_restart"] = now
+        _LLM_STATE["first_fail"], _LLM_STATE["fails"] = 0.0, 0
+        restart_local_llm(f"{why} 상태가 {LLM_RESTART_GRACE:.0f}초 넘게 계속됨")
+
+
+def restart_local_llm(reason: str = "") -> bool:
+    """lawfinder-llm 창(과 그 안의 llama-server·logpipe)을 정리하고 _5_restart_llm.bat 으로 다시 켭니다."""
+    if os.name != "nt" or not LLM_AUTO_RESTART or LOCAL_SERVER != "llamacpp":
+        return False
+    import subprocess
+    here = os.path.dirname(os.path.abspath(__file__))
+    bat = os.path.join(here, "_5_restart_llm.bat")
+    if not os.path.exists(bat):
+        applog.warn(f"LLM 자동 재시작 불가 — {bat} 없음")
+        return False
+    applog.warn(f"LLM 자동 재시작: {reason}")
+    for cmd in (["taskkill", "/F", "/T", "/FI", "WINDOWTITLE eq lawfinder-llm*"],
+                ["taskkill", "/F", "/IM", "llama-server.exe"]):
+        try:
+            subprocess.run(cmd, capture_output=True, timeout=30)
+        except Exception as e:                       # noqa: BLE001
+            applog.warn(f"LLM 자동 재시작 — {' '.join(cmd[:2])} 실패: {e}")
+    time.sleep(3)
+    try:
+        subprocess.Popen(["cmd", "/c", bat], cwd=here,
+                         creationflags=getattr(subprocess, "CREATE_NEW_CONSOLE", 0))
+        return True
+    except Exception as e:                           # noqa: BLE001
+        applog.warn(f"LLM 자동 재시작 실패: {e}")
+        return False
+
+
 def _call_local(prompt: str, temperature: float, model: str,
                 max_tokens: int = 0, stage: str = "llm",
                 schema: dict | None = None) -> str:
@@ -510,9 +564,11 @@ def _call_local(prompt: str, temperature: float, model: str,
     except httpx.ConnectError as e:
         msg = f"로컬 LLM 서버에 연결하지 못했습니다 ({url}). {who} 가 실행 중인지 확인하세요."
         applog.llm(stage, n_prompt, None, time.time() - t0, note=f"실패: {who} 연결 안 됨")
+        _llm_health(False, "연결 안 됨")
         raise AiError(msg) from e
     except httpx.TimeoutException as e:
         applog.llm(stage, n_prompt, None, time.time() - t0, note="실패: 시간 초과")
+        _llm_health(False, "시간 초과")
         raise AiError(f"로컬 LLM 응답이 {LOCAL_TIMEOUT:.0f}초 안에 오지 않았습니다.") from e
     except httpx.HTTPStatusError as e:
         code, body = e.response.status_code, e.response.text[:300]
@@ -544,6 +600,7 @@ def _call_local(prompt: str, temperature: float, model: str,
         raise AiError(f"로컬 LLM 호출 실패: {e}") from e
 
     secs = time.time() - t0
+    _llm_health(True)
     data = resp.json()
     thinking = ""
     if native:                                   # /api/chat 응답 구조

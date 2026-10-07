@@ -20,8 +20,10 @@
 from __future__ import annotations
 
 import os
+import queue
 import re
 import sys
+import threading
 from datetime import datetime, timedelta, timezone
 
 KST = timezone(timedelta(hours=9))
@@ -60,7 +62,7 @@ def save(kind: str, text: str) -> None:
         pass
 
 
-def show(text: str) -> None:
+def _print(text: str) -> None:
     try:
         print(text, flush=True)
     except Exception:                                    # noqa: BLE001
@@ -68,6 +70,50 @@ def show(text: str) -> None:
             print(text.encode("ascii", "replace").decode("ascii"), flush=True)
         except Exception:                                # noqa: BLE001
             pass
+
+
+# ★ v1.33 — 화면 출력은 별도 스레드로. 2026-10-08 새벽, 누군가 이 창을 클릭해 콘솔이 "빠른 편집"
+#   선택 상태가 되자 print 가 멈췄고 → 이 스크립트가 파이프를 안 비워서 → llama-server 가 로그를
+#   못 쓰고 멈췄습니다(요청이 300초씩 시간 초과). 이제 화면이 멈춰도 파이프 읽기·파일 저장은 계속하고,
+#   밀린 화면 줄은 일정량 넘으면 버립니다(파일에는 전부 남음).
+_OUT: "queue.Queue[str | None]" = queue.Queue(maxsize=2000)
+
+
+def _printer() -> None:
+    while True:
+        t = _OUT.get()
+        if t is None:
+            return
+        _print(t)
+
+
+def show(text: str) -> None:
+    try:
+        _OUT.put_nowait(text)
+    except queue.Full:
+        pass
+
+
+def _disable_quick_edit() -> None:
+    """Windows 콘솔의 "빠른 편집 모드" 를 끕니다(창을 클릭해도 출력이 멈추지 않게)."""
+    if os.name != "nt":
+        return
+    try:
+        import ctypes
+        from ctypes import wintypes
+        k32 = ctypes.WinDLL("kernel32", use_last_error=True)
+        k32.CreateFileW.restype = wintypes.HANDLE
+        k32.CreateFileW.argtypes = [wintypes.LPCWSTR, wintypes.DWORD, wintypes.DWORD, wintypes.LPVOID,
+                                    wintypes.DWORD, wintypes.DWORD, wintypes.HANDLE]
+        h = k32.CreateFileW("CONIN$", 0xC0000000, 3, None, 3, 0, None)   # 읽기·쓰기, 공유, OPEN_EXISTING
+        if not h or h == ctypes.c_void_p(-1).value:
+            return
+        mode = wintypes.DWORD()
+        if k32.GetConsoleMode(h, ctypes.byref(mode)):
+            k32.SetConsoleMode(h, (mode.value & ~0x0040) | 0x0080)        # QUICK_EDIT 끔, EXTENDED_FLAGS
+        k32.CloseHandle(h)
+    except Exception:                                    # noqa: BLE001
+        pass
 
 
 _pending: dict = {}      # task → 입력 요약 (출력 줄이 오면 합쳐서 한 줄로)
@@ -109,6 +155,9 @@ def format_line(kind: str, line: str) -> str | None:
 
 def main() -> int:
     kind = (sys.argv[1] if len(sys.argv) > 1 else "log").lower()
+    _disable_quick_edit()
+    th = threading.Thread(target=_printer, daemon=True)
+    th.start()
     stream = sys.stdin.buffer
     for raw in iter(stream.readline, b""):
         text = raw.decode("utf-8", "replace").rstrip("\r\n")
@@ -119,6 +168,11 @@ def main() -> int:
             out = text
         if out is not None:
             show(out)
+    try:
+        _OUT.put(None, timeout=2)
+        th.join(timeout=2)
+    except Exception:                                    # noqa: BLE001
+        pass
     return 0
 
 

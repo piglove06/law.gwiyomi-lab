@@ -148,6 +148,49 @@ ANSWER_RESERVE = int(os.getenv("ANSWER_RESERVE", "3000"))
 #   늘리면 정답 법령을 잡을 확률은 오르고, 조문 목록이 길어져 선별이 느려집니다(질문당 약 10~20초).
 LAW_CANDIDATES = int(os.getenv("LAW_CANDIDATES", "3"))
 
+# ★ v1.33 — 법령이 애매하면 사용자에게 "어느 법" 인지 묻습니다(공무원 사용자는 큰 틀의 법을 압니다).
+#   애매 = 지능형 검색 1위 법령의 점수 비중이 LAW_ASK_SHARE 미만 **이고** AI 추측 법령과 1위가 다를 때.
+#   (2026-10-08 평가 25개 기준: 누출검사 2건만 해당, 나머지 21건은 해당 없음·법령 전부 정답)
+LAW_ASK_SHARE = float(os.getenv("LAW_ASK_SHARE", "0.5"))
+LAW_Q = "어느 법의 규정을 찾으시나요?"
+LAW_Q_DIRECT = "직접 입력 (아래 '추가로 알려줄 내용' 칸에 법령명)"
+LAW_Q_UNKNOWN = "모름 (모두 찾아보기)"
+_LAW_TAIL_RE = re.compile(r"(법|법률|시행령|시행규칙|규칙|령)$")
+
+
+def _laws_mode(req) -> str:
+    return "prefer" if str(getattr(req, "laws_mode", "") or "").lower() == "prefer" else "only"
+
+
+def _user_laws(req) -> list:
+    """사용자가 지정한 법령 이름 — 질문 화면의 "참고할 법령" 칸 + 되묻기 "어느 법" 답. 최대 3개."""
+    out = []
+    for x in (getattr(req, "laws", None) or []):
+        x = str(x).strip().strip("「」『』\"' ")
+        # "대기환경보전법 제23조제1항" 처럼 조문까지 적어도 법령 이름만 씁니다(조문은 질문에 적는 칸).
+        x = re.sub(r"\s*제\s*\d+\s*조.*$", "", x).strip().strip("「」『』\"' ")
+        if x:
+            out.append(x)
+    ans = str(getattr(req, "answered", "") or "")
+    m = re.search(re.escape(LAW_Q) + r"\s*:\s*([^/]+)", ans)
+    if m:
+        v = m.group(1).strip()
+        if v.startswith("직접 입력"):
+            for m2 in re.finditer(r"추가 설명:\s*([^/]+)", ans + " / 추가 설명: " + str(req.note or "")):
+                for t in re.split(r"[,，、]|\s{2,}", m2.group(1)):
+                    t = t.strip().strip("「」『』\"' ")
+                    if t and _LAW_TAIL_RE.search(t):
+                        out.append(t)
+        elif not v.startswith("모름"):
+            out.append(v.strip("「」『』\"' "))
+    seen, uniq = set(), []
+    for x in out:
+        k = _law_key(x) if "_law_key" in globals() else x.replace(" ", "")
+        if k not in seen:
+            seen.add(k)
+            uniq.append(x)
+    return uniq[:3]
+
 # 조문 선별 사용 여부. 0 이면 예전처럼 전체 조문을 넣습니다.
 SELECT_ARTICLES = os.getenv("SELECT_ARTICLES", "1") not in ("0", "false", "False")
 
@@ -156,7 +199,7 @@ SELECT_ARTICLES = os.getenv("SELECT_ARTICLES", "1") not in ("0", "false", "False
 # 조회 후 지자체기관명으로 한 번 더 걸러냅니다.
 LOCAL_GOV = os.getenv("LOCAL_GOV", "성남시").strip()
 
-VERSION = "1.32"
+VERSION = "1.33"
 
 app = FastAPI(title="법령 조회 도우미", version=VERSION)
 
@@ -286,6 +329,8 @@ class AskRequest(BaseModel):
     answered: str = ""          # 이전 라운드에서 고른 조건
     round: int = 0              # 되묻기 라운드 (0부터)
     note: str = ""              # 사용자가 직접 적은 추가 설명
+    laws: list[str] = []        # v1.33 — 사용자가 지정한 "참고할 법령" (선택, 최대 3개)
+    laws_mode: str = "only"     # v1.33 — "only": 이 법령에서만 찾기 / "prefer": 우선 참고(다른 법령도 함께)
 
 
 # =====================================================================
@@ -1335,7 +1380,8 @@ def _ask_sync(req: AskRequest, progress: list):
     # 되묻기 라운드가 넘어갈 때마다 아래 1~3단계를 다시 실행하고 있었습니다.
     # 검색 결과는 되묻기 답변과 무관하게 같으므로(질문·대상이 같으면 같은 법령),
     # 조건은 키에서 뺍니다. 조건은 답변 생성에만 쓰입니다.
-    cache_key = (req.question.strip(), req.target)
+    user_laws = _user_laws(req)
+    cache_key = (req.question.strip(), req.target, tuple(user_laws), _laws_mode(req) if user_laws else "")
     # ★ 새 질문(round=0)이면 캐시를 쓰지 않고 반드시 새로 검색합니다.
     #   되묻기 라운드 중(round>0)에만 재사용합니다.
     #   이것이 없으면 이전 질문의 법령이 그대로 남아 엉뚱한 답이 나옵니다.
@@ -1399,6 +1445,43 @@ def _ask_sync(req: AskRequest, progress: list):
         elif ai_rows == []:
             steps.append({"name": "지능형 검색", "detail": "결과 없음"})
 
+    # ★ v1.33 — 법령이 애매하면 첫 라운드에 "어느 법" 인지 묻습니다(조문 수집 전에 — 헛수집을 줄임).
+    if (not user_laws and req.round == 0 and not req.skip_clarify and ai_laws
+            and req.target in ("auto", "law")):
+        tot = sum(ai_score.values()) or 1.0
+        share = ai_score.get(ai_laws[0], 0.0) / tot
+        guess_keys = {_law_key(re.sub(r"\s*(시행령|시행규칙)$", "", n)) for n in names}
+        if share < LAW_ASK_SHARE and _law_key(ai_laws[0]) not in guess_keys:
+            opts = []
+            for b in ai_laws:
+                if len(opts) >= 3:
+                    break
+                if ai_score.get(b, 0) < 0.15 or re.search(r"(직제|고시|훈령|예규|규정|지침)$", b):
+                    continue
+                opts.append(b)
+            for n in names:                       # AI 추측 중 **실제로 있는** 법령
+                if len(opts) >= 4:
+                    break
+                b = re.sub(r"\s*(시행령|시행규칙)$", "", n).strip()
+                if any(_law_key(b) == _law_key(o) for o in opts):
+                    continue
+                rows = _stmd_rows(b)
+                row = _pick_stmd(rows, b) if rows else None
+                if row is not None and _law_key(law_client.row_name("lsStmd", row)) == _law_key(b):
+                    opts.append(b)
+            if opts:
+                steps.append({"name": "법령 확인 필요",
+                              "detail": f"지능형 검색 1위 '{ai_laws[0]}' 비중 {share:.0%}, "
+                                        f"AI 추측 '{', '.join(names) or '없음'}' 와 달라 어느 법인지 묻습니다"})
+                return {
+                    "clarify": [{"question": LAW_Q, "options": opts + [LAW_Q_DIRECT, LAW_Q_UNKNOWN]}],
+                    "round": req.round + 1,
+                    "max_rounds": CLARIFY_ROUNDS + 1,
+                    "answered": answered,
+                    "steps": steps,
+                    "intent": it.as_dict(),
+                }
+
     if not names and not words and not ai_laws:
         return {"steps": steps, "answer": "검색어를 만들지 못했습니다. 질문을 더 구체적으로 써보세요.", "laws": []}
 
@@ -1448,6 +1531,38 @@ def _ask_sync(req: AskRequest, progress: list):
         #   그래서 추측한 이름으로 체계도가 안 잡히면, 용어로 **본문 검색**을 해서
         #   그 말이 실제로 들어 있는 법령의 **진짜 이름**을 법제처에서 받아옵니다.
         #   법령명을 맞힐 필요가 없어집니다.
+        # ★ v1.33 — 사용자가 법령을 지정했으면(화면 입력 또는 "어느 법" 되묻기 답) 그 법령만 수집합니다.
+        user_resolved, user_bad = [], []
+        for u in user_laws:
+            b = re.sub(r"\s*(시행령|시행규칙)$", "", u).strip()
+            hit_name = ""
+            for qn in (b, ):
+                rows = _stmd_rows(qn)
+                exact = [r for r in rows if _law_key(law_client.row_name("lsStmd", r)) == _law_key(qn)]
+                if exact:
+                    hit_name = law_client.row_name("lsStmd", exact[0])
+            if not hit_name:
+                try:
+                    full = law_client.resolve_abbrev(b)
+                except Exception:                         # noqa: BLE001
+                    full = b
+                if full and full != b:
+                    rows = _stmd_rows(full)
+                    exact = [r for r in rows if _law_key(law_client.row_name("lsStmd", r)) == _law_key(full)]
+                    if exact:
+                        hit_name = law_client.row_name("lsStmd", exact[0])
+            if hit_name:
+                if not any(_law_key(hit_name) == _law_key(x) for x in user_resolved):
+                    user_resolved.append(hit_name)
+            else:
+                user_bad.append(u)
+        only_mode = _laws_mode(req) == "only"
+        if user_laws:
+            steps.append({"name": "사용자 지정 법령" + (" (이 법령에서만)" if only_mode else " (우선 참고)"),
+                          "detail": (", ".join(user_resolved) or "확인된 법령 없음")
+                                    + (f" · 찾지 못함: {', '.join(user_bad)}" if user_bad else "")
+                                    + ("" if user_resolved else " — 자동 검색으로 진행")})
+
         cand = list(names[:2])
         if cand:
             hit = False
@@ -1568,7 +1683,7 @@ def _ask_sync(req: AskRequest, progress: list):
 
         # ★ v1.31 — 지능형 검색 1순위 법령을 후보 맨 앞에 둡니다. 로컬 LLM 의 추측은
         #   (체계도에 실제로 있으면) 2순위로 남겨 둡니다 — 둘 다 수집하고 조문 선별이 고릅니다.
-        if ai_laws:
+        if ai_laws and not (user_resolved and only_mode):
             top = ai_laws[0]
             if not any(_law_key(top) == _law_key(c) for c in cand):
                 steps.append({"name": "법령 후보 보정(지능형 검색)",
@@ -1594,9 +1709,19 @@ def _ask_sync(req: AskRequest, progress: list):
         # 잡고 끝나 답이 통째로 틀립니다. (토양환경보전법 → 위험물안전관리법)
         # ★ v1.32 — 후보 하나가 체계도 조회에 실패하면 **조용히 건너뛰고** 나머지 하나로만
         #   답하던 문제. 실패를 처리 과정에 남기고, 성공 2개가 될 때까지 다음 후보로 넘어갑니다.
+        if user_resolved and only_mode:
+            cand = list(user_resolved)
+            cand_limit = len(cand)
+        elif user_resolved:
+            # 우선 참고: 지정 법령을 맨 앞에 두고, 자동 후보로 한 묶음 이상 더 수집합니다.
+            cand = list(user_resolved) + [c for c in cand
+                                          if not any(_law_key(c) == _law_key(u) for u in user_resolved)]
+            cand_limit = max(LAW_CANDIDATES, len(user_resolved) + 1)
+        else:
+            cand_limit = LAW_CANDIDATES
         stmd_ok, stmd_fail = 0, []
         for nm in cand:
-            if stmd_ok >= LAW_CANDIDATES:
+            if stmd_ok >= cand_limit:
                 break
             base = nm.replace(" 시행령", "").replace(" 시행규칙", "").strip()
             rows = _stmd_rows(base)
@@ -1800,7 +1925,8 @@ def _ask_after_search(req, steps, answered, found, flat, catalog, refs, it=None,
         return (f["name"], str(a.get("조문번호", "")), str(a.get("조문가지번호", "")),
                 a.get("조문제목", ""))
 
-    sel_key = ("sel", req.question.strip(), req.target)
+    _ul = _user_laws(req)
+    sel_key = ("sel", req.question.strip(), req.target, tuple(_ul), _laws_mode(req) if _ul else "")
     picked = None
     cached_sel = _cache_get(sel_key) if req.round > 0 else None
     if cached_sel:
@@ -1814,7 +1940,9 @@ def _ask_after_search(req, steps, answered, found, flat, catalog, refs, it=None,
             # ★ 2026-09-29 — 법령이 여럿이면 조문 목록만으로도 수천 토큰입니다.
             #   컨텍스트를 넘으면 목록 뒤쪽을 잘라서 보냅니다(번호는 그대로라 매핑 유지).
             cat_sel = catalog
-            n_sel = ai_client.count_tokens(ai_client.select_prompt(req.question, catalog))
+            q_sel = req.question + (f"\n(사용자가 참고 법령으로 지정: {', '.join(_ul)} — 이 법령의 조문을 우선 고려)"
+                                    if _ul else "")
+            n_sel = ai_client.count_tokens(ai_client.select_prompt(q_sel, catalog))
             lim = ai_client.server_ctx() - ai_client.MAXTOK_SELECT - 64
             if n_sel > lim:
                 lines = catalog.splitlines()
@@ -1823,7 +1951,7 @@ def _ask_after_search(req, steps, answered, found, flat, catalog, refs, it=None,
                 steps.append({"name": "조문 목록 축소",
                               "detail": f"선별 입력 {n_sel:,}토큰 > 한도 {lim:,} — "
                                         f"목록 {len(lines)}줄 중 앞 {keep_n}줄만 보냄"})
-            nums = ai_client.select_articles(req.question, cat_sel)
+            nums = ai_client.select_articles(q_sel, cat_sel)
             picked = [flat[n - 1] for n in nums if 1 <= n <= len(flat)]
         except ai_client.AiError as e:
             applog.warn(f"조문 선별 실패 — 전체 조문을 씁니다: {e}")
@@ -2142,6 +2270,8 @@ def _ask_after_search(req, steps, answered, found, flat, catalog, refs, it=None,
     #   그 "모름" 때문에 답변까지 흐려졌습니다(공사장 소음 68dB 사례).
     n_facts = len(intent_mod._CASE_FACTS.findall(req.question))
     max_r = min(MAX_ROUNDS, 1) if n_facts >= 2 else MAX_ROUNDS
+    if LAW_Q in (answered or ""):
+        max_r += 1                     # v1.33 — "어느 법" 라운드는 사실 확인 라운드에서 빼고 셉니다
     if not req.skip_clarify and req.round < max_r and it.needs_facts:
         prim = [u for u in units if not _is_bp(u)]
         bps = [u for u in units if _is_bp(u)]
@@ -2332,6 +2462,8 @@ def _ask_after_search(req, steps, answered, found, flat, catalog, refs, it=None,
             "picked_n": len(picked or []),
             "context_keys": [_ctx_key(f, a) for f, a, _ in keep],
             "dropped_keys": [_ctx_key(f, a) for f, a, _ in dropped],
+            "user_laws": _user_laws(req),
+            "laws_mode": _laws_mode(req),
             # v1.32 — 지능형 검색이 돌려준 조문 순서(법령 순위 판단을 나중에 검토하려고)
             "ai_hits": [f"{n} 제{str(j).lstrip('0')}조" + (f"의{str(g).lstrip('0')}" if str(g).strip("0") else "")
                         for n, j, g in (ai_hits or [])[:20]],
