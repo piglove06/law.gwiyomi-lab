@@ -18,6 +18,7 @@ import logging
 import os
 import re
 import secrets
+import time
 
 # ── 서버 로그 형식 ──────────────────────────────────────────────
 # ★ 2026-09-29 — 시각을 서울 시간(KST) "[MM-DD HH:MM:SS]" 로 통일합니다.
@@ -1358,21 +1359,36 @@ def _ask_sync(req: AskRequest, progress: list):
     #   실패하거나 비어 있으면 예전 방식 그대로 갑니다.
     ai_hits, ai_laws = [], []
     if req.target in ("auto", "law"):
-        try:
-            ai_rows = law_client.ai_search(req.question, display=20)
-        except Exception as e:                              # noqa: BLE001
-            ai_rows = []
-            applog.warn(f"지능형 검색 실패 — 건너뜁니다: {e}")
-        for r in ai_rows:
+        ai_rows = []
+        # ★ v1.32 — 같은 질문이 어떤 때는 결과 0건으로 옵니다(실측: 21:18 20건 → 22:04 0건).
+        #   비어 있으면 1초 뒤 한 번 더 부릅니다.
+        for attempt in (1, 2):
+            try:
+                ai_rows = law_client.ai_search(req.question, display=20)
+            except Exception as e:                          # noqa: BLE001
+                ai_rows = []
+                applog.warn(f"지능형 검색 실패{'(재시도)' if attempt == 2 else ''}: {e}")
+            if ai_rows or attempt == 2:
+                break
+            time.sleep(1.0)
+        # ★ v1.32 — 법령 순위는 "처음 나온 순서" 가 아니라 **상위 20개 조문 중 몇 개를 차지했는지**로.
+        #   실측: 누출검사 기한 질문에서 1위 조문 하나만 걸린 석유사업법이 1위가 되고,
+        #   조문 여러 개가 걸린 토양환경보전법은 5위였습니다. (같은 수면 먼저 나온 법, 1위 조문 가점 0.5)
+        score, first = {}, {}
+        for i, r in enumerate(ai_rows):
             nm = (r.get("법령명") or "").strip()
             base = re.sub(r"\s*(시행령|시행규칙)$", "", nm).strip()
-            if base and base not in ai_laws:
-                ai_laws.append(base)
+            if base:
+                score[base] = score.get(base, 0.0) + 1.0 + (0.5 if i == 0 else 0.0)
+                first.setdefault(base, i)
             if nm and r.get("조문번호"):
                 ai_hits.append((nm, r.get("조문번호", ""), r.get("조문가지번호", "")))
+        ai_laws = sorted(score, key=lambda b: (-score[b], first[b]))
         if ai_laws:
             steps.append({"name": "지능형 검색",
-                          "detail": f"관련 법령(관련도 순): {', '.join(ai_laws[:5])} · 조문 {len(ai_hits)}개"})
+                          "detail": "관련 법령(조문 수 순): "
+                                    + ", ".join(f"{b}({int(score[b])})" for b in ai_laws[:5])
+                                    + f" · 조문 {len(ai_hits)}개"})
         elif ai_rows == []:
             steps.append({"name": "지능형 검색", "detail": "결과 없음"})
 
@@ -1551,7 +1567,12 @@ def _ask_sync(req: AskRequest, progress: list):
                 steps.append({"name": "법령 후보 보정(지능형 검색)",
                               "detail": f"'{top}' 을(를) 먼저 봅니다"
                                         + (f" (AI 추측: {', '.join(cand)})" if cand else "")})
-            cand = [top] + [c for c in cand if _law_key(c) != _law_key(top)]
+            rest = [c for c in cand if _law_key(c) != _law_key(top)]
+            # ★ v1.32 — 나머지 후보 중 지능형 검색에도 나온 것(교차 확인된 것)을 앞으로.
+            #   본문검색 복구가 가나다순으로 올린 엉뚱한 법(건설기계 안전기준 등)이 2순위를 차지하지 않게.
+            ai_keys = {_law_key(x) for x in ai_laws[:5]}
+            cand = [top] + [c for c in rest if _law_key(c) in ai_keys] \
+                + [c for c in rest if _law_key(c) not in ai_keys]
 
         # v1.3 의 조문 선별이 붙어 토큰 부담이 크게 줄었으므로 후보를 2개로 되돌립니다.
         # 1개만 쓰면 "누출검사" 처럼 여러 법에 쓰이는 용어에서 엉뚱한 법 하나만
@@ -1833,6 +1854,44 @@ def _ask_after_search(req, steps, answered, found, flat, catalog, refs, it=None,
     #   picked/flat 을 그대로 쓰면 append 가 원본 목록을 오염시킵니다.
     use = list(picked or flat)
 
+    # ── v1.32 — 상위 조문 자동 포함 ─────────────────────────────────
+    # 시행령·시행규칙 조문은 "법 제12조제1항에 따른 …", "영 제8조에 따라 …" 처럼 근거 조문을
+    # 적습니다. 선별이 하위 조문만 고르고 그 근거(법률 조문)를 빠뜨리면 답변이 "신고 의무가 있다"
+    # 는 근거를 못 댑니다. (실제 사례: 주유소 설치신고 — 시행규칙 제12조는 골랐지만 법 제12조 누락)
+    # 선별 결과가 있을 때만, 최대 4개, 우선순위는 인용한 조문 바로 뒤.
+    parent_rank: dict = {}
+    if picked:
+        def _nk(x):
+            return str(x or "").strip().lstrip("0")
+        flat_idx = {}
+        for f, a in flat:
+            if _nk(a.get("조문번호")):
+                flat_idx.setdefault((f["name"], _nk(a.get("조문번호")), _nk(a.get("조문가지번호"))), (f, a))
+        have_k = {(f["name"], _nk(a.get("조문번호")), _nk(a.get("조문가지번호"))) for f, a in use}
+        parents = []
+        for i_use, (f, a) in enumerate(list(use)):
+            nm = f.get("name", "")
+            if not nm.endswith(("시행령", "시행규칙")) or len(parents) >= 4:
+                continue
+            fam = re.sub(r"\s*(시행령|시행규칙)$", "", nm).strip()
+            body = a.get("조문내용", "") or ""
+            for m in re.finditer(r"(?<![가-힣「」])(법|영)\s*제\s*(\d+)\s*조(?:\s*의\s*(\d+))?", body):
+                if body[max(0, m.start() - 3):m.start()].endswith("같은 "):
+                    continue                     # "같은 법 제5조" — 앞에 나온 **다른** 법
+                tgt = fam if m.group(1) == "법" else fam + " 시행령"
+                k = (tgt, m.group(2), _nk(m.group(3)))
+                if k in have_k or k not in flat_idx:
+                    continue
+                have_k.add(k)
+                parents.append(flat_idx[k])
+                parent_rank[id(flat_idx[k][1])] = i_use + 0.3
+                if len(parents) >= 4:
+                    break
+        if parents:
+            use = use + parents
+            steps.append({"name": "상위 조문 자동 포함",
+                          "detail": ", ".join(_ctx_key(f, a) for f, a in parents)})
+
     # ── 인용된 별표를 자동으로 끌어옵니다 ─────────────────────────
     # "누출검사주기는 별표 4와 같다" 처럼 조문이 별표에 넘기는 경우,
     # 별표를 안 가져오면 AI 가 숫자를 지어내거나 조문에 없는 내용을 붙입니다.
@@ -1857,6 +1916,7 @@ def _ask_after_search(req, steps, answered, found, flat, catalog, refs, it=None,
     #   (v1.31: 별표를 무조건 맨 나중에 빼서, 덜 중요한 조문이 인용한 큰 별표가 남고
     #    핵심 조문이 빠지는 일이 있었음)
     prio = {id(a): float(i) for i, (f, a) in enumerate(use)}
+    prio.update(parent_rank)
     cite_rank: dict = {}
     for i_use, (f, a) in enumerate(use):
         body = a.get("조문내용", "")
