@@ -7,7 +7,7 @@
       "지하": "지하매설",
       "위험물": "예",
       "물질": "석유류",
-      "용량": "2만",
+      "용량": "이상",
       "방지시설": "예",
       "상수원": "아니오",
       "보호구역": "아니오"
@@ -39,7 +39,13 @@
     "all_cites_ok": true,
     "no_law_in_clarify": true,
     "no_conclusion_in_clarify": true,
-    "_설명": "TEST_QUESTIONS.md 1번. 탱크 각각은 2만L 미만이지만 같은 부지 합산(별표2 비고1)으로 대상. 법 제12조①·④(위험물 허가 시 신고 간주), 시행규칙 제12조①1호(완공검사일부터 6개월). 시행령 제6조를 '법 제6조'로 쓰면 실패 (v1.26 사고)."
+    "_설명": "TEST_QUESTIONS.md 1번. 탱크 각각은 2만L 미만이지만 같은 부지 합산(별표2 비고1)으로 대상. 법 제12조①·④(위험물 허가 시 신고 간주), 시행규칙 제12조①1호(완공검사일부터 6개월). 시행령 제6조를 '법 제6조'로 쓰면 실패 (v1.26 사고).",
+    "expect_intent": "APPLICABILITY",
+    "expect_context": [
+      "토양환경보전법 제12조",
+      "토양환경보전법 시행규칙 제12조",
+      "토양환경보전법 시행규칙 [별표 2]"
+    ]
   },
   {
     "name": "누출검사 다음 기한 - 설치일 기준",
@@ -87,7 +93,12 @@
     ],
     "no_law_in_clarify": true,
     "no_conclusion_in_clarify": true,
-    "_설명": "TEST_QUESTIONS.md 2번. 별표4 제2호 '설치 후 10년이 지난 날부터 매 8년' → 2020-03-15 + 8년 = 2028-03-15 이후 90일 이내. 직전검사일(2020-08-20) 기준으로 계산하면 실패 (2026-09-29 실제 오답: 직전검사일 + 8년). 되묻기가 '언제까지 받아야 합니까'를 물으면 실패."
+    "_설명": "TEST_QUESTIONS.md 2번. 별표4 제2호 '설치 후 10년이 지난 날부터 매 8년' → 2020-03-15 + 8년 = 2028-03-15 이후 90일 이내. 직전검사일(2020-08-20) 기준으로 계산하면 실패 (2026-09-29 실제 오답: 직전검사일 + 8년). 되묻기가 '언제까지 받아야 합니까'를 물으면 실패.",
+    "expect_intent": "DEADLINE",
+    "expect_context": [
+      "토양환경보전법 시행령 제8조",
+      "토양환경보전법 시행규칙 [별표 4]"
+    ]
   },
   {
     "name": "누출검사주기 - 전부 모름",
@@ -105,7 +116,8 @@
     ],
     "_설명": "조건을 하나도 모를 때 수치를 지어내지 않아야 합니다.",
     "expect_primary_law": "토양환경보전법",
-    "no_conclusion_in_clarify": true
+    "no_conclusion_in_clarify": true,
+    "expect_intent": "DEADLINE"
   },
   {
     "name": "부정조건 제외",
@@ -119,12 +131,14 @@
     "forbid_laws": [
       "방사성폐기물"
     ],
-    "_설명": "'아니오'로 답한 주제의 법령이 실제로 빠지는지 봅니다 (v1.28에서 죽어 있던 기능). / 2026-09-29: 체계도 검색이 '방사성폐기물 관리법' 을 먼저 집던 버그 회귀 확인.",
+    "_설명": "v1.31 부터 일반 절차 질문으로 분류되어 되묻기 없이 답합니다. 방사성폐기물 법이 끼어들지 않는지(체계도 가나다순 버그 회귀)와 주 법령을 봅니다. ('아니오' 제외 기능은 되묻기가 있는 적용 판단 질문에서만 동작)",
     "expect_primary_law": "폐기물관리법",
     "expect_laws": [
       "폐기물관리법"
     ],
-    "no_conclusion_in_clarify": true
+    "no_conclusion_in_clarify": true,
+    "expect_intent": "GENERAL_RULE",
+    "no_clarify": true
   },
   {
     "name": "우려기준 초과 절차",
@@ -142,7 +156,9 @@
     "_설명": "정화·정밀조사 관련 조문이 제대로 붙는지.",
     "no_law_in_clarify": true,
     "expect_primary_law": "토양환경보전법",
-    "no_conclusion_in_clarify": true
+    "no_conclusion_in_clarify": true,
+    "expect_intent": "GENERAL_RULE",
+    "no_clarify": true
   },
   {
     "name": "음식점 폐기물 - 방사성폐기물 오검색 방지",
@@ -158,7 +174,8 @@
     ],
     "_설명": "v1.28 실사고 — 로컬 모델이 '폐기물관리법' 대신 '방사성폐기물 관리법'을 추측해 엉뚱한 법으로 답했습니다. 본문검색 교차검증으로 막혔는지 봅니다.",
     "expect_primary_law": "폐기물관리법",
-    "no_conclusion_in_clarify": true
+    "no_conclusion_in_clarify": true,
+    "expect_intent": "APPLICABILITY"
   },
   {
     "name": "대기 배출시설 허가·신고",
@@ -196,7 +213,11 @@
     ],
     "no_law_in_clarify": true,
     "no_conclusion_in_clarify": true,
-    "_설명": "TEST_QUESTIONS.md 3번. 영 제11조①(특정대기유해물질 기준 이상 / 특별대책지역) → 허가, ② 그 외 신고, ③ 서류 1~4호."
+    "_설명": "TEST_QUESTIONS.md 3번. 영 제11조①(특정대기유해물질 기준 이상 / 특별대책지역) → 허가, ② 그 외 신고, ③ 서류 1~4호.",
+    "expect_intent": "APPLICABILITY",
+    "expect_context": [
+      "대기환경보전법 시행령 제11조"
+    ]
   },
   {
     "name": "공사장 소음 - 장비 5시간 보정",
@@ -240,7 +261,12 @@
     ],
     "no_law_in_clarify": true,
     "no_conclusion_in_clarify": true,
-    "_설명": "TEST_QUESTIONS.md 4번. 별표8 주거지역 공사장 주간 65 + 비고4(3~6시간 +5) = 70 → 68은 초과 아님. '68>65 초과'면 실패."
+    "_설명": "TEST_QUESTIONS.md 4번. 별표8 주거지역 공사장 주간 65 + 비고4(3~6시간 +5) = 70 → 68은 초과 아님. '68>65 초과'면 실패.",
+    "expect_intent": "APPLICABILITY",
+    "expect_context": [
+      "소음ㆍ진동관리법 제23조",
+      "소음ㆍ진동관리법 시행규칙 [별표 8]"
+    ]
   },
   {
     "name": "공사장 소음 - 일요일 보정",
@@ -284,7 +310,11 @@
     ],
     "no_law_in_clarify": true,
     "no_conclusion_in_clarify": true,
-    "_설명": "TEST_QUESTIONS.md 4번 변형. 65 + 5(비고4) − 5(비고7 공휴일 주거지역) = 65 → 68은 초과 → 법 제23조 조치명령. 평일 케이스와 짝 — 항상 '초과 아님'으로 답하는지 거른다."
+    "_설명": "TEST_QUESTIONS.md 4번 변형. 65 + 5(비고4) − 5(비고7 공휴일 주거지역) = 65 → 68은 초과 → 법 제23조 조치명령. 평일 케이스와 짝 — 항상 '초과 아님'으로 답하는지 거른다.",
+    "expect_intent": "APPLICABILITY",
+    "expect_context": [
+      "소음ㆍ진동관리법 시행규칙 [별표 8]"
+    ]
   },
   {
     "name": "세차장 폐수배출시설",
@@ -298,7 +328,8 @@
     "no_law_in_clarify": true,
     "_설명": "2026-09-29 추가. 물환경보전법을 잡는지.",
     "expect_primary_law": "물환경보전법",
-    "no_conclusion_in_clarify": true
+    "no_conclusion_in_clarify": true,
+    "expect_intent": "APPLICABILITY"
   },
   {
     "name": "축사 악취 - 단독 시설",
@@ -344,7 +375,12 @@
     ],
     "no_law_in_clarify": true,
     "no_conclusion_in_clarify": true,
-    "_설명": "TEST_QUESTIONS.md 5번. 제6조①1호는 '둘 이상 인접' 필요 → 단독 축사는 불가. 제8조의2(민원 1년 이상 + 3회 이상 초과) 신고대상시설 지정 → 6개월 내 신고·악취방지계획, 1년 내 조치 → 제10조 개선명령. 2026-09-29 답변은 제6조만 나열하고 제8조의2를 빠뜨림."
+    "_설명": "TEST_QUESTIONS.md 5번. 제6조①1호는 '둘 이상 인접' 필요 → 단독 축사는 불가. 제8조의2(민원 1년 이상 + 3회 이상 초과) 신고대상시설 지정 → 6개월 내 신고·악취방지계획, 1년 내 조치 → 제10조 개선명령. 2026-09-29 답변은 제6조만 나열하고 제8조의2를 빠뜨림.",
+    "expect_intent": "APPLICABILITY",
+    "expect_context": [
+      "악취방지법 제8조의2",
+      "악취방지법 제6조"
+    ]
   },
   {
     "name": "관련없는 분야",
@@ -353,9 +389,97 @@
     "default": "모름",
     "max_rounds_used": 2,
     "forbid_laws": [
-      "토양환경보전법"
+      "토양환경보전법",
+      "조례"
     ],
     "_설명": "환경과 무관한 질문에 엉뚱한 법을 끌어오지 않는지.",
-    "expect_primary_law": "옥외광고물"
+    "expect_primary_law": "옥외광고물",
+    "expect_intent": "GENERAL_RULE",
+    "no_clarify": true
+  },
+  {
+    "name": "조문 직접 조회",
+    "question": "폐기물관리법 제25조 내용 알려줘.",
+    "answers": {},
+    "default": "모름",
+    "max_rounds_used": 0,
+    "expect_intent": "ARTICLE_LOOKUP",
+    "no_clarify": true,
+    "expect_laws": [
+      "폐기물관리법"
+    ],
+    "expect_primary_law": "폐기물관리법",
+    "expect_cites": [
+      "폐기물관리법 제25조"
+    ],
+    "expect_context": [
+      "폐기물관리법 제25조"
+    ],
+    "forbid_laws": [
+      "방사성폐기물"
+    ],
+    "_설명": "v1.31 추가. 조문 번호를 직접 물으면 검색·선별·되묻기 없이 그 조문 하나로 답해야 합니다."
+  },
+  {
+    "name": "용어 정의",
+    "question": "특정대기유해물질이 뭐야?",
+    "answers": {},
+    "default": "모름",
+    "expect_intent": "DEFINITION",
+    "no_clarify": true,
+    "expect_laws": [
+      "대기환경보전법"
+    ],
+    "expect_any": [
+      [
+        "특정대기유해물질"
+      ]
+    ],
+    "_설명": "v1.31 추가. 정의 질문은 되묻지 않고 정의 조문으로 답합니다."
+  },
+  {
+    "name": "일반 기준 - 폐기물처리업 허가",
+    "question": "폐기물처리업 허가 기준이 뭐야?",
+    "answers": {},
+    "default": "모름",
+    "expect_intent": "GENERAL_RULE",
+    "no_clarify": true,
+    "expect_laws": [
+      "폐기물관리법"
+    ],
+    "expect_primary_law": "폐기물관리법",
+    "forbid_laws": [
+      "방사성폐기물"
+    ],
+    "_설명": "v1.31 추가 (요청서 예시 2). 일반 기준 질문은 법령을 찾아 바로 정리합니다."
+  },
+  {
+    "name": "적용 판단 - 우리 회사 폐기물처리업",
+    "question": "우리 회사도 폐기물처리업 허가를 받아야 하나?",
+    "answers": {},
+    "default": "모름",
+    "max_rounds_used": 3,
+    "expect_intent": "APPLICABILITY",
+    "expect_laws": [
+      "폐기물관리법"
+    ],
+    "expect_primary_law": "폐기물관리법",
+    "no_law_in_clarify": true,
+    "no_conclusion_in_clarify": true,
+    "_설명": "v1.31 추가 (요청서 예시 3). 사례 판단이라 결론을 가르는 사실만 되묻는지 봅니다."
+  },
+  {
+    "name": "범용성 - 개인정보 유출 신고",
+    "question": "개인정보 유출 시 신고 절차가 어떻게 되나요?",
+    "answers": {},
+    "default": "모름",
+    "expect_intent": "GENERAL_RULE",
+    "no_clarify": true,
+    "expect_primary_law": "개인정보",
+    "forbid_laws": [
+      "조례",
+      "토양환경보전법"
+    ],
+    "_설명": "v1.31 추가. 환경 이외 분야에서도 맞는 국가법령을 잡는지 (범용 엔진 점검)."
   }
 ]

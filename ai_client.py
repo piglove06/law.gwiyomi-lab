@@ -14,6 +14,7 @@ LLM 호출부. 로컬 LLM 서버를 OpenAI 호환 API(/v1/chat/completions)로 �
     키 순회·한도(429) 처리·대체 모델·단계별 백엔드 선택 코드가 함께 빠졌습니다.
 """
 
+import json
 import os
 import re
 import time
@@ -74,49 +75,66 @@ def _dbg(msg: str) -> None:
 # --- 프롬프트 --------------------------------------------------------
 # 이 프로그램의 핵심입니다. 여기가 부실하면 AI가 아는 척하며 지어냅니다.
 
-TERM_PROMPT = """너는 대한민국 법령 검색을 돕는 도구다.
-질문자는 지방자치단체 환경 담당 공무원이다.
+TERM_PROMPT = """너는 대한민국 국가법령 검색을 돕는 도구다.
+질문자는 행정 실무자이거나 일반 시민이다. 분야는 정해져 있지 않다.
 
 사용자의 일상적인 질문을 법령에서 실제로 쓰이는 용어로 바꾸는 일만 한다.
-설명·인사·사고 과정을 쓰지 마라. 아래 두 줄만 출력한다.
-
-법령명: (실제 법령 이름 1~2개, 쉼표로 구분)
-용어: (실제 법령용어 3~5개, 쉼표로 구분)
+설명·인사·사고 과정을 쓰지 마라.
+{output_rules}
 
 규칙:
-- **반드시 실제로 존재하는 법령 이름과 용어만 쓴다.**
-- 같은 용어가 여러 법에 쓰일 때는 환경 분야 법령을 우선한다.
-  예) "누출검사" → 토양환경보전법이 1순위, 위험물안전관리법이 2순위.
-- 법령명은 정식 명칭으로 쓴다. "시행령", "시행규칙" 은 붙이지 않는다.
+- **용어가 가장 중요하다.** 법령 본문에 실제로 나올 법한 법률 용어(제도·시설·행위·의무 이름)를 쓴다.
+  생활 표현을 그대로 쓰지 말고 법령 표현으로 바꾼다.
+  예) "기름 새는지 검사" → 누출검사,  "가게 차리기 전 신고" → 영업신고
+- 법령명은 **추측 후보**일 뿐이다(검색 결과로 다시 확인한다). 확신이 없으면 1개만 쓴다.
+  정식 명칭으로 쓰고 "시행령", "시행규칙" 은 붙이지 않는다.
+- 같은 용어가 여러 법에 쓰이면 **질문의 시설·행위에 가장 직접 적용되는 법**을 앞에 둔다.
 - **질문이 일반적인 상황이면 일반법을 고르라.**
   질문에 명시되지 않은 특수·예외 분야 법을 1순위로 올리지 마라.
   예) "사업장에서 폐기물을 배출한다" → 폐기물관리법 (O)
       방사성폐기물 관리법 (X — 질문에 방사성이라는 말이 없다)
-      "폐수를 배출한다" → 물환경보전법 (O), 해양환경관리법 (X)
+- 조문 번호(제○조)를 지어내지 마라.
 - 영어를 쓰지 마라. 한국어 법령 용어만 쓴다.
-- 백틱(`), 따옴표, 괄호, 번호를 붙이지 마라.
 
 예시 1)
 질문: 주유소 땅이 기름으로 오염됐는지 조사하는 절차
-법령명: 토양환경보전법, 위험물안전관리법
-용어: 특정토양오염관리대상시설, 토양정밀조사, 토양오염도검사
+법령명: 토양환경보전법
+용어: 특정토양오염관리대상시설, 토양오염도검사, 토양정밀조사
 
 예시 2)
-질문: 누출검사 검사주기가 어떻게 되나
-법령명: 토양환경보전법, 위험물안전관리법
-용어: 누출검사, 특정토양오염관리대상시설, 정기검사
+질문: 음식점을 열려면 어디에 무슨 신고를 해야 하나
+법령명: 식품위생법
+용어: 영업신고, 식품접객업, 일반음식점영업
 
 예시 3)
-질문: 폐수 배출시설 신고를 안 하면 어떻게 되나
-법령명: 물환경보전법
-용어: 폐수배출시설, 배출시설 설치신고, 과태료
+질문: 창고로 쓰던 건물을 사무실로 바꾸려면 허가가 필요한가
+법령명: 건축법
+용어: 용도변경, 건축물대장 기재내용 변경, 용도변경 허가
 
 질문: {question}
 """
 
+_TERM_RULES_TEXT = """아래 두 줄만 출력한다.
 
-ANSWER_PROMPT = """너는 지방자치단체 공무원이 법령을 확인할 때 쓰는 조문 조회 도우미다.
-사용자는 법률 전문가가 아니다. 쉽게 설명하되, 근거는 [조문 원문] 안에서만 찾는다.
+법령명: (실제 법령 이름 1~2개, 쉼표로 구분)
+용어: (실제 법령용어 3~5개, 쉼표로 구분)
+- 백틱(`), 따옴표, 괄호, 번호를 붙이지 마라."""
+
+_TERM_RULES_JSON = """JSON 하나만 출력한다.
+  {"laws": ["법령 이름 1~2개"], "terms": ["법령 용어 3~5개"]}"""
+
+TERM_SCHEMA = {
+    "type": "object",
+    "properties": {
+        "laws": {"type": "array", "items": {"type": "string"}, "maxItems": 3},
+        "terms": {"type": "array", "items": {"type": "string"}, "minItems": 1, "maxItems": 6},
+    },
+    "required": ["laws", "terms"],
+}
+
+
+ANSWER_PROMPT = """너는 대한민국 국가법령 조문을 근거로 답하는 조회 도우미다.
+사용자는 행정 실무자이거나 일반 시민이며, 법률 전문가가 아니다. 쉽게 설명하되, 근거는 [조문 원문] 안에서만 찾는다.
 
 ━━ 최우선 원칙 ━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 1. [조문 원문]에 실제로 있는 내용만 답한다.
@@ -211,7 +229,7 @@ ANSWER_PROMPT = """너는 지방자치단체 공무원이 법령을 확인할 �
 
 ━━ 답변 형식 ━━━━━━━━━━━━━━━━━━━━━━━━━━━
 【결론】
-질문에 대한 답을 __먼저__ 2~3줄로 말한다. 담당자가 민원인에게 그대로
+질문에 대한 답을 __먼저__ 2~3줄로 말한다. 사용자가 다른 사람에게 그대로
 읽어줄 수 있는 문장으로 쓴다. 조문번호를 나열하지 마라.
 조건이 "모름" 이라 하나로 정할 수 없으면 "○○이면 A, □□이면 B" 로 쓴다.
 여기서도 수치는 **굵게**, 의무는 __밑줄__ 로 표시한다.
@@ -336,13 +354,64 @@ def count_tokens(text: str) -> int:
 
 
 def _call(prompt: str, temperature: float = 0.3, max_tokens: int = 0,
-          stage: str = "llm") -> str:
-    """LLM 한 번 호출. stage 는 로그에 찍힐 단계 이름입니다."""
-    return _call_local(prompt, temperature, LOCAL_MODEL, max_tokens, stage)
+          stage: str = "llm", schema: dict | None = None) -> str:
+    """LLM 한 번 호출. stage 는 로그에 찍힐 단계 이름입니다.
+    schema 를 주면 서버에 JSON 형식 강제를 요청합니다 (call_json 참고)."""
+    return _call_local(prompt, temperature, LOCAL_MODEL, max_tokens, stage, schema)
+
+
+# ── JSON 출력 강제 (v1.31) ───────────────────────────────────
+# ★ 2026-10-07 — 되묻기·선별·검색어 출력이 자유 텍스트라서 형식이 깨질 때마다
+#   정규식으로 고쳐 왔습니다(되묻기 후처리만 약 600줄). llama-server 는
+#   response_format 에 JSON Schema 를 주면 **문법으로 출력 형식을 강제**합니다
+#   (토큰을 고를 때 스키마에 맞지 않는 토큰을 아예 못 고르게 함).
+#   서버가 이 옵션을 거절하면(구버전·다른 서버) 한 번 끄고 예전 텍스트 방식으로
+#   돌아갑니다. 호출하는 쪽은 결과가 None 이면 기존 파서를 씁니다.
+#   LLM_JSON=0 이면 처음부터 끕니다.
+_JSON_MODE = {"ok": os.getenv("LLM_JSON", "1") not in ("0", "false", "False", "")}
+
+
+def json_enabled() -> bool:
+    return bool(_JSON_MODE["ok"])
+
+
+def _parse_json(text: str):
+    """모델 응답에서 JSON 객체 하나를 꺼냅니다. 실패하면 None."""
+    t = re.sub(r"<think>[\s\S]*?</think>", "", str(text or ""), flags=re.I)
+    t = re.sub(r"```[a-zA-Z]*", "", t).replace("```", "").strip()
+    try:
+        return json.loads(t)
+    except (ValueError, TypeError):
+        pass
+    m = re.search(r"\{[\s\S]*\}", t)            # 앞뒤에 말이 붙은 경우
+    if m:
+        try:
+            return json.loads(m.group(0))
+        except (ValueError, TypeError):
+            return None
+    return None
+
+
+def call_json(prompt: str, schema: dict, temperature: float = 0,
+              max_tokens: int = 0, stage: str = "llm"):
+    """
+    JSON 형식을 강제해 호출하고 파싱된 객체를 돌려줍니다.
+    반환: (obj 또는 None, 원문 텍스트). JSON 모드가 꺼져 있으면 (None, "") —
+    호출하는 쪽이 예전 텍스트 프롬프트로 다시 부릅니다.
+    """
+    if not json_enabled():
+        return None, ""
+    raw = _call(prompt, temperature=temperature, max_tokens=max_tokens,
+                stage=stage, schema=schema)
+    obj = _parse_json(raw)
+    if obj is None:
+        applog.warn(f"LLM {stage}: JSON 파싱 실패 — 텍스트 방식으로 대체합니다. 앞부분: {raw[:120]}")
+    return obj, raw
 
 
 def _call_local(prompt: str, temperature: float, model: str,
-                max_tokens: int = 0, stage: str = "llm") -> str:
+                max_tokens: int = 0, stage: str = "llm",
+                schema: dict | None = None) -> str:
     """
     로컬 LLM 에 요청합니다.
 
@@ -390,6 +459,8 @@ def _call_local(prompt: str, temperature: float, model: str,
                 **({"num_predict": max_tokens} if max_tokens else {}),
             },
         }
+        if schema and json_enabled():
+            payload["format"] = schema          # Ollama 는 format 에 스키마를 받습니다
     else:
         url = f"{LOCAL_BASE_URL}/chat/completions"
         payload = {
@@ -403,6 +474,12 @@ def _call_local(prompt: str, temperature: float, model: str,
             # llama-server 를 --jinja 로 띄웠을 때 채팅 템플릿에 전달됩니다.
             # 안 먹으면 llama-server 실행 옵션에 --reasoning-budget 0 을 추가하세요.
             payload["chat_template_kwargs"] = {"enable_thinking": False}
+        if schema and json_enabled():
+            payload["response_format"] = {
+                "type": "json_schema",
+                "json_schema": {"name": re.sub(r"\W", "_", stage) or "out",
+                                "schema": schema, "strict": True},
+            }
 
     applog.debug(stage, f"── 프롬프트 ({n_prompt or '?'} tok, max_tokens={max_tokens}) ──\n{prompt}")
     t0 = time.time()
@@ -432,6 +509,12 @@ def _call_local(prompt: str, temperature: float, model: str,
             raise AiError(
                 "프롬프트가 로컬 LLM 컨텍스트 길이를 넘었습니다. "
                 "llama-server 실행 옵션의 -c 값을 늘리세요(예: -c 24576).") from e
+        if code in (400, 422) and schema and json_enabled():
+            # 서버가 JSON 형식 강제를 못 받는 경우 — 끄고 같은 요청을 한 번 다시 보냅니다.
+            _JSON_MODE["ok"] = False
+            applog.warn(f"LLM 서버가 JSON 형식 강제를 받지 않아 끕니다 (HTTP {code}). "
+                        f"이후 텍스트 방식으로 동작합니다.")
+            return _call_local(prompt, temperature, model, max_tokens, stage, None)
         if code == 400 and native:
             raise AiError("이 서버가 think 옵션을 받지 않습니다. "
                           ".env 에서 LOCAL_NO_THINK=0 으로 두고 다시 시도하세요.") from e
@@ -472,6 +555,10 @@ def _call_local(prompt: str, temperature: float, model: str,
         raise AiError(f"로컬 LLM 이 빈 응답을 돌려줬습니다: {str(data)[:400]}")
 
     raw = text
+    if schema and json_enabled():
+        # JSON 응답은 마크다운 정리(_clean_output)를 거치면 깨질 수 있습니다.
+        applog.debug(stage, f"── 응답 원문 JSON (finish={done}) ──\n{raw}")
+        return raw.strip()
     text = _clean_output(text)
     applog.debug(stage, f"── 응답 원문 (finish={done}) ──\n{raw}"
                  + (f"\n── 생각 과정 ──\n{thinking}" if thinking else "")
@@ -603,10 +690,17 @@ def extract_terms(question: str) -> dict:
     로컬 모델은 형식을 자주 어깁니다. 라벨이 있으면 그것을 쓰고,
     없으면 줄 단위로 훑어 법령처럼 생긴 것과 아닌 것을 나눕니다.
     """
-    raw = _call(TERM_PROMPT.format(question=question), temperature=0,
-                max_tokens=MAXTOK_TERMS, stage="terms")
-
     out = {"법령명": [], "용어": []}
+
+    # ★ v1.31 — JSON 형식 강제를 먼저 시도합니다. 안 되면 예전 텍스트 방식.
+    obj, _ = call_json(TERM_PROMPT.format(question=question, output_rules=_TERM_RULES_JSON),
+                       TERM_SCHEMA, temperature=0, max_tokens=MAXTOK_TERMS, stage="terms")
+    if isinstance(obj, dict):
+        raw = ("법령명: " + ", ".join(str(x) for x in (obj.get("laws") or []) if x) + "\n"
+               + "용어: " + ", ".join(str(x) for x in (obj.get("terms") or []) if x))
+    else:
+        raw = _call(TERM_PROMPT.format(question=question, output_rules=_TERM_RULES_TEXT),
+                    temperature=0, max_tokens=MAXTOK_TERMS, stage="terms")
 
     def add(key: str, chunk: str):
         # ★ 2026-09-29 — 가운뎃점(·)으로는 나누지 않습니다. "소음·진동관리법" 이
@@ -675,17 +769,20 @@ def answer(question: str, context: str) -> str:
                  max_tokens=MAXTOK_ANSWER, stage="answer")
 
 
-CLARIFY_PROMPT = """너는 지방자치단체 환경 담당 공무원의 법령 질문을 다듬는 도구다.
-질문자는 법령에 익숙하지 않다. 무엇을 특정해야 조문이 정해지는지 스스로 모른다.
-그러므로 적극적으로 되물어 질문의 품질을 끌어올려라.
+CLARIFY_PROMPT = """너는 법령 질문에 답하기 전에, 결론을 가르는 사실 중 빠진 것만 되묻는 도구다.
+질문자는 법령에 익숙하지 않다. 무엇을 알려줘야 결론이 정해지는지 스스로 모른다.
 
-[조문 목록] 은 이 질문에 대해 실제로 수집된 법령의 조문 제목이다.
-**이 목록에 실제로 있는 내용만 근거로 질문하라.**
+[관련 조문] 은 이 질문에 답하려고 실제로 고른 조문과 별표의 **본문**이다.
+**이 본문에 적힌 요건·기준값만 근거로 질문하라.**
+  · 조문이 "~인 경우", "~이상", "~이내", "다만 ~" 처럼 **갈래를 나누는 지점**을 찾는다.
+  · 그 갈래를 정하는 사실이 [질문]·[이미 답변된 조건]에 없을 때만 묻는다.
+  · **보기는 조문에 적힌 기준값을 경계로 나눈다.** 예) 조문이 "총 용량 2만리터 이상" 이면
+    "2만 리터 미만 / 2만 리터 이상 / 모름". 조문에 없는 경계를 지어내지 마라.
 
 절대 지킬 것:
-- **[조문 목록]에 없는 제도·시설·용어를 질문에 쓰지 마라.**
+- **[관련 조문]에 없는 제도·시설·용어를 질문에 쓰지 마라.**
   네 기억에 있는 다른 법의 개념을 끌어오지 마라.
-  예) 조문 목록이 토양환경보전법뿐인데 "VOC 배출시설", "유해화학물질 취급시설" 을
+  예) 관련 조문이 토양환경보전법뿐인데 "VOC 배출시설", "유해화학물질 취급시설" 을
       선택지로 넣으면 안 된다. 그것은 다른 법의 용어다.
 - 용어는 조문에 적힌 **정식 명칭 그대로** 쓴다.
   예) "특정토양오염유발시설"(X) → "특정토양오염관리대상시설"(O)
@@ -732,11 +829,7 @@ CLARIFY_PROMPT = """너는 지방자치단체 환경 담당 공무원의 법령 
            설치일이 언제입니까?|아래 칸에 날짜 입력|모름
   (물질·시설의 성질 자체 — 예: 방사성폐기물인지 — 는 현장 사실이므로 물어도 된다.)
 
-더 물을 것이 없으면 딱 한 줄만 출력한다.
-OK
-
-물을 것이 남았으면 아래 형식으로만 출력한다. 다른 말은 쓰지 않는다.
-질문|보기1|보기2|보기3
+{output_rules}
 
 보기를 만들 때 반드시 지킬 것:
 - 보기는 **질문자가 현장에서 아는 사실**이어야 한다.
@@ -756,14 +849,15 @@ OK
   (구체적인 말이 있으면 "예" 보다 그 말을 쓴다. 무엇에 예인지 바로 보인다.)
 
 규칙:
-- 한 번에 최대 3개까지 물을 수 있다. 한 줄에 하나.
+- 한 번에 최대 3개까지 물을 수 있다.
   많이 묻는 것보다 **결정적인 것을 먼저 묻는 것**이 중요하다.
 - 보기는 2~4개. 각 보기는 14자 이내. 마지막 보기로 "모름" 을 넣어라.
 - 실제로 적용 조문·기준·기한이 달라지는 것만 묻는다.
 - [이미 답변된 조건] 에 나온 것은 절대 다시 묻지 마라. 다르게 표현해서도 묻지 마라.
 - **[질문] 본문에 이미 적힌 사실(날짜·용량·지역·시간·횟수)도 다시 묻지 마라.**
-- 남은 갈래가 없으면 반드시 OK 를 출력하고 끝내라.
-  남은 것이 없는데 계속 묻는 것이 더 나쁘다.
+- 남은 갈래가 없으면 더 묻지 말고 끝내라 (출력 형식의 "물을 것 없음" 표시).
+  남은 것이 없는데 계속 묻는 것이 더 나쁘다. 갈래가 2개뿐이면 묻지 않아도 된다 —
+  답변이 두 경우를 나눠 설명할 수 있다.
 
 [질문]
 {question}
@@ -771,9 +865,39 @@ OK
 [이미 답변된 조건]
 {answered}
 
-[조문 목록]
+[관련 조문]
 {catalog}
 """
+
+_CLARIFY_RULES_TEXT = """더 물을 것이 없으면 딱 한 줄만 출력한다.
+OK
+
+물을 것이 남았으면 아래 형식으로만 출력한다. 다른 말은 쓰지 않는다. 한 줄에 하나.
+질문|보기1|보기2|보기3"""
+
+_CLARIFY_RULES_JSON = """JSON 하나만 출력한다.
+  물을 것이 없으면:  {"done": true, "questions": []}
+  물을 것이 있으면:  {"done": false, "questions": [{"question": "질문", "options": ["보기1", "보기2", "모름"]}]}"""
+
+CLARIFY_SCHEMA = {
+    "type": "object",
+    "properties": {
+        "done": {"type": "boolean"},
+        "questions": {
+            "type": "array", "maxItems": 3,
+            "items": {
+                "type": "object",
+                "properties": {
+                    "question": {"type": "string"},
+                    "options": {"type": "array", "items": {"type": "string"},
+                                "minItems": 2, "maxItems": 4},
+                },
+                "required": ["question", "options"],
+            },
+        },
+    },
+    "required": ["done", "questions"],
+}
 
 # 되묻기가 "결론"(기한·의무)을 질문자에게 되묻는 꼴. clarify() 마지막 그물에서 버립니다.
 #   "…언제까지 받아야 합니까?" / "…설치해야 합니까?" / "…신고해야 하나요?"
@@ -1285,18 +1409,87 @@ def _fix_yesno(question: str, options: list) -> list:
     return ["예", "아니오", "모름"]
 
 
+def _finalize_clarify(items: list) -> list:
+    """되묻기 항목의 마지막 그물 — 텍스트·JSON 두 경로가 함께 씁니다 (v1.31 에 함수로 분리).
+    할 일 보기·너무 짧은 보기 제거, "모름" 정리, 물음 아닌 질문·법령명 질문·결론 질문 제거."""
+    cleaned = []
+    for item in items:
+        left = [o for o in item["options"] if not _is_todo_option(o)]
+        if len(left) < len(item["options"]) and LLM_DEBUG:
+            _dbg(f"[clarify] '할 일' 보기 {len(item['options']) - len(left)}개 제거: "
+                  f"{item['question'][:30]}")
+        # 잘린 조각이 남지 않게 너무 짧은 보기도 버립니다.
+        # 단 "예"/"네" 는 한 글자여도 정상 보기입니다.
+        left = [o for o in left
+                if len(o.strip()) >= 2 or o.strip() in ("예", "네")]
+        # ★ 2026-09-29 — "모름" 계열 보기가 둘 이상이면("모르겠음 / 모름") 하나만 남겨 맨 뒤로.
+        unk = [o for o in left if _is_unknown_option(o)]
+        if unk:
+            left = [o for o in left if not _is_unknown_option(o)] + ["모름"]
+        # ★ 2026-09-29 — 물음이 아닌 질문("우려기준 초과")은 버립니다.
+        #   사용자가 무엇을 골라야 하는지 알 수 없습니다.
+        if not re.search(r"(\?|？|까|요|나|가|지|니|죠)\s*$", item["question"].strip()):
+            _dbg(f"[clarify] 물음이 아닌 질문 제거: {item['question'][:40]}")
+            continue
+        # ★ 2026-09-29 — "어느 법이 적용되냐" 를 묻는 항목은 버립니다.
+        #   질문자는 법을 모르고, 법을 가리는 건 이 도구의 일입니다.
+        #   실제 사례: 질문 "토양환경보전법" / 보기 "광산피해의 … 법률 | 모름"
+        q_bare = re.sub(r"[\s?？.]+$", "", item["question"])
+        law_opts = [o for o in left if _looks_like_law(o.strip())]
+        if _looks_like_law(q_bare) or law_opts:
+            if LLM_DEBUG:
+                _dbg(f"[clarify] 법령 이름을 묻는 항목 제거: {item['question'][:30]} "
+                      f"/ {', '.join(left)[:60]}")
+            continue
+        # ★ 2026-10-02 — 결론(기한·의무)을 질문자에게 되묻는 항목은 버립니다.
+        #   실제 사례: 누출검사 주기를 물었는데 되묻기가
+        #   "다음 정기 누출검사를 언제까지 받아야 합니까?" — 질문자가 물은 것 그 자체.
+        if CONCLUSION_Q.search(item["question"]):
+            _dbg(f"[clarify] 결론을 되묻는 항목 제거: {item['question'][:40]}")
+            continue
+        if len(left) >= 2 and re.search(r"[가-힣]", item["question"]):
+            cleaned.append({"question": item["question"], "options": left})
+    return cleaned
+
+
 def clarify(question: str, answered: str = "", catalog: str = "") -> list[dict]:
     """
     질문이 애매하면 선택지를 돌려줍니다. 더 물을 게 없으면 빈 목록.
 
-    catalog 에는 실제로 수집된 조문 제목 목록을 넘깁니다.
+    catalog 에는 이 질문에 쓰려고 고른 조문·별표의 **본문 발췌**를 넘깁니다 (v1.31).
+    v1.30 까지는 조문 **제목** 목록 앞 60줄만 넘겨서, 기준값(2만L·1년·3회 등)을
+    모른 채 제목 단어를 되묻거나("…에 해당하나요?") 보기를 못 나눴습니다.
     이것이 없으면 AI 가 기억에 의존해 존재하지 않는 용어를 지어냅니다.
     (실제 사례: "특정토양오염유발시설" — 법령에 없는 이름)
     """
-    raw = _call(CLARIFY_PROMPT.format(
-        question=question, answered=answered or "(없음)",
-        catalog=catalog or "(아직 수집된 조문이 없습니다. 일반적인 표현으로만 물으세요.)"),
-        max_tokens=MAXTOK_CLARIFY, stage="clarify").strip()
+    fill = dict(question=question, answered=answered or "(없음)",
+                catalog=catalog or "(아직 수집된 조문이 없습니다. 일반적인 표현으로만 물으세요.)")
+
+    # ★ v1.31 — JSON 형식 강제를 먼저 시도합니다. 성공하면 형식 보정 단계를
+    #   건너뛰고 마지막 그물(_finalize_clarify)만 통과시킵니다.
+    obj, _ = call_json(CLARIFY_PROMPT.format(output_rules=_CLARIFY_RULES_JSON, **fill),
+                       CLARIFY_SCHEMA, temperature=0.2,
+                       max_tokens=MAXTOK_CLARIFY, stage="clarify")
+    if isinstance(obj, dict):
+        items = []
+        if not obj.get("done") or obj.get("questions"):
+            for it in (obj.get("questions") or [])[:3]:
+                if not isinstance(it, dict):
+                    continue
+                q = _clean_question(str(it.get("question") or "").strip()[:80],
+                                    [str(o) for o in (it.get("options") or [])])
+                opts = [str(o).strip()[:30] for o in (it.get("options") or []) if str(o).strip()]
+                opts = _expand_slash_options(opts)
+                opts = _fix_yesno(q, opts)
+                if len(q) >= 4 and len(opts) >= 2:
+                    items.append({"question": q, "options": opts})
+        out = _finalize_clarify(items)
+        if LLM_DEBUG:
+            _dbg(f"[clarify] JSON {len(items)}개 → 최종 {len(out)}개")
+        return out[:6]
+
+    raw = _call(CLARIFY_PROMPT.format(output_rules=_CLARIFY_RULES_TEXT, **fill),
+                max_tokens=MAXTOK_CLARIFY, stage="clarify").strip()
 
     # "OK" 만 나오면 더 물을 게 없다는 뜻입니다.
     # 로컬 모델은 "OK." "OK 입니다" 처럼 덧붙이기도 합니다.
@@ -1377,44 +1570,7 @@ def clarify(question: str, answered: str = "", catalog: str = "") -> list[dict]:
     #   ★ 2026-08-19 — 예전에는 이 그물이 마지막 분기 안에만 있어서,
     #     `continue` 로 빠져나가는 _promote_todo_options / _repair_all_questions
     #     결과는 **검사를 통째로 건너뛰었습니다.** 루프 밖으로 뺐습니다.
-    cleaned = []
-    for item in out:
-        left = [o for o in item["options"] if not _is_todo_option(o)]
-        if len(left) < len(item["options"]) and LLM_DEBUG:
-            _dbg(f"[clarify] '할 일' 보기 {len(item['options']) - len(left)}개 제거: "
-                  f"{item['question'][:30]}")
-        # 잘린 조각이 남지 않게 너무 짧은 보기도 버립니다.
-        # 단 "예"/"네" 는 한 글자여도 정상 보기입니다.
-        left = [o for o in left
-                if len(o.strip()) >= 2 or o.strip() in ("예", "네")]
-        # ★ 2026-09-29 — "모름" 계열 보기가 둘 이상이면("모르겠음 / 모름") 하나만 남겨 맨 뒤로.
-        unk = [o for o in left if _is_unknown_option(o)]
-        if unk:
-            left = [o for o in left if not _is_unknown_option(o)] + ["모름"]
-        # ★ 2026-09-29 — 물음이 아닌 질문("우려기준 초과")은 버립니다.
-        #   사용자가 무엇을 골라야 하는지 알 수 없습니다.
-        if not re.search(r"(\?|？|까|요|나|가|지|니|죠)\s*$", item["question"].strip()):
-            _dbg(f"[clarify] 물음이 아닌 질문 제거: {item['question'][:40]}")
-            continue
-        # ★ 2026-09-29 — "어느 법이 적용되냐" 를 묻는 항목은 버립니다.
-        #   질문자는 법을 모르고, 법을 가리는 건 이 도구의 일입니다.
-        #   실제 사례: 질문 "토양환경보전법" / 보기 "광산피해의 … 법률 | 모름"
-        q_bare = re.sub(r"[\s?？.]+$", "", item["question"])
-        law_opts = [o for o in left if _looks_like_law(o.strip())]
-        if _looks_like_law(q_bare) or law_opts:
-            if LLM_DEBUG:
-                _dbg(f"[clarify] 법령 이름을 묻는 항목 제거: {item['question'][:30]} "
-                      f"/ {', '.join(left)[:60]}")
-            continue
-        # ★ 2026-10-02 — 결론(기한·의무)을 질문자에게 되묻는 항목은 버립니다.
-        #   실제 사례: 누출검사 주기를 물었는데 되묻기가
-        #   "다음 정기 누출검사를 언제까지 받아야 합니까?" — 질문자가 물은 것 그 자체.
-        if CONCLUSION_Q.search(item["question"]):
-            _dbg(f"[clarify] 결론을 되묻는 항목 제거: {item['question'][:40]}")
-            continue
-        if len(left) >= 2 and re.search(r"[가-힣]", item["question"]):
-            cleaned.append({"question": item["question"], "options": left})
-    out = cleaned
+    out = _finalize_clarify(out)
 
     if LLM_DEBUG:
         _dbg(f"[clarify] {len(out)}개 질문 파싱 (원문 {len(raw.splitlines())}줄)")
@@ -1426,10 +1582,9 @@ SELECT_PROMPT = """너는 대한민국 법령 조문을 골라내는 도구다.
 아래 [조문 목록] 은 법령명과 조문 번호·제목만 나열한 것이다.
 [질문] 에 답하려면 어떤 조문의 본문을 읽어야 하는지 고르라.
 
-출력 형식 — 고른 번호만 쉼표로 나열한다. 다른 말은 쓰지 않는다.
+{output_rules}
 **질문에 답하는 데 가장 중요한 조문부터** 순서대로 적는다.
 (분량이 넘치면 뒤에 적은 것부터 뺀다)
-25,7,3,12
 
 가장 중요한 규칙 — 조문 제목을 반드시 읽어라:
 - **제목이 질문과 무관하면 절대 고르지 마라.** 번호가 비슷하다고 고르면 안 된다.
@@ -1461,6 +1616,25 @@ SELECT_PROMPT = """너는 대한민국 법령 조문을 골라내는 도구다.
 """
 
 
+_SELECT_RULES_TEXT = """출력 형식 — 고른 번호만 쉼표로 나열한다. 다른 말은 쓰지 않는다.
+예) 25,7,3,12"""
+
+_SELECT_RULES_JSON = """출력 형식 — JSON 하나만 출력한다.  예) {"ids": [25, 7, 3, 12]}"""
+
+SELECT_SCHEMA = {
+    "type": "object",
+    "properties": {"ids": {"type": "array", "items": {"type": "integer"},
+                           "minItems": 1, "maxItems": 40}},
+    "required": ["ids"],
+}
+
+
+def select_prompt(question: str, catalog: str) -> str:
+    """선별 프롬프트 (토큰 계산용으로 main.py 도 씁니다). 지금 쓰는 출력 형식을 따릅니다."""
+    rules = _SELECT_RULES_JSON if json_enabled() else _SELECT_RULES_TEXT
+    return SELECT_PROMPT.format(question=question, catalog=catalog, output_rules=rules)
+
+
 def select_articles(question: str, catalog: str) -> list[int]:
     """
     조문 제목 목록을 보여주고 필요한 것만 고르게 합니다.
@@ -1469,7 +1643,22 @@ def select_articles(question: str, catalog: str) -> list[int]:
     제목만 보여주고 고르면 2천 토큰이면 됩니다.
     반환: 고른 번호 목록. 실패하면 빈 목록(=전체 사용).
     """
-    raw = _call(SELECT_PROMPT.format(question=question, catalog=catalog),
+    obj, raw = call_json(select_prompt(question, catalog), SELECT_SCHEMA,
+                         temperature=0, max_tokens=MAXTOK_SELECT, stage="select")
+    if isinstance(obj, dict) and isinstance(obj.get("ids"), list):
+        nums = []
+        for n in obj["ids"]:
+            try:
+                n = int(n)
+            except (TypeError, ValueError):
+                continue
+            if 1 <= n <= 9999 and n not in nums:
+                nums.append(n)
+        if len(nums) > SELECT_MAX:
+            applog.step("조문 선별 상한", f"모델이 {len(nums)}개를 골라 앞 {SELECT_MAX}개만 씁니다")
+        return nums[:SELECT_MAX]
+    raw = _call(SELECT_PROMPT.format(question=question, catalog=catalog,
+                                     output_rules=_SELECT_RULES_TEXT),
                 temperature=0, max_tokens=MAXTOK_SELECT, stage="select")
     # 숫자만 뽑습니다. 모델이 설명을 덧붙여도 번호는 건집니다.
     # 다만 "제8조" 같은 조문 번호가 섞이지 않도록, 조/항/호 앞뒤 숫자는 제외합니다.

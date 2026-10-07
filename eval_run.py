@@ -262,6 +262,10 @@ def grade(case: dict, data: dict) -> dict:
                            방사성폐기물·가덕도신공항 법으로 답한 것을 못 잡았습니다)
       no_law_in_clarify : true 면 되묻기 질문·보기에 법령 이름이 있으면 실패
                           (2026-09-29 — "토양환경보전법 / 광산피해…법률 / 모름" 사고)
+      expect_intent     : 서버가 판정한 질문 유형(intent.kind)이 이것이어야 함 (v1.31)
+      no_clarify        : true 면 되묻기가 한 번도 없어야 함 (조문 조회·정의·일반 기준 질문)
+      expect_context    : 답변 컨텍스트에 **실제로 들어가야 하는** 조문 ["법령명 제N조", "법령명 [별표 N]"]
+                          — 검색·선별 단계 Recall. 답변이 틀렸을 때 원인이 검색인지 판단인지 가름
       no_conclusion_in_clarify : true 면 되묻기가 결론(의무·기한)을 사용자에게 물으면 실패
                           (2026-09-29 — "다음 정기 누출검사를 언제까지 받아야 합니까?" 사고)
     """
@@ -336,6 +340,28 @@ def grade(case: dict, data: dict) -> dict:
                if CONCLUSION_Q.search(it.get("question", "") or "")]
         ck("되묻기가 결론을 묻지 않음", not bad, " | ".join(bad)[:200])
 
+    # ── v1.31: 질문 유형 · 되묻기 없음 · 컨텍스트(검색 Recall) ──────────
+    if case.get("expect_intent"):
+        got = ((data.get("intent") or {}).get("kind")) or "(없음)"
+        ck(f"질문 유형: {case['expect_intent']}", got == case["expect_intent"], f"실제 {got}")
+    if case.get("no_clarify"):
+        used = len(data.get("_rounds") or [])
+        ck("되묻기 없음", used == 0, f"실제 {used}회")
+    if case.get("expect_context"):
+        keys = ((data.get("debug") or {}).get("context_keys")) or []
+        dropped = ((data.get("debug") or {}).get("dropped_keys")) or []
+        norm = lambda x: re.sub(r"\s+", "", str(x))
+        for want in case["expect_context"]:
+            w = norm(want)
+            if "별표" in want or "별지" in want:
+                hit = any(w in norm(k) for k in keys)
+                was_dropped = any(w in norm(k) for k in dropped)
+            else:
+                hit = any(w == norm(k) for k in keys)
+                was_dropped = any(w == norm(k) for k in dropped)
+            ck(f"컨텍스트 포함: {want}", hit,
+               "토큰 예산으로 빠짐" if was_dropped else f"컨텍스트 {len(keys)}개 중 없음")
+
     if not checks:                               # 기대값을 안 적었으면 최소 확인
         ck("답변이 비어 있지 않음", len(answer.strip()) > 20)
 
@@ -363,6 +389,21 @@ def write_report(results: list, base: str) -> str:
     L.append(f"- 서버: {base}")
     L.append(f"- 시나리오: **{passed}/{len(results)} 통과**  "
              f"(세부 검사 {total_ok}/{total_all})")
+    # ── v1.31: 층별 지표 (어느 단계에서 틀리는지) ──────────────────
+    def _layer(prefix):
+        ok = tot = 0
+        for r in results:
+            for c in r["grade"]["checks"]:
+                if c["name"].startswith(prefix):
+                    tot += 1
+                    ok += 1 if c["ok"] else 0
+        return f"{ok}/{tot}" if tot else "-"
+    over = [r["name"] for r in results
+            if r["case"].get("no_clarify") and (r["data"].get("_rounds") or [])]
+    L.append(f"- 검색(컨텍스트 Recall): **{_layer('컨텍스트 포함')}**  ·  "
+             f"질문 유형: {_layer('질문 유형')}  ·  "
+             f"과잉 되묻기: {len(over)}건" + (f" ({', '.join(over)})" if over else "")
+             + f"  ·  되묻기 품질(결론 질문 없음): {_layer('되묻기가 결론')}")
     L.append("")
     L.append("| 시나리오 | 결과 | 되묻기 | 소요 |")
     L.append("|---|---|---|---|")
@@ -382,6 +423,12 @@ def write_report(results: list, base: str) -> str:
         L.append("")
         L.append(f"**질문** {r['case']['question']}")
         L.append("")
+        _it = (d.get("intent") or {})
+        _ck = ((d.get("debug") or {}).get("context_keys")) or []
+        if _it or _ck:
+            L.append(f"- 질문 유형: {_it.get('label', '?')} · 컨텍스트 조문 {len(_ck)}개: "
+                     + ", ".join(_ck[:12]) + (" …" if len(_ck) > 12 else ""))
+            L.append("")
         for i, rd in enumerate(d.get("_rounds") or [], 1):
             L.append(f"- {i}차 되묻기: " + " / ".join(rd))
         if d.get("_rounds"):

@@ -78,14 +78,22 @@ import ai_client  # noqa: E402
 import applog  # noqa: E402
 import law_client  # noqa: E402
 import pdf_maker  # noqa: E402
+import intent as intent_mod  # noqa: E402
 
 # 되묻기 최대 라운드. .env 의 CLARIFY_ROUNDS 로 조절합니다.
 # 라운드마다 LLM 호출이 1회 늘어납니다.
-CLARIFY_ROUNDS = int(os.getenv("CLARIFY_ROUNDS", "6"))
+# ★ v1.31 — 6 → 3. 되묻기는 결론을 가르는 사실만 묻도록 바뀌었고(본문 기반),
+#   의도별로 아예 안 묻는 질문도 생겨 6번까지 왕복할 일이 없습니다.
+CLARIFY_ROUNDS = int(os.getenv("CLARIFY_ROUNDS", "3"))
 
 # 되묻기 판단에 넘길 조문 목록 줄 수.
 # 로컬 모델은 입력이 길수록 급격히 느려지므로 앞부분만 보여줍니다.
-CLARIFY_CATALOG_LINES = int(os.getenv("CLARIFY_CATALOG_LINES", "60"))
+CLARIFY_CATALOG_LINES = int(os.getenv("CLARIFY_CATALOG_LINES", "60"))   # v1.31 부터 미사용(호환용)
+
+# ★ v1.31 — 되묻기에 넘기는 **선별 조문 본문**의 토큰 상한.
+#   v1.30 까지는 조문 제목 60줄만 넘겼습니다. 본문을 넣어야 기준값(2만L·1년·3회)을
+#   보고 보기를 나눌 수 있습니다. 지시문(약 2.5천) + 이 값 + 출력(800) 이 컨텍스트 안에 듭니다.
+CLARIFY_CTX_TOKENS = int(os.getenv("CLARIFY_CTX_TOKENS", "5000"))
 
 # 답변 생성 때 출력(답변)용으로 남겨 둘 토큰 수.
 # ★ 2026-09-29 — 예전에는 조문을 "6만 자" 로 잘랐습니다(CONTEXT_LIMIT, 클라우드 모델 시절 값).
@@ -102,7 +110,7 @@ SELECT_ARTICLES = os.getenv("SELECT_ARTICLES", "1") not in ("0", "false", "False
 # 조회 후 지자체기관명으로 한 번 더 걸러냅니다.
 LOCAL_GOV = os.getenv("LOCAL_GOV", "성남시").strip()
 
-VERSION = "1.30"
+VERSION = "1.31"
 
 app = FastAPI(title="법령 조회 도우미", version=VERSION)
 
@@ -1076,6 +1084,127 @@ def _pick_stmd(rows: list, name: str):
     return min(pool, key=lambda x: len(x[1]))[0] if pool else None
 
 
+def _ctx_key(f: dict, a: dict) -> str:
+    """컨텍스트 조문의 표시 키 — "토양환경보전법 시행규칙 제12조", "… [별표 4] …" (평가용)."""
+    no = str(a.get("조문번호", "") or "").strip()
+    gaji = str(a.get("조문가지번호", "") or "").strip()
+    if no:
+        no = no.lstrip("0") or no
+        g = gaji.lstrip("0")
+        return f"{f.get('name', '')} 제{no}조" + (f"의{g}" if g else "")
+    return f"{f.get('name', '')} {str(a.get('조문제목', ''))[:40]}".strip()
+
+
+def _resolve_law_exact(cands: list):
+    """
+    법령명 후보(긴 것부터)를 법제처 검색 결과와 **이름이 정확히 같은** 법령으로 확정합니다.
+    반환: (검색 결과 행, 정식 이름) 또는 None.
+    공백·가운뎃점(·/ㆍ)만 무시하고 비교합니다. "시행령/시행규칙" 꼬리는 무시하지 않습니다
+    (법률 제12조와 시행규칙 제12조는 다른 조문).
+    """
+    LAW_T = law_client.LAW_TARGET
+
+    def key(n):
+        return _DOTS_RE.sub("", str(n or "")).replace(" ", "")
+
+    tried = set()
+    for cand in cands:
+        names = [cand]
+        try:
+            full = law_client.resolve_abbrev(cand)
+            if full and full != cand:
+                names.append(full)
+        except Exception:                                   # noqa: BLE001
+            pass
+        for nm in names:
+            for q in (nm, nm.replace("·", "ㆍ"), nm.replace("ㆍ", "·"), _DOTS_RE.sub("", nm)):
+                if not q or q in tried:
+                    continue
+                tried.add(q)
+                try:
+                    rows = law_client.search(LAW_T, q, display=100)
+                except law_client.LawApiError:
+                    rows = []
+                for r in rows:
+                    rn = law_client.row_name(LAW_T, r)
+                    if key(rn) == key(nm):
+                        return r, rn
+    return None
+
+
+def _ask_article(req, steps, it):
+    """
+    ★ v1.31 — 조문 직접 조회 경로 ("폐기물관리법 제25조 알려줘").
+    검색어 변환·체계도 수집·선별·되묻기를 모두 건너뛰고 그 조문 하나로 답합니다.
+    법령을 못 찾으면 None (일반 경로로 넘어감). 법령은 찾았는데 조문이 없으면
+    "없다" 고 분명히 답합니다 (지어내지 않음).
+    """
+    LAW_T = law_client.LAW_TARGET
+    hit = _resolve_law_exact(it.law_candidates or [it.law])
+    if not hit:
+        return None
+    row, name = hit
+    rid = law_client.row_id(LAW_T, row)
+    try:
+        detail = law_client.get_detail(LAW_T, rid)
+    except law_client.LawApiError as e:
+        steps.append({"name": "조문 조회 실패", "detail": str(e)[:120]})
+        return None
+
+    def _no(x):
+        return str(x or "").strip().lstrip("0")
+
+    arts_all = [a for a in detail.get("articles", [])
+                if a.get("조문여부") != "전문" and _no(a.get("조문번호"))]
+    arts = [a for a in arts_all
+            if _no(a.get("조문번호")) == it.jo and _no(a.get("조문가지번호")) == _no(it.gaji)]
+    label = f"제{it.jo}조" + (f"의{it.gaji}" if it.gaji else "")
+    f = {
+        "id": rid, "target": LAW_T,
+        "level": law_client.pick(row, "법령구분명", default="법령"),
+        "mst": law_client.pick(row, "법령일련번호"),
+        "name": name,
+        "kind": law_client.pick(row, "법령구분명", default="법령"),
+        "enforced": law_client.pick(row, "시행일자"),
+        "promulgation_no": law_client.pick(row, "공포번호"),
+        "ministry": law_client.pick(row, "소관부처명"),
+        "meta": detail.get("meta", {}),
+        "articles": arts,
+    }
+    steps.append({"name": "조문 직접 조회", "detail": f"「{name}」 {label}"
+                  + ("" if arts else " — 해당 조문 없음")})
+    if not arts:
+        nums = sorted({int(_no(a.get("조문번호"))) for a in arts_all if _no(a.get("조문번호")).isdigit()})
+        rng = f"제{nums[0]}조 ~ 제{nums[-1]}조" if nums else "확인 불가"
+        return {"steps": steps, "laws": [f], "citations": [], "warnings": [],
+                "answer": (f"【결론】\n「{name}」에서 {label}를 찾지 못했습니다. "
+                           f"이 법령의 조문 범위는 {rng} 입니다. 조문 번호를 다시 확인해 주세요."),
+                "intent": it.as_dict(), "debug": {"context_keys": [], "dropped_keys": []}}
+
+    a = arts[0]
+    title = a.get("조문제목", "")
+    body = a.get("조문내용", "")
+    context = (f"=== 여기부터는 「{name}」 조문입니다 (시행 {f.get('enforced') or '?'}) ===\n"
+               f"[{name}] {label}" + (f"({title})" if title else "") + f"\n{body}")
+    q = (req.question + "\n(질문 유형: 조문 조회 — 이 조문의 내용을 항·호 순서대로 쉽게 풀어 설명한다. "
+         "다른 조문·하위법령·별표에 넘기는 부분은 넘긴다는 사실만 적고 내용을 지어내지 않는다)")
+    try:
+        text = ai_client.answer(q, context)
+    except ai_client.AiError as e:
+        return _err(str(e))
+    cites = verify_citations(text, [f])
+    steps.append({"name": "인용 검증", "detail": f"{sum(1 for c in cites if c['ok'])}/{len(cites)}건 확인"})
+    hitk = sorted({(c["law"], c["jo"], c["gaji"]) for c in cites if c["ok"]})
+    return {
+        "steps": steps, "answer": text, "laws": [f], "citations": cites,
+        "cited_keys": [f"{n}|{j}|{g}" for n, j, g in hitk],
+        "references": [], "warnings": [],
+        "intent": it.as_dict(),
+        "debug": {"flat_n": len(arts_all), "picked_n": 1,
+                  "context_keys": [_ctx_key(f, a)], "dropped_keys": []},
+    }
+
+
 class _LoggedSteps(list):
     """steps.append 할 때마다 서버 로그에도 한 줄 남깁니다 (applog.step)."""
 
@@ -1139,6 +1268,20 @@ def _ask_sync(req: AskRequest, progress: list):
     # 사용자가 직접 적은 내용을 조건에 합칩니다.
     answered = " / ".join(x for x in (req.answered, req.note.strip()) if x)
 
+    # ★ v1.31 — 질문 의도(Intent). 규칙 기반이라 LLM 호출이 없습니다(intent.py).
+    #   경로가 갈립니다: 조문 조회는 그 조문만, 정의·일반 기준은 되묻기 없이 답변.
+    it = intent_mod.classify(req.question)
+    if req.round == 0:
+        steps.append({"name": "질문 유형",
+                      "detail": f"{it.label} — " + ", ".join(it.signals)[:100]})
+    if it.kind == intent_mod.ARTICLE_LOOKUP and req.target in ("auto", "law"):
+        direct = _ask_article(req, steps, it)
+        if direct is not None:
+            return direct
+        steps.append({"name": "조문 직접 조회 실패", "detail": "일반 검색으로 진행합니다"})
+        it = intent_mod.Intent(intent_mod.OTHER, intent_mod.LABEL[intent_mod.OTHER], True,
+                               signals=["조문 직접 조회 실패"])
+
     # 되묻기 라운드가 넘어갈 때마다 아래 1~3단계를 다시 실행하고 있었습니다.
     # 검색 결과는 되묻기 답변과 무관하게 같으므로(질문·대상이 같으면 같은 법령),
     # 조건은 키에서 뺍니다. 조건은 답변 생성에만 쓰입니다.
@@ -1149,11 +1292,12 @@ def _ask_sync(req: AskRequest, progress: list):
     cached = _cache_get(cache_key) if req.round > 0 else None
     if req.round == 0:
         _SEARCH_CACHE.pop(cache_key, None)
+        _SEARCH_CACHE.pop(("sel",) + cache_key, None)       # v1.31 조문 선별 캐시
     if cached:
         found, flat, catalog, refs = cached
         steps.append({"name": "이전 검색 재사용",
                       "detail": f"{len(found)}개 법령 / 조문 {len(flat)}개"})
-        return _ask_after_search(req, steps, answered, found, flat, catalog, refs)
+        return _ask_after_search(req, steps, answered, found, flat, catalog, refs, it)
 
     # --- 1단계: 법령 용어로 변환 ----------------------------------
     try:
@@ -1398,7 +1542,10 @@ def _ask_sync(req: AskRequest, progress: list):
         if req.target in ("auto", "admrul"):
             for q in (names + words)[:2]:
                 add("admrul", q, 2, "행정규칙")
-    if req.target in ("auto", "ordin"):
+    # ★ v1.31 — 자동(auto) 검색에서 조례를 뺍니다. 지금 범위는 국가법령이고,
+    #   LOCAL_GOV(특정 지자체)에 묶인 결과가 범용 답변을 흐렸습니다.
+    #   조례는 화면에서 대상으로 "자치법규" 를 직접 고를 때만 찾습니다.
+    if req.target == "ordin":
         # 조례는 "성남시 토양환경보전법" 같은 이름일 수 없습니다.
         # 법령명이 아니라 용어(누출검사, 토양오염)로 찾아야 합니다.
         gov = LOCAL_GOV or ""
@@ -1470,10 +1617,10 @@ def _ask_sync(req: AskRequest, progress: list):
     )
 
     _cache_put(cache_key, (found, flat, catalog, refs))
-    return _ask_after_search(req, steps, answered, found, flat, catalog, refs)
+    return _ask_after_search(req, steps, answered, found, flat, catalog, refs, it)
 
 
-def _ask_after_search(req, steps, answered, found, flat, catalog, refs):
+def _ask_after_search(req, steps, answered, found, flat, catalog, refs, it=None):
     """검색이 끝난 뒤의 단계. 되묻기 라운드마다 여기부터 다시 실행됩니다."""
     # ★ 2026-08-19 — 사용자가 "아니오" 라고 답한 주제의 법령을 빼는 처리가
     #   예전에는 **검색 경로 안에만** 있었습니다. 그런데 그 경로는 round=0
@@ -1510,57 +1657,36 @@ def _ask_after_search(req, steps, answered, found, flat, catalog, refs):
             return title or "(제목 없음)"
         return f"제{no}조" + (f"의{gaji}" if gaji else "") + (f"({title})" if title else "")
 
-    # --- 3-0단계: 갈래 판단 (되묻기) ------------------------------
-    # ★ 되묻기는 조문을 확보한 뒤에 합니다.
-    #   조문을 보기 전에 물으면 AI 가 기억에 의존해 존재하지 않는 용어를 지어냅니다.
-    #   (실제 사례: "특정토양오염유발시설" — 법령에 없는 이름,
-    #    "VOC 배출시설" — 다른 법 소관인데 선택지로 등장)
+    if it is None:
+        it = intent_mod.classify(req.question)
     MAX_ROUNDS = CLARIFY_ROUNDS
-    if not req.skip_clarify and req.round < MAX_ROUNDS:
-        # 되묻기에는 조문 목록을 통째로 넣지 않습니다.
-        # 수백 줄을 넣으면 로컬 모델이 몇 분씩 걸립니다.
-        # 갈래 판단에는 어떤 법령의 어떤 조문이 있는지 정도면 충분합니다.
-        brief = "\n".join(catalog.splitlines()[:CLARIFY_CATALOG_LINES])
-        if len(catalog.splitlines()) > CLARIFY_CATALOG_LINES:
-            brief += f"\n… (외 {len(catalog.splitlines()) - CLARIFY_CATALOG_LINES}개)"
-        try:
-            asks = ai_client.clarify(req.question, answered, brief)
-        except ai_client.AiError as e:
-            applog.warn(f"되묻기 판단 실패 — 건너뜁니다: {e}")
-            asks = []          # 판단 실패는 그냥 통과시킵니다
-
-        if asks:
-            # 이미 물은 질문(모름으로 답한 것 포함)과 겹치면 버립니다.
-            # 프롬프트 지시를 로컬 모델이 무시해도 여기서 최종적으로 막힙니다.
-            already = _asked_questions(answered)
-            fresh = [a for a in asks if not _is_repeat_question(a["question"], already)]
-            if not fresh:
-                applog.debug("clarify", f"이미 물은 질문 {len(asks)}개 반복 감지 → 되묻기 종료")
-                steps.append({"name": "되묻기 종료",
-                              "detail": "같은 질문이 반복돼 다음 단계로 진행"})
-            asks = fresh
-
-        if asks:
-            steps.append({"name": "질문 확인",
-                          "detail": f"{req.round + 1}차 · {len(asks)}개 항목"})
-            return {
-                "clarify": asks,
-                "round": req.round + 1,
-                "max_rounds": MAX_ROUNDS,
-                "answered": answered,
-                "steps": steps,
-            }
 
     # --- 3-1단계: 필요한 조문만 고르기 ----------------------------
     # 조문 본문을 통째로 넣으면 요청당 3만 토큰. 제목만 보여주고 고르면 2천 토큰.
+    # ★ v1.31 — 선별을 되묻기 **앞**으로 옮겼습니다. 되묻기가 선별된 조문 본문을
+    #   보고 판단하기 때문입니다. 선별은 질문에만 달려 있으므로(되묻기 답과 무관)
+    #   첫 라운드 결과를 조문 키로 저장해 두고 다음 라운드에서 재사용합니다
+    #   (라운드마다 LLM 을 다시 부르지 않음). 번호가 아니라 키로 저장하는 이유:
+    #   "아니오" 제외 조건으로 목록이 줄면 번호가 밀립니다.
+    def _akey(f, a):
+        return (f["name"], str(a.get("조문번호", "")), str(a.get("조문가지번호", "")),
+                a.get("조문제목", ""))
+
+    sel_key = ("sel", req.question.strip(), req.target)
     picked = None
-    if SELECT_ARTICLES and len(flat) > 12:
+    cached_sel = _cache_get(sel_key) if req.round > 0 else None
+    if cached_sel:
+        idx = {_akey(f, a): (f, a) for f, a in flat}
+        picked = [idx[k] for k in cached_sel if k in idx] or None
+        if picked:
+            steps.append({"name": "조문 선별 재사용",
+                          "detail": f"이전 라운드에서 고른 {len(picked)}개"})
+    elif SELECT_ARTICLES and len(flat) > 12:
         try:
             # ★ 2026-09-29 — 법령이 여럿이면 조문 목록만으로도 수천 토큰입니다.
             #   컨텍스트를 넘으면 목록 뒤쪽을 잘라서 보냅니다(번호는 그대로라 매핑 유지).
             cat_sel = catalog
-            n_sel = ai_client.count_tokens(
-                ai_client.SELECT_PROMPT.format(question=req.question, catalog=catalog))
+            n_sel = ai_client.count_tokens(ai_client.select_prompt(req.question, catalog))
             lim = ai_client.server_ctx() - ai_client.MAXTOK_SELECT - 64
             if n_sel > lim:
                 lines = catalog.splitlines()
@@ -1575,6 +1701,7 @@ def _ask_after_search(req, steps, answered, found, flat, catalog, refs):
             applog.warn(f"조문 선별 실패 — 전체 조문을 씁니다: {e}")
             picked = None                      # 실패하면 전체를 씁니다
         if picked:
+            _cache_put(sel_key, [_akey(f, a) for f, a in picked])
             steps.append({"name": "조문 선별",
                           "detail": f"{len(flat)}개 중 {len(picked)}개 선택"})
 
@@ -1779,6 +1906,69 @@ def _ask_after_search(req, steps, answered, found, flat, catalog, refs):
         steps.append({"name": "위임법령 힌트 추가",
                       "detail": f"법률 조문 {delegated_hits}개에 위임 조문번호 힌트 붙임"})
 
+    def _is_bp(u):
+        a = u[1]
+        return a.get("구분") in ("별표", "별지", "서식") or \
+            str(a.get("조문제목", "")).startswith(("[별표", "[별지", "[서식"))
+
+    # --- 3-2단계: 되묻기 (v1.31: 선별·별표 보강 **뒤**, 조문 **본문** 기반) ----
+    # ★ 2026-10-07 — v1.30 까지는 선별 **전에** 조문 **제목** 60줄만 보고 물었습니다.
+    #   · catalog 는 법령 순서로 나열돼 두 번째 법령·시행규칙·별표는 아예 안 보였고
+    #   · 기준값(2만L·1년·3회)은 본문·별표에 있어 보기를 나눌 수 없었습니다.
+    #   이제 선별된 조문과 별표 본문을 토큰 상한(CLARIFY_CTX_TOKENS) 안에서 넘깁니다.
+    # ★ 의도가 사용자 사실을 요구하지 않으면(조문 조회·정의·일반 기준) 묻지 않습니다.
+    if not req.skip_clarify and req.round == 0 and not it.needs_facts:
+        steps.append({"name": "되묻기 생략",
+                      "detail": f"질문 유형 '{it.label}' — 사례 사실 없이 답할 수 있음"})
+    if not req.skip_clarify and req.round < MAX_ROUNDS and it.needs_facts:
+        prim = [u for u in units if not _is_bp(u)]
+        bps = [u for u in units if _is_bp(u)]
+        order = prim[:8] + bps[:4] + prim[8:] + bps[4:]
+        parts, used = [], 0
+        for f, a, txt in order:
+            piece = txt if len(txt) <= 1500 else txt[:1500] + "\n…(이하 생략)"
+            if used + len(piece) > CLARIFY_CTX_TOKENS * 2 and parts:   # 글자 기준 1차 컷
+                break
+            parts.append(piece)
+            used += len(piece)
+        clar_ctx = "\n\n".join(parts)
+        n_cl = ai_client.count_tokens(clar_ctx)
+        if n_cl > CLARIFY_CTX_TOKENS:                                  # 토큰 기준 2차 컷
+            clar_ctx = clar_ctx[:int(len(clar_ctx) * CLARIFY_CTX_TOKENS / n_cl * 0.95)] \
+                + "\n…(분량 제한으로 이하 생략)"
+        try:
+            asks = ai_client.clarify(req.question, answered, clar_ctx)
+        except ai_client.AiError as e:
+            applog.warn(f"되묻기 판단 실패 — 건너뜁니다: {e}")
+            asks = []          # 판단 실패는 그냥 통과시킵니다
+
+        if asks:
+            # 이미 물은 질문(모름으로 답한 것 포함)과 겹치면 버립니다.
+            # 프롬프트 지시를 로컬 모델이 무시해도 여기서 최종적으로 막힙니다.
+            already = _asked_questions(answered)
+            fresh = [a for a in asks if not _is_repeat_question(a["question"], already)]
+            if not fresh:
+                applog.debug("clarify", f"이미 물은 질문 {len(asks)}개 반복 감지 → 되묻기 종료")
+                steps.append({"name": "되묻기 종료",
+                              "detail": "같은 질문이 반복돼 다음 단계로 진행"})
+            asks = fresh
+
+        if not asks:
+            steps.append({"name": "되묻기 판단",
+                          "detail": f"더 물을 것 없음 (조문 {len(parts)}개 본문 기준)"})
+        if asks:
+            steps.append({"name": "질문 확인",
+                          "detail": f"{req.round + 1}차 · {len(asks)}개 항목 "
+                                    f"(조문 {len(parts)}개 본문 기준)"})
+            return {
+                "clarify": asks,
+                "round": req.round + 1,
+                "max_rounds": MAX_ROUNDS,
+                "answered": answered,
+                "steps": steps,
+                "intent": it.as_dict(),
+            }
+
     def _assemble(sel):
         """법령별로 묶어 컨텍스트 텍스트를 만듭니다 (법령 순서는 use 에 처음 나온 순서)."""
         by_law = {}
@@ -1796,16 +1986,16 @@ def _ask_after_search(req, steps, answered, found, flat, catalog, refs):
     #   예산을 넘으면 중간을 뚝 자르지 않고, 우선순위가 낮은 조문부터 통째로 뺍니다.
     #   우선순위: 조문 선별이 고른 순서(선별 프롬프트가 중요한 것부터 적게 함).
     #   별표는 수치가 들어 있어 맨 나중에 뺍니다. 최소 3개는 남깁니다.
-    q_for_answer = req.question + (f"\n(확인된 조건: {answered})" if answered else "")
+    _hint = {
+        intent_mod.DEFINITION: "\n(질문 유형: 용어 정의 — 정의 조문을 먼저 인용하고 쉽게 풀어 설명한다)",
+        intent_mod.GENERAL_RULE: "\n(질문 유형: 일반 기준·절차 설명 — 특정 사례를 판정하는 질문이 아니다. "
+                                 "조건에 따라 기준이 달라지면 경우를 나눠 정리한다)",
+    }.get(it.kind, "")
+    q_for_answer = req.question + (f"\n(확인된 조건: {answered})" if answered else "") + _hint
     ctx_n = ai_client.server_ctx()
     overhead = ai_client.count_tokens(
         ai_client.ANSWER_PROMPT.format(question=q_for_answer, context=""))
     budget = ctx_n - overhead - min(ai_client.MAXTOK_ANSWER, ANSWER_RESERVE) - 96
-
-    def _is_bp(u):
-        a = u[1]
-        return a.get("구분") in ("별표", "별지", "서식") or \
-            str(a.get("조문제목", "")).startswith(("[별표", "[별지", "[서식"))
 
     keep = list(units)
     context, n_laws = _assemble(keep)
@@ -1849,8 +2039,7 @@ def _ask_after_search(req, steps, answered, found, flat, catalog, refs):
 
     # --- 4단계: 답변 + 검증 ---------------------------------------
     try:
-        text = ai_client.answer(
-            req.question + (f"\n(확인된 조건: {answered})" if answered else ""), context)
+        text = ai_client.answer(q_for_answer, context)
     except ai_client.AiError as e:
         return _err(str(e))
 
@@ -1897,4 +2086,12 @@ def _ask_after_search(req, steps, answered, found, flat, catalog, refs):
         "cited_keys": [f"{n}|{j}|{g}" for n, j, g in hit],
         "references": [r for r, _ in sorted(refs.items(), key=lambda x: -x[1])][:12],
         "warnings": warnings,
+        "intent": it.as_dict(),
+        # v1.31 — 평가용: 컨텍스트에 실제로 들어간 조문(검색 Recall 측정), 빠진 조문
+        "debug": {
+            "flat_n": len(flat),
+            "picked_n": len(picked or []),
+            "context_keys": [_ctx_key(f, a) for f, a, _ in keep],
+            "dropped_keys": [_ctx_key(f, a) for f, a, _ in dropped],
+        },
     }

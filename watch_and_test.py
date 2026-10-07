@@ -118,7 +118,7 @@ def login(base: str) -> str:
 
 # 감시할 파일. 이것들이 바뀌면 테스트를 다시 돌립니다.
 WATCH = [
-    "main.py", "ai_client.py", "law_client.py", "pdf_maker.py",
+    "main.py", "ai_client.py", "law_client.py", "pdf_maker.py", "intent.py",
     "eval_cases.json", os.path.join("static", "index.html"),
 ]
 
