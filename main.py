@@ -16,6 +16,7 @@ import urllib.parse
 from datetime import datetime, timedelta, timezone
 import logging
 import os
+import re
 import secrets
 
 # ── 서버 로그 형식 ──────────────────────────────────────────────
@@ -95,6 +96,45 @@ CLARIFY_CATALOG_LINES = int(os.getenv("CLARIFY_CATALOG_LINES", "60"))   # v1.31 
 #   보고 보기를 나눌 수 있습니다. 지시문(약 2.5천) + 이 값 + 출력(800) 이 컨텍스트 안에 듭니다.
 CLARIFY_CTX_TOKENS = int(os.getenv("CLARIFY_CTX_TOKENS", "5000"))
 
+# ★ v1.32 — 별표 본문을 AI 에 넘길 때의 글자 상한 (표 테두리·공백을 걷어낸 **뒤** 기준).
+#   v1.31 까지는 원문을 그대로 2,000자에서 잘랐습니다. 법제처 별표는 표 테두리(─│┼)와
+#   정렬용 공백이 절반 이상이라, 소음 규제기준(시행규칙 별표 8) 은 표만 들어가고
+#   **비고(작업시간 +5dB, 공휴일 −5dB 보정)** 가 통째로 잘렸습니다.
+#   → 68dB 을 65dB 와 비교해 "초과" 로 답한 원인.
+#   이제 테두리·공백을 걷어내고(같은 별표가 6천 → 2천 자), 그래도 길면 비고를 남깁니다.
+BP_CTX_CHARS = int(os.getenv("BP_CTX_CHARS", "3500"))
+_BOX_CHARS = re.compile(r"[─━┌┐└┘├┤┬┴┼┏┓┗┛┣┫┳┻╋═║╔╗╚╝╠╣╦╩╬]+")
+
+
+def _compact_bp(text: str) -> str:
+    """별표 원문에서 표 테두리·정렬 공백·빈 줄을 걷어냅니다. 글자(내용)는 그대로입니다."""
+    t = _BOX_CHARS.sub("", str(text or ""))
+    t = re.sub(r"[ \t　 ]+", " ", t)
+    lines = []
+    for ln in t.split("\n"):
+        ln = ln.strip()
+        if not ln.strip("│| "):            # 칸 구분자만 남은 줄
+            continue
+        lines.append(re.sub(r"\s*│\s*", "│", ln))
+    return "\n".join(lines)
+
+
+def _fit_keep_notes(text: str, limit: int) -> str:
+    """
+    limit 자 안으로 줄이되, 표 뒤의 **비고**(보정·예외·적용 범위)는 남깁니다.
+    비고는 표의 숫자를 바꾸는 규정이라 잘리면 답이 틀립니다 (예: 공사장 소음 +5dB).
+    """
+    t = str(text or "")
+    if len(t) <= limit:
+        return t
+    i = t.find("비고")
+    if i > limit * 0.4:                      # 비고가 상한 밖으로 밀려나는 경우만
+        notes = t[i:i + int(limit * 0.5)]
+        head = t[:max(200, limit - len(notes) - 30)]
+        tail = "\n…(이하 생략)" if i + len(notes) < len(t) else ""
+        return head + "\n…(표 일부 생략)…\n" + notes + tail
+    return t[:limit] + "\n…(이하 생략)"
+
 # 답변 생성 때 출력(답변)용으로 남겨 둘 토큰 수.
 # ★ 2026-09-29 — 예전에는 조문을 "6만 자" 로 잘랐습니다(CONTEXT_LIMIT, 클라우드 모델 시절 값).
 #   로컬 LLM 컨텍스트(16,384토큰)에는 처음부터 안 맞아 답변 단계가 400 으로 실패했습니다.
@@ -110,7 +150,7 @@ SELECT_ARTICLES = os.getenv("SELECT_ARTICLES", "1") not in ("0", "false", "False
 # 조회 후 지자체기관명으로 한 번 더 걸러냅니다.
 LOCAL_GOV = os.getenv("LOCAL_GOV", "성남시").strip()
 
-VERSION = "1.31"
+VERSION = "1.32"
 
 app = FastAPI(title="법령 조회 도우미", version=VERSION)
 
@@ -1294,10 +1334,10 @@ def _ask_sync(req: AskRequest, progress: list):
         _SEARCH_CACHE.pop(cache_key, None)
         _SEARCH_CACHE.pop(("sel",) + cache_key, None)       # v1.31 조문 선별 캐시
     if cached:
-        found, flat, catalog, refs = cached
+        found, flat, catalog, refs, ai_hits = cached
         steps.append({"name": "이전 검색 재사용",
                       "detail": f"{len(found)}개 법령 / 조문 {len(flat)}개"})
-        return _ask_after_search(req, steps, answered, found, flat, catalog, refs, it)
+        return _ask_after_search(req, steps, answered, found, flat, catalog, refs, it, ai_hits)
 
     # --- 1단계: 법령 용어로 변환 ----------------------------------
     try:
@@ -1308,7 +1348,31 @@ def _ask_sync(req: AskRequest, progress: list):
 
     names = terms.get("법령명", [])
     words = terms.get("용어", [])
-    if not names and not words:
+
+    # ★ v1.31 — 법제처 지능형 검색: 질문 **원문**을 넣어 관련 조문을 관련도 순으로 받습니다.
+    #   로컬 LLM 의 법령명 추측(가끔 없는 법을 지어냄)과 가나다순 본문검색을 보완합니다.
+    #   실패하거나 비어 있으면 예전 방식 그대로 갑니다.
+    ai_hits, ai_laws = [], []
+    if req.target in ("auto", "law"):
+        try:
+            ai_rows = law_client.ai_search(req.question, display=20)
+        except Exception as e:                              # noqa: BLE001
+            ai_rows = []
+            applog.warn(f"지능형 검색 실패 — 건너뜁니다: {e}")
+        for r in ai_rows:
+            nm = (r.get("법령명") or "").strip()
+            base = re.sub(r"\s*(시행령|시행규칙)$", "", nm).strip()
+            if base and base not in ai_laws:
+                ai_laws.append(base)
+            if nm and r.get("조문번호"):
+                ai_hits.append((nm, r.get("조문번호", ""), r.get("조문가지번호", "")))
+        if ai_laws:
+            steps.append({"name": "지능형 검색",
+                          "detail": f"관련 법령(관련도 순): {', '.join(ai_laws[:5])} · 조문 {len(ai_hits)}개"})
+        elif ai_rows == []:
+            steps.append({"name": "지능형 검색", "detail": "결과 없음"})
+
+    if not names and not words and not ai_laws:
         return {"steps": steps, "answer": "검색어를 만들지 못했습니다. 질문을 더 구체적으로 써보세요.", "laws": []}
 
     found, seen = [], set()
@@ -1475,6 +1539,16 @@ def _ask_sync(req: AskRequest, progress: list):
                                   f"퍼져 근거가 약함 — AI 추측 '{', '.join(cand)}' 유지",
                     })
 
+        # ★ v1.31 — 지능형 검색 1순위 법령을 후보 맨 앞에 둡니다. 로컬 LLM 의 추측은
+        #   (체계도에 실제로 있으면) 2순위로 남겨 둡니다 — 둘 다 수집하고 조문 선별이 고릅니다.
+        if ai_laws:
+            top = ai_laws[0]
+            if not any(_law_key(top) == _law_key(c) for c in cand):
+                steps.append({"name": "법령 후보 보정(지능형 검색)",
+                              "detail": f"'{top}' 을(를) 먼저 봅니다"
+                                        + (f" (AI 추측: {', '.join(cand)})" if cand else "")})
+            cand = [top] + [c for c in cand if _law_key(c) != _law_key(top)]
+
         # v1.3 의 조문 선별이 붙어 토큰 부담이 크게 줄었으므로 후보를 2개로 되돌립니다.
         # 1개만 쓰면 "누출검사" 처럼 여러 법에 쓰이는 용어에서 엉뚱한 법 하나만
         # 잡고 끝나 답이 통째로 틀립니다. (토양환경보전법 → 위험물안전관리법)
@@ -1616,11 +1690,11 @@ def _ask_sync(req: AskRequest, progress: list):
         f"{i+1}. [{f['name']}] {label_of(a)}" for i, (f, a) in enumerate(flat)
     )
 
-    _cache_put(cache_key, (found, flat, catalog, refs))
-    return _ask_after_search(req, steps, answered, found, flat, catalog, refs, it)
+    _cache_put(cache_key, (found, flat, catalog, refs, ai_hits))
+    return _ask_after_search(req, steps, answered, found, flat, catalog, refs, it, ai_hits)
 
 
-def _ask_after_search(req, steps, answered, found, flat, catalog, refs, it=None):
+def _ask_after_search(req, steps, answered, found, flat, catalog, refs, it=None, ai_hits=None):
     """검색이 끝난 뒤의 단계. 되묻기 라운드마다 여기부터 다시 실행됩니다."""
     # ★ 2026-08-19 — 사용자가 "아니오" 라고 답한 주제의 법령을 빼는 처리가
     #   예전에는 **검색 경로 안에만** 있었습니다. 그런데 그 경로는 round=0
@@ -1701,9 +1775,29 @@ def _ask_after_search(req, steps, answered, found, flat, catalog, refs, it=None)
             applog.warn(f"조문 선별 실패 — 전체 조문을 씁니다: {e}")
             picked = None                      # 실패하면 전체를 씁니다
         if picked:
-            _cache_put(sel_key, [_akey(f, a) for f, a in picked])
             steps.append({"name": "조문 선별",
                           "detail": f"{len(flat)}개 중 {len(picked)}개 선택"})
+        # ★ v1.31 — 지능형 검색이 지목한 조문(관련도 상위 6개)은 선별 결과에 없어도 앞에 넣습니다.
+        #   제목만 보는 선별이 놓치는 조문(예: 시행령 제8조 검사 주기)을 보완합니다.
+        if ai_hits and picked is not None:
+            def _n(x):
+                return str(x or "").strip().lstrip("0")
+            have = {_akey(f, a) for f, a in picked}
+            extra = []
+            for law, jo, gaji in ai_hits[:6]:
+                for f, a in flat:
+                    if (_law_key(f["name"]) == _law_key(law) and law.replace(" ", "") == f["name"].replace(" ", "")
+                            and _n(a.get("조문번호")) == _n(jo) and _n(a.get("조문가지번호")) == _n(gaji)
+                            and _akey(f, a) not in have):
+                        extra.append((f, a))
+                        have.add(_akey(f, a))
+                        break
+            if extra:
+                picked = extra + picked
+                steps.append({"name": "지능형 검색 조문 추가",
+                              "detail": ", ".join(_ctx_key(f, a) for f, a in extra)})
+        if picked:
+            _cache_put(sel_key, [_akey(f, a) for f, a in picked])
 
     # ★ 아래에서 별표를 덧붙이므로 반드시 복사본으로 씁니다.
     #   picked/flat 을 그대로 쓰면 append 가 원본 목록을 오염시킵니다.
@@ -1786,7 +1880,7 @@ def _ask_after_search(req, steps, answered, found, flat, catalog, refs, it=None)
                 link = (row or {}).get("link", "")
                 title = (row or {}).get("title", "")
                 if row and row.get("body"):
-                    body = row["body"][:6000]
+                    body = row["body"][:12000]    # v1.32: 6천 → 1만2천 (비고까지 받도록; 넘길 때 압축)
                     fetched.append(f"{law_name} {kind} {no}")
                 elif kind == "별지":
                     # 별지는 신고서·신청서 같은 **서식**입니다. 주기·수치를 정하지
@@ -1836,8 +1930,10 @@ def _ask_after_search(req, steps, answered, found, flat, catalog, refs, it=None)
     units = []             # (법령, 조문, 컨텍스트에 들어갈 텍스트)
     for f, a in use:
         body = a.get("조문내용", "")
-        if a.get("구분") in ("별표", "별지", "서식"):
-            body = body[:2000]
+        if a.get("구분") in ("별표", "별지", "서식") or \
+                str(a.get("조문제목", "")).startswith(("[별표", "[별지", "[서식")):
+            # v1.32: 원문 2천 자 자르기 → 테두리·공백 압축 후 비고를 남기며 자르기
+            body = _fit_keep_notes(_compact_bp(body), BP_CTX_CHARS)
 
         # ★ 위임법령(lsDelegated) 힌트 — 이 조문이 위임한 하위법령 조문번호를
         #   법제처 데이터로 못박아 둡니다. AI가 시행령·시행규칙 조문번호를
@@ -1926,7 +2022,8 @@ def _ask_after_search(req, steps, answered, found, flat, catalog, refs, it=None)
         order = prim[:8] + bps[:4] + prim[8:] + bps[4:]
         parts, used = [], 0
         for f, a, txt in order:
-            piece = txt if len(txt) <= 1500 else txt[:1500] + "\n…(이하 생략)"
+            # 별표는 비고(보정·예외)가 보기를 가르므로 조금 더 길게, 비고를 남겨 자릅니다.
+            piece = _fit_keep_notes(txt, 2500 if _is_bp((f, a, txt)) else 1500)
             if used + len(piece) > CLARIFY_CTX_TOKENS * 2 and parts:   # 글자 기준 1차 컷
                 break
             parts.append(piece)

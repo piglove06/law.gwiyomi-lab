@@ -30,6 +30,7 @@ import argparse
 import json
 import os
 import re
+import shlex
 import sys
 import time
 import urllib.error
@@ -499,7 +500,24 @@ def main():
     ap.add_argument("--base", default="http://127.0.0.1:8000")
     ap.add_argument("--only", default="", help="이름에 이 말이 들어간 시나리오만")
     ap.add_argument("--cases", default=CASES)
-    args = ap.parse_args()
+    # ★ v1.32 — `_eval\\ARGS` 파일이 있으면 그 내용을 인자로 한 번만 덧붙입니다(읽고 지움).
+    #   감시 프로그램을 다시 켜지 않아도 "다음 실행은 eval_extra.json 으로" 를 지정할 수 있습니다.
+    #   예) ARGS 내용: --cases eval_extra.json
+    argv = sys.argv[1:]
+    args_file = os.path.join(OUTDIR, "ARGS")
+    if os.path.exists(args_file):
+        try:
+            with open(args_file, encoding="utf-8", errors="replace") as f:
+                extra = shlex.split(f.read().strip(), posix=False)
+            os.remove(args_file)
+        except OSError:
+            extra = []
+        if extra:
+            print(f"_eval/ARGS 적용: {' '.join(extra)}")
+            argv = argv + extra
+    args = ap.parse_args(argv)
+    if not os.path.isabs(args.cases) and not os.path.exists(args.cases):
+        args.cases = os.path.join(HERE, args.cases)
 
     global _AUTH_COOKIE
     _AUTH_COOKIE = login(args.base)

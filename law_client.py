@@ -269,6 +269,38 @@ def search(target: str, query: str, display: int = 20, scope: int = 1,
     return rows
 
 
+def ai_search(query: str, display: int = 20, kind: str = "0") -> list[dict]:
+    """
+    ★ v1.31 — 법제처 **지능형 검색** (lawSearch.do?target=aiSearch).
+
+    자연어 질문을 넣으면 관련 **조문**을 관련도 순으로 돌려줍니다.
+    ("주유소 지하 저장탱크 누출검사 주기" → 토양환경보전법 시행령 제8조 …)
+    지금까지의 검색(법령명 검색·본문 검색)은 이름 부분일치 + **가나다순**이라
+    관련도 순위가 없었고, 로컬 LLM 이 법령명을 잘못 추측하면 엉뚱한 법으로 갔습니다.
+    (2026-10-07 평가: "지하저장탱크 누출검사 등에 관한 법률" 이라는 없는 법을 추측 →
+     본문 검색 복구가 가나다순 첫 법인 건설기계관리법으로 감)
+
+    kind: "0" 법령 조문, "1" 법령 별표·서식
+    반환: [{"법령명", "법령ID", "법령종류명", "조문번호", "조문가지번호", "조문제목", "조문내용", …}]
+    응답 모양은 korean-law-mcp(MIT) 의 파서를 참고했습니다. 실패하면 LawApiError.
+    """
+    params = {"target": "aiSearch", "query": query, "search": str(kind),
+              "display": _clamp_display(display)}
+    xml_text = _get(SEARCH_URL, params)
+    try:
+        root = ET.fromstring(xml_text)
+    except ET.ParseError as e:
+        raise LawApiError(f"지능형 검색 XML 파싱 실패: {e}\n앞부분: {xml_text[:200]}") from e
+    rows = []
+    for child in root:
+        if len(child) == 0:
+            continue
+        d = {g.tag: "".join(g.itertext()).strip() for g in child}
+        if d.get("법령명") or d.get("행정규칙명"):
+            rows.append(d)
+    return rows
+
+
 def search_all(target: str, query: str, scope: int = 1,
                max_items: int = 300, per_page: int = MAX_DISPLAY) -> list[dict]:
     """

@@ -43,6 +43,7 @@ from __future__ import annotations
 import argparse
 import json
 import os
+import shlex
 import shutil
 import subprocess
 import sys
@@ -327,9 +328,10 @@ def python_exe() -> str:
     return venv if os.path.exists(venv) else sys.executable
 
 
-def run_eval(base: str) -> tuple[int, str, str]:
-    """eval_run.py 를 돌리고 (종료코드, 최신 보고서 경로, 출력) 을 돌려줍니다."""
-    cmd = [python_exe(), os.path.join(HERE, "eval_run.py"), "--base", base]
+def run_eval(base: str, extra: list | None = None) -> tuple[int, str, str]:
+    """eval_run.py 를 돌리고 (종료코드, 최신 보고서 경로, 출력) 을 돌려줍니다.
+    extra: eval_run.py 에 더 넘길 인자 (예: ["--cases", "eval_extra.json"], ["--only", "소음"])"""
+    cmd = [python_exe(), os.path.join(HERE, "eval_run.py"), "--base", base] + list(extra or [])
     log("테스트 시작…")
     try:
         p = subprocess.run(cmd, cwd=HERE, capture_output=True,
@@ -392,6 +394,7 @@ def main() -> int:
     log(f"  커밋만 요청하려면 이 파일에 메시지를 적으세요 → {COMMITFILE}")
     prev = snapshot()
     pending_since = 0.0
+    run_extra: list = []
     last_status, status_since, last_status_check = git_status(), time.time(), time.time()
 
     while True:
@@ -416,11 +419,19 @@ def main() -> int:
 
             reason = ""
             if os.path.exists(RUNFILE):
+                # ★ 2026-10-07 — RUN 파일 내용이 "--" 로 시작하면 eval_run.py 인자로 넘깁니다.
+                #   예) --cases eval_extra.json      (다른 시나리오 파일)
+                #       --only 소음                  (이름에 '소음' 이 든 시나리오만)
+                #   전체 17개(약 35분)를 다 돌리지 않고 고친 부분만 빨리 확인할 때 씁니다.
+                run_text = ""
                 try:
+                    with open(RUNFILE, encoding="utf-8", errors="replace") as f:
+                        run_text = f.read().strip()
                     os.remove(RUNFILE)
                 except OSError:
                     pass
-                reason = "RUN 파일 요청"
+                run_extra = shlex.split(run_text, posix=False) if run_text.startswith("--") else []
+                reason = "RUN 파일 요청" + (f" ({' '.join(run_extra)})" if run_extra else "")
                 pending_since = 0.0
             else:
                 cur = snapshot()
@@ -459,7 +470,8 @@ def main() -> int:
                 last_status, status_since = git_status(), time.time()
                 continue
 
-            rc, path, out = run_eval(args.base)
+            rc, path, out = run_eval(args.base, run_extra)
+            run_extra = []
             if not args.no_commit:
                 git_commit_push(push=not args.no_push, suffix=eval_score(out))
             prev = snapshot()                    # 커밋이 mtime 을 건드려도 되돌립니다
