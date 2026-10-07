@@ -10,8 +10,10 @@ C#으로 치면 HttpClient를 감싼 서비스 클래스입니다.
   - XML 응답의 태그 이름       : 미확인. dump_raw() 로 직접 보고 확정할 것.
 """
 
+import html
 import os
 import re
+import time
 import xml.etree.ElementTree as ET
 
 import httpx
@@ -141,12 +143,20 @@ def _require_oc() -> str:
 def _get(url: str, params: dict) -> str:
     """공통 GET 호출. 응답 본문(문자열)을 그대로 돌려줍니다."""
     params = {"OC": _require_oc(), "type": "XML", **params}
-    try:
-        # httpx 는 requests 와 거의 같은데 async 를 지원해서 FastAPI 와 궁합이 좋습니다.
-        resp = httpx.get(url, params=params, timeout=TIMEOUT)
-        resp.raise_for_status()
-    except httpx.HTTPError as e:
-        raise LawApiError(f"법제처 호출 실패: {e}") from e
+    # ★ v1.32 — 한 번 실패하면 1초 쉬고 한 번 더 부릅니다.
+    #   실제 사례: 같은 "토양환경보전법" 체계도 조회가 21:14 에는 조용히 실패하고 8분 뒤에는 성공 →
+    #   첫 후보가 통째로 빠져 다른 법(석유사업법) 위에서 답했습니다.
+    for attempt in (1, 2):
+        try:
+            # httpx 는 requests 와 거의 같은데 async 를 지원해서 FastAPI 와 궁합이 좋습니다.
+            resp = httpx.get(url, params=params, timeout=TIMEOUT)
+            resp.raise_for_status()
+            break
+        except httpx.HTTPError as e:
+            if attempt == 1:
+                time.sleep(1.0)
+                continue
+            raise LawApiError(f"법제처 호출 실패(2회): {e}") from e
 
     # 법제처가 인증 실패 시에도 HTTP 200 에 에러 문구를 담아 보내는 경우가 있습니다.
     if "인증" in resp.text and len(resp.text) < 300:
@@ -269,6 +279,22 @@ def search(target: str, query: str, display: int = 20, scope: int = 1,
     return rows
 
 
+_XML_ENTS = {"amp", "lt", "gt", "quot", "apos"}
+
+
+def _fix_html_entities(text: str) -> str:
+    """XML 에 정의되지 않은 HTML 이름 엔티티(&middot; &nbsp; …)를 실제 글자로 바꿉니다."""
+    def rep(m):
+        name = m.group(1)
+        if name in _XML_ENTS:
+            return m.group(0)
+        ch = html.unescape(m.group(0))
+        if ch == m.group(0):                       # 모르는 이름 — & 를 이스케이프
+            return "&amp;" + name + ";"
+        return ch.replace("&", "&amp;").replace("<", "&lt;")
+    return re.sub(r"&([A-Za-z][A-Za-z0-9]{1,31});", rep, str(text or ""))
+
+
 def ai_search(query: str, display: int = 20, kind: str = "0") -> list[dict]:
     """
     ★ v1.31 — 법제처 **지능형 검색** (lawSearch.do?target=aiSearch).
@@ -289,8 +315,15 @@ def ai_search(query: str, display: int = 20, kind: str = "0") -> list[dict]:
     xml_text = _get(SEARCH_URL, params)
     try:
         root = ET.fromstring(xml_text)
-    except ET.ParseError as e:
-        raise LawApiError(f"지능형 검색 XML 파싱 실패: {e}\n앞부분: {xml_text[:200]}") from e
+    except ET.ParseError:
+        # ★ v1.32 — 응답이 질문을 되돌려 줄 때 "·" 를 &middot; 같은 **HTML 엔티티**로 적어
+        #   XML 파서가 "undefined entity" 로 깨졌습니다(질문 "휘발유·경유 합계 30,000리터").
+        #   XML 기본 5개(&amp; &lt; &gt; &quot; &apos;) 외의 이름 엔티티를 글자로 바꿔 다시 읽습니다.
+        fixed = _fix_html_entities(xml_text)
+        try:
+            root = ET.fromstring(fixed)
+        except ET.ParseError as e:
+            raise LawApiError(f"지능형 검색 XML 파싱 실패: {e}\n앞부분: {xml_text[:200]}") from e
     rows = []
     for child in root:
         if len(child) == 0:

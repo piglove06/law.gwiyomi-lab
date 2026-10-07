@@ -1556,19 +1556,28 @@ def _ask_sync(req: AskRequest, progress: list):
         # v1.3 의 조문 선별이 붙어 토큰 부담이 크게 줄었으므로 후보를 2개로 되돌립니다.
         # 1개만 쓰면 "누출검사" 처럼 여러 법에 쓰이는 용어에서 엉뚱한 법 하나만
         # 잡고 끝나 답이 통째로 틀립니다. (토양환경보전법 → 위험물안전관리법)
-        for nm in cand[:2]:
+        # ★ v1.32 — 후보 하나가 체계도 조회에 실패하면 **조용히 건너뛰고** 나머지 하나로만
+        #   답하던 문제. 실패를 처리 과정에 남기고, 성공 2개가 될 때까지 다음 후보로 넘어갑니다.
+        stmd_ok, stmd_fail = 0, []
+        for nm in cand:
+            if stmd_ok >= 2:
+                break
             base = nm.replace(" 시행령", "").replace(" 시행규칙", "").strip()
             rows = _stmd_rows(base)
             row = _pick_stmd(rows, base) if rows else None
             if row is None:
+                stmd_fail.append(f"{base}(체계도 검색 결과 없음)")
                 continue
             mst = law_client.pick(row, "법령일련번호")
             if not mst:
+                stmd_fail.append(f"{base}(법령일련번호 없음)")
                 continue
             try:
                 tree = law_client.get_hierarchy(mst)
-            except law_client.LawApiError:
+            except law_client.LawApiError as e:
+                stmd_fail.append(f"{base}(체계도 조회 실패: {str(e)[:60]})")
                 continue
+            stmd_ok += 1
             for L in tree["laws"]:                       # 법률·시행령·시행규칙
                 if L["id"] and L["id"] not in seen:
                     seen.add(L["id"])
@@ -1603,6 +1612,11 @@ def _ask_sync(req: AskRequest, progress: list):
                         "kind": A["kind"], "enforced": A["enforced"],
                         "promulgation_no": A["promulgation_no"], "ministry": "",
                     })
+        if stmd_fail:
+            applog.warn("법령 후보 체계도 실패: " + ", ".join(stmd_fail))
+            steps.append({"name": "법령 후보 일부 실패",
+                          "detail": ", ".join(stmd_fail[:3])
+                                    + (" — 다음 후보로 대신했습니다" if stmd_ok else "")})
 
     # 체계도로 못 찾았으면 일반 검색으로 보완
     if not found:

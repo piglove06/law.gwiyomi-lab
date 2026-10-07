@@ -498,7 +498,7 @@ def write_report(results: list, base: str) -> str:
 def main():
     ap = argparse.ArgumentParser()
     ap.add_argument("--base", default="http://127.0.0.1:8000")
-    ap.add_argument("--only", default="", help="이름에 이 말이 들어간 시나리오만")
+    ap.add_argument("--only", default="", help="이름에 이 말이 들어간 시나리오만 (| 로 여러 개)")
     ap.add_argument("--cases", default=CASES)
     # ★ v1.32 — `_eval\\ARGS` 파일이 있으면 그 내용을 인자로 한 번만 덧붙입니다(읽고 지움).
     #   감시 프로그램을 다시 켜지 않아도 "다음 실행은 eval_extra.json 으로" 를 지정할 수 있습니다.
@@ -540,7 +540,8 @@ def main():
         with open(cf, encoding="utf-8") as f:
             cases += json.load(f)
     if args.only:
-        cases = [c for c in cases if args.only in c.get("name", "")]
+        keys = [k for k in args.only.split("|") if k]       # "주유소|누출검사" 처럼 여러 개
+        cases = [c for c in cases if any(k in c.get("name", "") for k in keys)]
     if not cases:
         print("실행할 시나리오가 없습니다.")
         return 2
