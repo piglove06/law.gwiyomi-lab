@@ -442,7 +442,11 @@ def _clean_body(text: str) -> str:
     t = str(text or "")
     t = re.sub(r"<img[^>]*>(?:\s*</img>)?", "[그림·표 생략]", t, flags=re.I)
     t = re.sub(r"</?img[^>]*>", "", t, flags=re.I)
-    t = re.sub(r"\s{3,}", " ", t)
+    # ★ 2026-10-02 — 예전에는 공백·줄바꿈을 가리지 않고 3개 이상이면 한 칸으로
+    #   뭉갰습니다(\s{3,}). 목을 "줄바꿈 + 들여쓰기" 로 붙이면 그 줄바꿈까지 먹혀
+    #   가.·나.·다. 가 앞 호와 한 줄로 붙었습니다. 가로 공백만 줄이고 줄바꿈은 살립니다.
+    t = re.sub(r"[ \t]{3,}", " ", t)
+    t = re.sub(r"[ \t]*\n[ \t]*\n[\s]*\n", "\n\n", t)    # 빈 줄은 최대 하나
     return t.strip()
 
 
@@ -477,22 +481,21 @@ def _extract_articles(root: ET.Element) -> list[dict]:
         # 그때는 본문 첫머리의 "제64조(정기점검의 횟수)" 에서 제목을 뽑습니다.
         title = g("조문제목") or _title_from_body(content)
         # 항 → 호 → 목 순서로 붙입니다.
-        # ★ 법제처 XML 에서 <목> 은 <호> 안이 아니라 <항> 바로 아래 형제로 있습니다.
-        #   그래서 호만 훑으면 "가. 나. 다." 목이 통째로 빠집니다.
-        #   문서 순서(document order)대로 읽어야 목이 해당 호 뒤에 제자리로 들어갑니다.
-        for hang in unit.findall("항"):
-            h = hang.find("항내용")
-            if h is not None and h.text:
-                content += "\n" + h.text.strip()
-            for child in hang:                       # 문서에 적힌 순서대로
-                if child.tag == "호":
-                    t = child.findtext("호내용")
-                    if t:
-                        content += "\n" + t.strip()
-                elif child.tag == "목":
-                    t = child.findtext("목내용")
-                    if t:
-                        content += "\n  " + t.strip()   # 목은 한 단 들여씁니다
+        # ★ 2026-10-02 — 예전 주석은 "<목> 은 <항> 바로 아래 호의 형제" 라고 했고 코드도
+        #   그렇게 짰는데, 실제 법제처 XML 은 **<항>/<호>/<목>** 으로 목이 호 **안**에
+        #   있습니다(_dump/01_eflaw_detail.xml 에서 목 12개 모두 부모가 <호>).
+        #   그래서 "다음 각 목의 어느 하나에 해당하는…" 뒤의 가.·나.·다. 가 **전부**
+        #   빠지고 있었습니다(9/29 테스트 수집 조문 175곳 중 174곳). 예) 악취방지법
+        #   제6조 지정요건 2호, 토양환경보전법 시행령 제8조 누출검사 사유.
+        #   → 중첩 깊이와 상관없이 문서 순서대로 항·호·목 내용을 모두 읽습니다.
+        #     항이 없이 조 바로 아래 호가 오는 조문도 같이 잡힙니다.
+        for el in unit.iter():
+            if el.tag not in ("항내용", "호내용", "목내용"):
+                continue
+            t = "".join(el.itertext()).strip()
+            if not t:
+                continue
+            content += ("\n  " if el.tag == "목내용" else "\n") + t   # 목은 한 단 들여씁니다
         if not content:
             continue
         articles.append({
@@ -571,6 +574,13 @@ def _extract_articles(root: ET.Element) -> list[dict]:
         #   가지번호도 함께 읽습니다 — 안 읽으면 별표 6 과 별표 6의3 이 둘 다
         #   "[별표 6]" 이 되어 서로를 덮어씁니다.
         _bno, _bgaji = _byl_no(bg("별표번호"))
+        # ★ 2026-10-02 — 법령 본문 조회 응답은 번호를 4자리(0003) + 별도 태그
+        #   <별표가지번호>(02) 로 줍니다. 가지번호 태그를 안 읽어서 별표 3 과 별표 3의2 가
+        #   둘 다 "[별표 3]" 이 되어 서로 섞였습니다(토양환경보전법 시행규칙 실측).
+        if not _bgaji:
+            _gj = bg("별표가지번호")
+            if _gj.isdigit() and int(_gj):
+                _bgaji = str(int(_gj))
         _label = (_bno + (f"의{_bgaji}" if _bgaji else "")) or "?"
         articles.append({
             "조문번호": "", "조문가지번호": "",

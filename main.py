@@ -102,7 +102,7 @@ SELECT_ARTICLES = os.getenv("SELECT_ARTICLES", "1") not in ("0", "false", "False
 # 조회 후 지자체기관명으로 한 번 더 걸러냅니다.
 LOCAL_GOV = os.getenv("LOCAL_GOV", "성남시").strip()
 
-VERSION = "1.29"
+VERSION = "1.30"
 
 app = FastAPI(title="법령 조회 도우미", version=VERSION)
 
@@ -527,14 +527,37 @@ def verify_calc(answer_text: str, user_text: str) -> list[str]:
     except ValueError:
         return out
 
-    # (1) 산수 검산 — 블록에 적힌 주기 중 하나라도 맞으면 통과
-    ok = False
-    for n_s, unit in periods:
+    # ★ 2026-10-02 — 기준일이 "설치일 + 10년" 처럼 한 번 더 계산된 날이고,
+    #   결과도 "+ 8년 이후 90일" 처럼 여러 단계를 거칩니다. 주기 하나만
+    #   더해 보면 맞는 계산도 틀렸다고 경고했습니다. 블록에 적힌 주기들의
+    #   **조합**(순서대로 일부를 골라 더한 것)까지 맞춰 봅니다.
+    #   2010 + 8 = 2038 같은 산수 실수는 어느 조합으로도 안 나오므로 여전히 잡힙니다.
+    plist = []
+    for n_s, unit in periods[:6]:
         try:
-            n = int(n_s)
+            plist.append((int(n_s), unit))
+        except ValueError:
+            pass
+
+    def _reachable(y, m, d):
+        """(y,m,d) 에 plist 의 부분집합을 순서대로 더해 나올 수 있는 날짜들."""
+        seen = set()
+        for mask in range(1, 1 << len(plist)):
+            t = (y, m, d)
+            for i, (n, u) in enumerate(plist):
+                if mask >> i & 1:
+                    t = _add_period(*t, n, u)
+            seen.add(t)
+        return seen
+
+    # (1) 산수 검산 — 블록 안 어떤 날짜에서 출발해 주기 조합으로 결과가 나오면 통과
+    ok = False
+    for ds in dates[:-1]:
+        try:
+            start = tuple(int(x) for x in ds)
         except ValueError:
             continue
-        if _add_period(by, bm, bd, n, unit) == (ry, rm, rd):
+        if (ry, rm, rd) in _reachable(*start):
             ok = True
             break
     if not ok:
@@ -561,7 +584,17 @@ def verify_calc(answer_text: str, user_text: str) -> list[str]:
     src = re.sub(r"[^\d]", "", user_text or "")
     stamp = f"{by:04d}{bm:02d}{bd:02d}"
     loose = f"{by:04d}"
-    if stamp not in src and loose not in src:
+    # ★ 2026-10-02 — 기준일이 사용자가 준 날짜에서 계산된 날(설치일 + 10년)이면 정상입니다.
+    derived = False
+    for ds in _CALC_DATE_RE.findall(user_text or ""):
+        try:
+            u = tuple(int(x) for x in ds)
+        except ValueError:
+            continue
+        if (by, bm, bd) in _reachable(*u):
+            derived = True
+            break
+    if stamp not in src and loose not in src and not derived:
         out.append(
             f"답변이 기준일을 {by}년 {bm}월 {bd}일 로 잡았지만, "
             f"질문·조건 어디에도 그 날짜가 없습니다. AI 가 지어낸 날짜입니다. "
@@ -1554,8 +1587,9 @@ def _ask_after_search(req, steps, answered, found, flat, catalog, refs):
     # 별표를 안 가져오면 AI 가 숫자를 지어내거나 조문에 없는 내용을 붙입니다.
     def _bp_no(a):
         """별표 항목에서 번호를 뽑습니다. 조문제목이 '[별표 4] …' 형태입니다."""
-        mt = re.match(r"\[(별표|별지|서식)\s*(\d+)", a.get("조문제목", ""))
-        return (mt.group(1), mt.group(2)) if mt else None
+        # ★ 2026-10-02 — "별표 3의2" 의 가지번호까지 읽습니다. 안 읽으면 별표 3 과 섞입니다.
+        mt = re.match(r"\[(별표|별지|서식)\s*(\d+)(?:의(\d+))?", a.get("조문제목", ""))
+        return (mt.group(1), mt.group(2) + (f"의{mt.group(3)}" if mt.group(3) else "")) if mt else None
 
     # ★ 2026-08-19 — 별표 번호를 **인용한 조문이 속한 법령**에 무조건 붙이고
     #   있었습니다. 그런데 조문은 다른 법령의 별표도 인용합니다.
@@ -1569,8 +1603,9 @@ def _ask_after_search(req, steps, answered, found, flat, catalog, refs):
     wanted = set()
     for f, a in use:
         body = a.get("조문내용", "")
-        for mt in re.finditer(r"(별표|별지)\s*제?\s*(\d+)\s*호?", body):
-            kind, no = mt.group(1), mt.group(2)
+        for mt in re.finditer(r"(별표|별지)\s*제?\s*(\d+)(?:\s*의\s*(\d+))?\s*호?", body):
+            kind = mt.group(1)
+            no = mt.group(2) + (f"의{mt.group(3)}" if mt.group(3) else "")
             owner = f["name"]
             near = body[max(0, mt.start() - 100):mt.start()]
             names = re.findall(r"「([^」]{2,60})」", near)
@@ -1619,7 +1654,8 @@ def _ask_after_search(req, steps, answered, found, flat, catalog, refs):
                 except Exception:                 # 별표는 보조 정보. 실패해도 조회는 계속합니다
                     rows = []
                 row = next((r for r in rows
-                            if r.get("no") == no and (r.get("kind") or "별표") == kind), None)
+                            if (r.get("no", "") + (f"의{r['gaji']}" if r.get("gaji") else "")) == no
+                            and (r.get("kind") or "별표") == kind), None)
                 link = (row or {}).get("link", "")
                 title = (row or {}).get("title", "")
                 if row and row.get("body"):

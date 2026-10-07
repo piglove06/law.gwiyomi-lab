@@ -162,6 +162,11 @@ def ask(base: str, payload: dict, timeout: float = 600.0) -> dict:
 # =====================================================================
 # 되묻기 자동 응답
 # =====================================================================
+# 되묻기가 "결론"을 사용자에게 되묻는 꼴 — ai_client.CONCLUSION_Q 와 같은 규칙
+# (이 파일은 표준 라이브러리만 쓰려고 import 하지 않고 복사해 둡니다)
+CONCLUSION_Q = re.compile(r"언제까지|야\s*(합니|하나요|하는지|할까요|됩니|되나요|하는가)")
+
+
 def pick_option(question: str, options: list, answers: dict, default: str) -> str:
     """
     되묻기 한 문항에 어떤 보기를 고를지 정합니다.
@@ -243,6 +248,8 @@ def grade(case: dict, data: dict) -> dict:
       expect_cites      : 답변에 반드시 있어야 하는 인용 (부분 문자열 목록)
       forbid_cites      : 있으면 안 되는 인용
       expect_text       : 답변 본문에 있어야 하는 말
+      expect_any        : [[대안1, 대안2, ...], ...] — 묶음마다 대안 중 하나만 있으면 통과
+                          (공백 무시. "2028년 3월 15일" / "2028-03-15" 처럼 표기가 갈리는 것용)
       forbid_text       : 있으면 안 되는 말
       expect_laws       : 수집된 법령 이름에 있어야 하는 것
       forbid_laws       : 있으면 안 되는 법령 (되묻기로 제외됐어야 하는 것 등)
@@ -255,6 +262,8 @@ def grade(case: dict, data: dict) -> dict:
                            방사성폐기물·가덕도신공항 법으로 답한 것을 못 잡았습니다)
       no_law_in_clarify : true 면 되묻기 질문·보기에 법령 이름이 있으면 실패
                           (2026-09-29 — "토양환경보전법 / 광산피해…법률 / 모름" 사고)
+      no_conclusion_in_clarify : true 면 되묻기가 결론(의무·기한)을 사용자에게 물으면 실패
+                          (2026-09-29 — "다음 정기 누출검사를 언제까지 받아야 합니까?" 사고)
     """
     checks = []
 
@@ -282,6 +291,11 @@ def grade(case: dict, data: dict) -> dict:
            cite_str[:200])
     for want in case.get("expect_text", []):
         ck(f"본문 포함: {want}", want in answer)
+    flat = re.sub(r"\s+", "", answer)
+    for group in case.get("expect_any", []):
+        alts = group if isinstance(group, list) else [group]
+        ck(f"본문 포함(택1): {' | '.join(alts)}",
+           any(re.sub(r"\s+", "", a) in flat for a in alts))
     for bad in case.get("forbid_text", []):
         ck(f"본문 없어야: {bad}", bad not in answer)
     for want in case.get("expect_laws", []):
@@ -316,6 +330,11 @@ def grade(case: dict, data: dict) -> dict:
                for it in (data.get("_clarify_items") or [])
                if _law_like(it.get("question")) or any(_law_like(o) for o in it.get("options") or [])]
         ck("되묻기에 법령 이름 없음", not bad, " | ".join(bad)[:200])
+
+    if case.get("no_conclusion_in_clarify"):
+        bad = [it.get("question", "") for it in (data.get("_clarify_items") or [])
+               if CONCLUSION_Q.search(it.get("question", "") or "")]
+        ck("되묻기가 결론을 묻지 않음", not bad, " | ".join(bad)[:200])
 
     if not checks:                               # 기대값을 안 적었으면 최소 확인
         ck("답변이 비어 있지 않음", len(answer.strip()) > 20)

@@ -160,17 +160,45 @@ def server_ready(base: str, timeout: float = 2.0) -> bool:
         return False
 
 
-def wait_for_server(base: str, limit: float = 90.0) -> bool:
-    """오토리로드가 끝나 서버가 다시 뜰 때까지 기다립니다."""
+def llm_ready(timeout: float = 2.0) -> bool:
+    """
+    llama-server 가 모델을 다 올렸는지 봅니다.
+
+    ★ 2026-10-02 — 웹서버(/api/version)는 몇 초 만에 뜨지만 llama-server 는
+      35B 모델을 올리는 데 1~2분 걸립니다. 웹서버만 보고 테스트를 시작하면
+      앞쪽 케이스가 LLM 오류로 전부 실패합니다.
+      llama-server 의 /health 는 로딩 중 503, 준비되면 200 입니다.
+      /health 가 없는 서버(Ollama 등, 404)는 준비된 것으로 봅니다.
+    """
+    url = (_env_value("LOCAL_BASE_URL") or "http://localhost:8080/v1").rstrip("/")
+    root = url[:-3] if url.endswith("/v1") else url
+    try:
+        with urllib.request.urlopen(root + "/health", timeout=timeout) as r:
+            return r.status == 200
+    except urllib.error.HTTPError as e:
+        return e.code == 404
+    except Exception:                            # noqa: BLE001
+        return False
+
+
+def wait_for_server(base: str, limit: float = 300.0) -> bool:
+    """웹서버(오토리로드 포함)와 llama-server(모델 로딩)가 둘 다 준비될 때까지 기다립니다."""
     t0 = time.time()
-    warned = False
+    warned_web = warned_llm = False
     while time.time() - t0 < limit:
-        if server_ready(base):
+        web = server_ready(base)
+        llm = web and llm_ready()
+        if web and llm:
+            if warned_web or warned_llm:
+                log(f"서버 준비 완료 ({time.time() - t0:.0f}초 기다림)")
             return True
-        if not warned:
-            log("서버 응답을 기다리는 중… (오토리로드 중이거나 꺼져 있습니다)")
-            warned = True
-        time.sleep(2)
+        if not web and not warned_web:
+            log("웹서버 응답을 기다리는 중… (오토리로드 중이거나 꺼져 있습니다)")
+            warned_web = True
+        elif web and not llm and not warned_llm:
+            log("llama-server 모델 로딩을 기다리는 중… (보통 1~2분)")
+            warned_llm = True
+        time.sleep(3)
     return False
 
 
