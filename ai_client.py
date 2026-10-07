@@ -485,7 +485,7 @@ def restart_local_llm(reason: str = "") -> bool:
 
 def _call_local(prompt: str, temperature: float, model: str,
                 max_tokens: int = 0, stage: str = "llm",
-                schema: dict | None = None) -> str:
+                schema: dict | None = None, _wait: int = 0) -> str:
     """
     로컬 LLM 에 요청합니다.
 
@@ -574,6 +574,10 @@ def _call_local(prompt: str, temperature: float, model: str,
         code, body = e.response.status_code, e.response.text[:300]
         applog.llm(stage, n_prompt, None, time.time() - t0, note=f"실패: HTTP {code}")
         applog.warn(f"LLM {stage} HTTP {code}: {body}")
+        # ★ v1.33 — 재시작 직후 모델을 올리는 중(503 "Loading model")이면 5초씩, 최대 2분 기다립니다.
+        if code == 503 and "loading" in body.lower() and _wait < 24:
+            time.sleep(5)
+            return _call_local(prompt, temperature, model, max_tokens, stage, schema, _wait + 1)
         if code == 404:
             if LOCAL_SERVER == "llamacpp":
                 raise AiError(
