@@ -1413,15 +1413,22 @@ def _ask_sync(req: AskRequest, progress: list):
         ai_rows = []
         # ★ v1.32 — 같은 질문이 어떤 때는 결과 0건으로 옵니다(실측: 21:18 20건 → 22:04 0건).
         #   비어 있으면 1초 뒤 한 번 더 부릅니다.
-        for attempt in (1, 2):
+        # ★ v1.33 — 그래도 비면 3초 뒤 한 번 더, 마지막으로 추출한 용어로 한 번 더 찾습니다.
+        tries = [(req.question, 0.0), (req.question, 1.0), (req.question, 3.0)]
+        if words:
+            tries.append((" ".join(words[:3]), 0.0))
+        for attempt, (aq, wait) in enumerate(tries, 1):
+            if wait:
+                time.sleep(wait)
             try:
-                ai_rows = law_client.ai_search(req.question, display=20)
+                ai_rows = law_client.ai_search(aq, display=20)
             except Exception as e:                          # noqa: BLE001
                 ai_rows = []
-                applog.warn(f"지능형 검색 실패{'(재시도)' if attempt == 2 else ''}: {e}")
-            if ai_rows or attempt == 2:
+                applog.warn(f"지능형 검색 실패({attempt}차): {e}")
+            if ai_rows:
+                if aq != req.question:
+                    steps.append({"name": "지능형 검색(용어)", "detail": f"질문 원문으로 결과가 없어 '{aq}' 로 찾음"})
                 break
-            time.sleep(1.0)
         # ★ v1.32 — 법령 순위 = 그 법령(시행령·시행규칙 포함) 조문들의 **순위 역수 합** Σ 1/(1+순위).
         #   "처음 나온 순서" 는 1위 조문 하나에 좌우되고, "조문 개수" 는 하위권에 잔뜩 걸린 법이 이깁니다.
         #   실측(_eval/probe_ai_1.xml, "주유소 지하 저장시설 누출검사 주기"):
@@ -1446,12 +1453,23 @@ def _ask_sync(req: AskRequest, progress: list):
             steps.append({"name": "지능형 검색", "detail": "결과 없음"})
 
     # ★ v1.33 — 법령이 애매하면 첫 라운드에 "어느 법" 인지 묻습니다(조문 수집 전에 — 헛수집을 줄임).
-    if (not user_laws and req.round == 0 and not req.skip_clarify and ai_laws
+    if (not user_laws and req.round == 0 and not req.skip_clarify
             and req.target in ("auto", "law")):
         tot = sum(ai_score.values()) or 1.0
-        share = ai_score.get(ai_laws[0], 0.0) / tot
+        share = ai_score.get(ai_laws[0], 0.0) / tot if ai_laws else 0.0
         guess_keys = {_law_key(re.sub(r"\s*(시행령|시행규칙)$", "", n)) for n in names}
-        if share < LAW_ASK_SHARE and _law_key(ai_laws[0]) not in guess_keys:
+        ambiguous = bool(ai_laws) and share < LAW_ASK_SHARE and _law_key(ai_laws[0]) not in guess_keys
+        if not ai_laws:
+            # 지능형 검색이 비었는데 AI 가 추측한 법령도 실제로 없으면(지어낸 이름) 근거가 하나도 없습니다.
+            #   실측: "유류판매업법"(없는 법) → 본문검색 복구가 산업집적법을 잡아 엉뚱한 답.
+            real = []
+            for n in names:
+                b = re.sub(r"\s*(시행령|시행규칙)$", "", n).strip()
+                rows = _stmd_rows(b)
+                if any(_law_key(law_client.row_name("lsStmd", r)) == _law_key(b) for r in rows):
+                    real.append(b)
+            ambiguous = not real
+        if ambiguous:
             opts = []
             for b in ai_laws:
                 if len(opts) >= 3:
@@ -1469,10 +1487,13 @@ def _ask_sync(req: AskRequest, progress: list):
                 row = _pick_stmd(rows, b) if rows else None
                 if row is not None and _law_key(law_client.row_name("lsStmd", row)) == _law_key(b):
                     opts.append(b)
-            if opts:
+            if opts or not ai_laws:
                 steps.append({"name": "법령 확인 필요",
-                              "detail": f"지능형 검색 1위 '{ai_laws[0]}' 비중 {share:.0%}, "
-                                        f"AI 추측 '{', '.join(names) or '없음'}' 와 달라 어느 법인지 묻습니다"})
+                              "detail": (f"지능형 검색 1위 '{ai_laws[0]}' 비중 {share:.0%}, "
+                                         f"AI 추측 '{', '.join(names) or '없음'}' 와 달라 어느 법인지 묻습니다"
+                                         if ai_laws else
+                                         f"지능형 검색 결과가 없고 AI 추측 '{', '.join(names) or '없음'}' 도 "
+                                         f"법제처에 없는 이름이라 어느 법인지 묻습니다")})
                 return {
                     "clarify": [{"question": LAW_Q, "options": opts + [LAW_Q_DIRECT, LAW_Q_UNKNOWN]}],
                     "round": req.round + 1,
