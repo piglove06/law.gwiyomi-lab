@@ -500,6 +500,9 @@ def main():
     ap.add_argument("--base", default="http://127.0.0.1:8000")
     ap.add_argument("--only", default="", help="이름에 이 말이 들어간 시나리오만 (| 로 여러 개)")
     ap.add_argument("--cases", default=CASES)
+    ap.add_argument("--probe-file", default="",
+                    help="(진단용) 한 줄에 질문 하나. 서버 /api/raw 로 법제처 지능형 검색 원본 XML 을 "
+                         "_eval/probe_ai_N.xml 로 저장하고 끝냅니다.")
     # ★ v1.32 — `_eval\\ARGS` 파일이 있으면 그 내용을 인자로 한 번만 덧붙입니다(읽고 지움).
     #   감시 프로그램을 다시 켜지 않아도 "다음 실행은 eval_extra.json 으로" 를 지정할 수 있습니다.
     #   예) ARGS 내용: --cases eval_extra.json
@@ -531,6 +534,26 @@ def main():
         print("로그인 완료 (APP_PASSWORD)")
     elif _env_value("APP_PASSWORD"):
         print("[경고] 로그인 실패 — 이후 요청이 401 로 실패할 수 있습니다.")
+
+    if args.probe_file:
+        pf = args.probe_file if os.path.isabs(args.probe_file) else os.path.join(HERE, args.probe_file)
+        with open(pf, encoding="utf-8") as f:
+            queries = [ln.strip() for ln in f if ln.strip()]
+        os.makedirs(OUTDIR, exist_ok=True)
+        for i, q in enumerate(queries, 1):
+            url = (args.base.rstrip("/") + "/api/raw?" + urllib.parse.urlencode(
+                {"target": "aiSearch", "value": q, "display": "20", "search": "0"}))
+            headers = {"Cookie": f"lawfinder_auth={_AUTH_COOKIE}"} if _AUTH_COOKIE else {}
+            try:
+                with urllib.request.urlopen(urllib.request.Request(url, headers=headers), timeout=60) as r:
+                    body = r.read().decode("utf-8", errors="replace")
+            except Exception as e:                    # noqa: BLE001
+                body = f"ERROR {type(e).__name__}: {e}"
+            out = os.path.join(OUTDIR, f"probe_ai_{i}.xml")
+            with open(out, "w", encoding="utf-8") as f:
+                f.write(f"<!-- {q} -->\n" + body)
+            print(f"[probe {i}] {q[:40]} → {out} ({len(body)}자)")
+        return 0
 
     cases = []
     for cf in case_files:

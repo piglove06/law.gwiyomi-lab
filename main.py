@@ -2122,7 +2122,12 @@ def _ask_after_search(req, steps, answered, found, flat, catalog, refs, it=None,
     if not req.skip_clarify and req.round == 0 and not it.needs_facts:
         steps.append({"name": "되묻기 생략",
                       "detail": f"질문 유형 '{it.label}' — 사례 사실 없이 답할 수 있음"})
-    if not req.skip_clarify and req.round < MAX_ROUNDS and it.needs_facts:
+    # ★ v1.32 — 질문에 구체적 사실(수치·단위·날짜)이 2개 이상 적혀 있으면 되묻기는 1라운드까지만.
+    #   사실을 충분히 준 질문에 라운드를 거듭하면 지엽적인 것(측정 기관·300m 이내 주택)을 묻고,
+    #   그 "모름" 때문에 답변까지 흐려졌습니다(공사장 소음 68dB 사례).
+    n_facts = len(intent_mod._CASE_FACTS.findall(req.question))
+    max_r = min(MAX_ROUNDS, 1) if n_facts >= 2 else MAX_ROUNDS
+    if not req.skip_clarify and req.round < max_r and it.needs_facts:
         prim = [u for u in units if not _is_bp(u)]
         bps = [u for u in units if _is_bp(u)]
         order = prim[:8] + bps[:4] + prim[8:] + bps[4:]
@@ -2166,7 +2171,7 @@ def _ask_after_search(req, steps, answered, found, flat, catalog, refs, it=None,
             return {
                 "clarify": asks,
                 "round": req.round + 1,
-                "max_rounds": MAX_ROUNDS,
+                "max_rounds": max_r,
                 "answered": answered,
                 "steps": steps,
                 "intent": it.as_dict(),
@@ -2312,5 +2317,8 @@ def _ask_after_search(req, steps, answered, found, flat, catalog, refs, it=None,
             "picked_n": len(picked or []),
             "context_keys": [_ctx_key(f, a) for f, a, _ in keep],
             "dropped_keys": [_ctx_key(f, a) for f, a, _ in dropped],
+            # v1.32 — 지능형 검색이 돌려준 조문 순서(법령 순위 판단을 나중에 검토하려고)
+            "ai_hits": [f"{n} 제{str(j).lstrip('0')}조" + (f"의{str(g).lstrip('0')}" if str(g).strip("0") else "")
+                        for n, j, g in (ai_hits or [])[:20]],
         },
     }
