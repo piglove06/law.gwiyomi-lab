@@ -1232,6 +1232,10 @@ def _ask_article(req, steps, it):
         text = ai_client.answer(q, context)
     except ai_client.AiError as e:
         return _err(str(e))
+    # ★ v1.32 — 가지조문 번호가 빠지는 오타 보정: "제39조의제1항" → "제39조의3제1항".
+    #   (실제 사례: 시행령 제39조의3 조회 답변의 【근거】 네 줄이 모두 "제39조의제N항")
+    if it.gaji:
+        text = re.sub(rf"제{it.jo}조의(?=\s*제\d|\s*\||\s*$)", f"제{it.jo}조의{it.gaji}", text, flags=re.M)
     cites = verify_citations(text, [f])
     steps.append({"name": "인용 검증", "detail": f"{sum(1 for c in cites if c['ok'])}/{len(cites)}건 확인"})
     hitk = sorted({(c["law"], c["jo"], c["gaji"]) for c in cites if c["ok"]})
@@ -1783,19 +1787,31 @@ def _ask_after_search(req, steps, answered, found, flat, catalog, refs, it=None,
             def _n(x):
                 return str(x or "").strip().lstrip("0")
             have = {_akey(f, a) for f, a in picked}
-            extra = []
+            extra, front, seen = [], [], set()
             for law, jo, gaji in ai_hits[:6]:
                 for f, a in flat:
                     if (_law_key(f["name"]) == _law_key(law) and law.replace(" ", "") == f["name"].replace(" ", "")
-                            and _n(a.get("조문번호")) == _n(jo) and _n(a.get("조문가지번호")) == _n(gaji)
-                            and _akey(f, a) not in have):
-                        extra.append((f, a))
-                        have.add(_akey(f, a))
+                            and _n(a.get("조문번호")) == _n(jo) and _n(a.get("조문가지번호")) == _n(gaji)):
+                        k = _akey(f, a)
+                        if k in seen:
+                            break
+                        seen.add(k)
+                        front.append((f, a))
+                        if k not in have:
+                            extra.append((f, a))
                         break
+            # ★ v1.32 — 지능형 검색이 지목한 조문은 선별이 이미 골랐더라도 **맨 앞**(우선순위 최상)으로.
+            #   토큰 예산을 넘으면 뒤에서부터 빼므로, 순서가 곧 우선순위입니다.
+            #   (실제 사례: "폐기물처리업 종류" 에서 핵심인 법 제25조가 선별 목록 뒤쪽에 있어 빠졌음)
+            if front:
+                picked = front + [p for p in picked if _akey(*p) not in seen]
             if extra:
-                picked = extra + picked
                 steps.append({"name": "지능형 검색 조문 추가",
                               "detail": ", ".join(_ctx_key(f, a) for f, a in extra)})
+            moved = [p for p in front if p not in extra]
+            if moved:
+                steps.append({"name": "지능형 검색 조문 우선",
+                              "detail": ", ".join(_ctx_key(f, a) for f, a in moved)})
         if picked:
             _cache_put(sel_key, [_akey(f, a) for f, a in picked])
 
@@ -1822,7 +1838,13 @@ def _ask_after_search(req, steps, answered, found, flat, catalog, refs, it=None,
     #     수집한 법령 목록에 없는 이름이면 아예 건드리지 않습니다.
     _known = {f["name"] for f in found}
     wanted = set()
-    for f, a in use:
+    # ★ v1.32 — 우선순위(작을수록 중요). 선별 순서 그대로이고, 자동으로 끌어온 별표는
+    #   **그 별표를 인용한 조문 바로 앞** 순위를 받습니다. 토큰 예산을 넘으면 큰 순위부터 뺍니다.
+    #   (v1.31: 별표를 무조건 맨 나중에 빼서, 덜 중요한 조문이 인용한 큰 별표가 남고
+    #    핵심 조문이 빠지는 일이 있었음)
+    prio = {id(a): float(i) for i, (f, a) in enumerate(use)}
+    cite_rank: dict = {}
+    for i_use, (f, a) in enumerate(use):
         body = a.get("조문내용", "")
         for mt in re.finditer(r"(별표|별지)\s*제?\s*(\d+)(?:\s*의\s*(\d+))?\s*호?", body):
             kind = mt.group(1)
@@ -1837,6 +1859,12 @@ def _ask_after_search(req, steps, answered, found, flat, catalog, refs, it=None,
                 elif cand != f["name"]:
                     continue          # 우리가 안 가진 법령의 별표 — 건드리지 않음
             wanted.add((owner, kind, no))
+            cite_rank.setdefault((owner, kind, no), i_use)
+    # 선별이 직접 고른 별표도, 그 별표를 인용한 조문이 더 앞에 있으면 그 순위를 따릅니다.
+    for f, a in use:
+        k = _bp_no(a)
+        if k and (f["name"], *k) in cite_rank:
+            prio[id(a)] = min(prio[id(a)], cite_rank[(f["name"], *k)] - 0.5)
 
     # 본문을 끝내 확보하지 못한 별표. 답변 검증 단계에서 경고를 띄우는 데 씁니다.
     missing_bp: list[dict] = []
@@ -1852,6 +1880,9 @@ def _ask_after_search(req, steps, answered, found, flat, catalog, refs, it=None,
                 added.append((f, a))
         if added:
             use = use + added
+            for f, a in added:
+                k = _bp_no(a)
+                prio[id(a)] = cite_rank.get((f["name"], *k), len(use)) - 0.5
             steps.append({"name": "별표 자동 포함",
                           "detail": ", ".join(a.get("조문제목", "")[:30] for _, a in added[:5])})
 
@@ -1916,6 +1947,7 @@ def _ask_after_search(req, steps, answered, found, flat, catalog, refs, it=None,
                 if not any(x.get("조문제목") == art["조문제목"] for x in arts):
                     arts.append(art)
                 use.append((f, art))
+                prio[id(art)] = cite_rank.get((law_name, kind, no), len(use)) - 0.5
             if fetched:
                 steps.append({"name": "별표 API 조회", "detail": ", ".join(fetched)})
             if missing_bp:
@@ -2099,8 +2131,24 @@ def _ask_after_search(req, steps, answered, found, flat, catalog, refs, it=None,
     n_tok = ai_client.count_tokens(context)
     dropped = []
     if n_tok > budget:
-        order = [u for u in reversed(keep) if not _is_bp(u)] + \
-                [u for u in reversed(keep) if _is_bp(u)]
+        # ★ v1.32 — 조문을 빼기 **전에** 별표를 먼저 줄입니다(비고는 남김).
+        #   큰 별표(시설·장비 기준표 등) 몇 개가 예산을 다 먹어 핵심 조문이 빠지는 것을 막습니다.
+        shrunk = 0
+        for j, u in enumerate(keep):
+            if _is_bp(u) and len(u[2]) > 1800:
+                keep[j] = (u[0], u[1], _fit_keep_notes(u[2], 1800))
+                shrunk += 1
+        if shrunk:
+            before_tok = n_tok
+            context, n_laws = _assemble(keep)
+            n_tok = ai_client.count_tokens(context)
+            steps.append({"name": "별표 축약",
+                          "detail": f"예산 {budget:,}토큰 초과 — 별표 {shrunk}개를 1,800자로 줄임(비고 유지) "
+                                    f"{before_tok:,} → {n_tok:,}토큰"})
+    if n_tok > budget:
+        # 우선순위가 낮은(prio 가 큰) 것부터 뺍니다. 같은 순위면 뒤에 있는 것부터.
+        pos = {id(u[1]): i for i, u in enumerate(keep)}
+        order = sorted(keep, key=lambda u: (-prio.get(id(u[1]), float(len(keep))), -pos[id(u[1])]))
         for _ in range(5):
             ratio = n_tok / max(1, len(context))          # 글자당 토큰 (실측)
             need = (n_tok - budget) * 1.1

@@ -150,6 +150,15 @@ ANSWER_PROMPT = """너는 대한민국 국가법령 조문을 근거로 답하�
    조문에 없는 답을 지어내지 말고, 어떤 법령이 필요한지 알려라.
    예) "질문은 사업장폐기물에 관한 것이나 제공된 조문은 방사성폐기물
         관련 규정입니다. 「폐기물관리법」 조문이 필요합니다."
+7. ★ **[질문] 원문에 적힌 사실이 (확인된 조건)의 "모름" 보다 우선한다.**
+   질문에 "오후 3시", "하루 2시간", "주거지역", "200kg" 처럼 적혀 있으면 그 값으로 판단한다.
+   되묻기에 "모름" 이라고 답했더라도 질문 원문에 있는 사실이면 모르는 것이 아니다.
+8. **경우를 나눌 때** 결과가 같은 경우는 나누지 말고 한 번에 쓴다.
+   질문의 전제와 모순되는 경우는 만들지 마라.
+   예) "1년 동안 80% 이상 출근" 이라고 했는데 "1년 미만이면 …" 으로 나누지 마라.
+9. **최종 판단만 쓴다.** "수정:", "다시 확인:", "정정하면" 처럼 쓰다가 고친 흔적을 남기지 마라.
+   【결론】의 판정과 【계산】·【설명】의 판정이 서로 달라서는 안 된다. 쓰기 전에 먼저 판정을 정하라.
+10. 한국어로만 쓴다. 일본어(への·の 등)·중국어 글자를 섞지 마라.
 
 ━━ 조문 인용 규칙 ━━━━━━━━━━━━━━━━━━━━━━━━━
 1. 조문번호는 [조문 원문]에서 눈으로 확인하고 적는다.
@@ -769,10 +778,37 @@ def extract_terms(question: str) -> dict:
     return out
 
 
+def _tidy_answer(text: str) -> str:
+    """
+    v1.32 — 답변 마무리 손질 (내용은 바꾸지 않습니다).
+      · 일본어 조사가 섞여 나오는 것("보호위원회 등への 신고")을 한국어로.
+      · 【적용 조건】 블록의 "…: 미확인" 줄은 지웁니다(지시문이 빼라고 한 줄). 블록이 비면 머리표도.
+    """
+    t = str(text or "")
+    t = re.sub(r"(?<=[가-힣\s])への", "에 대한", t)
+    t = re.sub(r"(?<=[가-힣])での(?=[\s가-힣])", "에서의", t)
+    t = re.sub(r"(?<=[가-힣])の(?=[\s가-힣])", "의", t)
+    if re.search(r"[぀-ヿ]", t):
+        _dbg("[answer] 일본어 문자가 남아 있습니다: "
+             + ", ".join(sorted(set(re.findall(r"[぀-ヿ]+", t))))[:60])
+    m = re.search(r"【적용 조건】[ \t]*\n([\s\S]*?)(?=\n[ \t]*【|\Z)", t)
+    if m:
+        body = m.group(1)
+        kept = [ln for ln in body.split("\n")
+                if not re.match(r"^\s*[-·•]?\s*[^:\n]{1,30}:\s*(미확인|확인\s*안\s*됨|불명|알\s*수\s*없음)\s*$", ln)]
+        new_body = "\n".join(kept)
+        if new_body != body:
+            if new_body.strip():
+                t = t[:m.start(1)] + new_body + t[m.end(1):]
+            else:
+                t = t[:m.start()] + t[m.end():].lstrip("\n")
+    return t
+
+
 def answer(question: str, context: str) -> str:
     """조문 원문을 근거로 답변 생성."""
-    return _call(ANSWER_PROMPT.format(question=question, context=context),
-                 max_tokens=MAXTOK_ANSWER, stage="answer")
+    return _tidy_answer(_call(ANSWER_PROMPT.format(question=question, context=context),
+                              max_tokens=MAXTOK_ANSWER, stage="answer"))
 
 
 CLARIFY_PROMPT = """너는 법령 질문에 답하기 전에, 결론을 가르는 사실 중 빠진 것만 되묻는 도구다.
@@ -859,6 +895,9 @@ CLARIFY_PROMPT = """너는 법령 질문에 답하기 전에, 결론을 가르�
   많이 묻는 것보다 **결정적인 것을 먼저 묻는 것**이 중요하다.
 - 보기는 2~4개. 각 보기는 14자 이내. 마지막 보기로 "모름" 을 넣어라.
 - 실제로 적용 조문·기준·기한이 달라지는 것만 묻는다.
+- **질문이 묻는 그 의무·기준에 대해서만** 묻는다. [관련 조문]에 다른 의무가 함께 있어도
+  그 요건은 묻지 마라. 예) "정보주체에게 언제까지 알려야 하나" 를 물었는데
+  기관 **신고** 요건(1천명 이상·민감정보 등)을 묻지 마라 — 통지 기한은 그것과 무관하다.
 - [이미 답변된 조건] 에 나온 것은 절대 다시 묻지 마라. 다르게 표현해서도 묻지 마라.
 - **[질문] 본문에 이미 적힌 사실(날짜·용량·지역·시간·횟수)도 다시 묻지 마라.**
 - 남은 갈래가 없으면 더 묻지 말고 끝내라 (출력 형식의 "물을 것 없음" 표시).
@@ -882,12 +921,19 @@ OK
 질문|보기1|보기2|보기3"""
 
 _CLARIFY_RULES_JSON = """JSON 하나만 출력한다.
-  물을 것이 없으면:  {"done": true, "questions": []}
-  물을 것이 있으면:  {"done": false, "questions": [{"question": "질문", "options": ["보기1", "보기2", "모름"]}]}"""
+먼저 "known" 에 [질문]·[이미 답변된 조건]에 **이미 적힌 사실**을 짧게 옮겨 적는다.
+  예) ["측정 시각 오후 3시", "장비 사용 하루 2시간", "주거지역", "평일"]
+그다음 "questions" 를 만든다. **known 에 적은 사실로 정해지는 갈래는 묻지 않는다.**
+  물을 것이 없으면:  {"known": [...], "done": true, "questions": []}
+  물을 것이 있으면:  {"known": [...], "done": false, "questions": [{"question": "질문", "options": ["보기1", "보기2", "모름"]}]}"""
 
 CLARIFY_SCHEMA = {
     "type": "object",
     "properties": {
+        # ★ v1.32 — 질문에 이미 있는 사실을 **먼저** 적게 합니다(구조화된 출력 안의 짧은 추론).
+        #   실제 사례: "평일 오후 3시 · 하루 2시간 · 주거지역" 이라고 적힌 질문에
+        #   측정 시각·사용 시간·지역을 3라운드에 걸쳐 되물었고, 답변까지 꼬였습니다.
+        "known": {"type": "array", "items": {"type": "string"}, "maxItems": 8},
         "done": {"type": "boolean"},
         "questions": {
             "type": "array", "maxItems": 3,
@@ -902,8 +948,42 @@ CLARIFY_SCHEMA = {
             },
         },
     },
-    "required": ["done", "questions"],
+    "required": ["known", "done", "questions"],
 }
+
+# ── v1.32 — 질문 원문에 이미 있는 사실을 되묻는 항목 거르기 (마지막 그물) ──────────
+#   프롬프트·known 으로 1차로 막고, 그래도 나오면 여기서 버립니다. 표면 신호만 봅니다.
+_Q_TIME_OF_DAY = re.compile(r"(오전|오후|새벽|아침|저녁|밤|낮)\s*\d{1,2}\s*시(?!간)|정오|자정|\d{1,2}\s*시\s*(\d{1,2}\s*분)?\s*(에|경|쯤|무렵)")
+_Q_DURATION = re.compile(r"\d+(\.\d+)?\s*(시간|분간)")
+_Q_ZONE = re.compile(r"(주거|상업|공업|녹지|관리|농림|자연환경보전)\s*지역")
+_Q_DAY = re.compile(r"(평일|주말|공휴일|휴일|[월화수목금토일]요일)")
+_Q_UNIT_NUM = re.compile(r"\d[\d,\.]*\s*(?:천|만|억)?\s*(dB|㏈|데시벨|kg|㎏|킬로그램|톤|리터|ℓ|L(?![a-zA-Z])|㎡|제곱미터|㎥|세제곱미터|명|마리|두)")
+
+
+def _unit_of(s: str) -> set:
+    norm = {"㏈": "dB", "데시벨": "dB", "㎏": "kg", "킬로그램": "kg", "ℓ": "L", "리터": "L",
+            "제곱미터": "㎡", "세제곱미터": "㎥"}
+    return {norm.get(m.group(1), m.group(1)) for m in _Q_UNIT_NUM.finditer(s)}
+
+
+def _known_in_question(question: str, item: dict) -> str:
+    """되묻기 항목이 질문 원문에 이미 있는 사실을 묻는 것이면 그 이유를, 아니면 "" 를 돌려줍니다."""
+    q = str(question or "")
+    ask = str(item.get("question", ""))
+    opts = " ".join(str(o) for o in item.get("options", []))
+    if re.search(r"(시각|시간대|몇\s*시(?!간)|측정한\s*시간)", ask) and _Q_TIME_OF_DAY.search(q):
+        return "측정 시각이 질문에 있음"
+    if re.search(r"(사용\s*시간|작업\s*시간|가동\s*시간|몇\s*시간|사용하는\s*시간|1일\s*사용)", ask) \
+            and _Q_DURATION.search(q):
+        return "사용 시간이 질문에 있음"
+    if "지역" in ask and _Q_ZONE.search(q) and _Q_ZONE.search(opts):
+        return "대상 지역이 질문에 있음"
+    if re.search(r"(공휴일|휴일|요일|평일)", ask) and _Q_DAY.search(q):
+        return "요일이 질문에 있음"
+    uq, uo = _unit_of(q), _unit_of(opts + " " + ask)
+    if uq & uo:
+        return f"수치({', '.join(sorted(uq & uo))})가 질문에 있음"
+    return ""
 
 # 되묻기가 "결론"(기한·의무)을 질문자에게 되묻는 꼴. clarify() 마지막 그물에서 버립니다.
 #   "…언제까지 받아야 합니까?" / "…설치해야 합니까?" / "…신고해야 하나요?"
@@ -1415,7 +1495,7 @@ def _fix_yesno(question: str, options: list) -> list:
     return ["예", "아니오", "모름"]
 
 
-def _finalize_clarify(items: list) -> list:
+def _finalize_clarify(items: list, question: str = "") -> list:
     """되묻기 항목의 마지막 그물 — 텍스트·JSON 두 경로가 함께 씁니다 (v1.31 에 함수로 분리).
     할 일 보기·너무 짧은 보기 제거, "모름" 정리, 물음 아닌 질문·법령명 질문·결론 질문 제거."""
     cleaned = []
@@ -1453,6 +1533,11 @@ def _finalize_clarify(items: list) -> list:
         if CONCLUSION_Q.search(item["question"]):
             _dbg(f"[clarify] 결론을 되묻는 항목 제거: {item['question'][:40]}")
             continue
+        # ★ v1.32 — 질문 원문에 이미 적힌 사실(시각·사용 시간·지역·요일·수치)을 되묻는 항목은 버립니다.
+        why = _known_in_question(question, {"question": item["question"], "options": left})
+        if why:
+            _dbg(f"[clarify] 이미 질문에 있는 사실 → 제거 ({why}): {item['question'][:40]}")
+            continue
         if len(left) >= 2 and re.search(r"[가-힣]", item["question"]):
             cleaned.append({"question": item["question"], "options": left})
     return cleaned
@@ -1489,7 +1574,7 @@ def clarify(question: str, answered: str = "", catalog: str = "") -> list[dict]:
                 opts = _fix_yesno(q, opts)
                 if len(q) >= 4 and len(opts) >= 2:
                     items.append({"question": q, "options": opts})
-        out = _finalize_clarify(items)
+        out = _finalize_clarify(items, question)
         if LLM_DEBUG:
             _dbg(f"[clarify] JSON {len(items)}개 → 최종 {len(out)}개")
         return out[:6]
@@ -1576,7 +1661,7 @@ def clarify(question: str, answered: str = "", catalog: str = "") -> list[dict]:
     #   ★ 2026-08-19 — 예전에는 이 그물이 마지막 분기 안에만 있어서,
     #     `continue` 로 빠져나가는 _promote_todo_options / _repair_all_questions
     #     결과는 **검사를 통째로 건너뛰었습니다.** 루프 밖으로 뺐습니다.
-    out = _finalize_clarify(out)
+    out = _finalize_clarify(out, question)
 
     if LLM_DEBUG:
         _dbg(f"[clarify] {len(out)}개 질문 파싱 (원문 {len(raw.splitlines())}줄)")

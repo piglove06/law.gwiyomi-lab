@@ -516,8 +516,14 @@ def main():
             print(f"_eval/ARGS 적용: {' '.join(extra)}")
             argv = argv + extra
     args = ap.parse_args(argv)
-    if not os.path.isabs(args.cases) and not os.path.exists(args.cases):
-        args.cases = os.path.join(HERE, args.cases)
+    # 쉼표로 여러 파일을 이어 돌릴 수 있습니다: --cases eval_cases.json,eval_extra.json
+    case_files = []
+    for one in str(args.cases).split(","):
+        one = one.strip().strip('"')
+        if one and not os.path.isabs(one) and not os.path.exists(one):
+            one = os.path.join(HERE, one)
+        if one:
+            case_files.append(one)
 
     global _AUTH_COOKIE
     _AUTH_COOKIE = login(args.base)
@@ -526,11 +532,13 @@ def main():
     elif _env_value("APP_PASSWORD"):
         print("[경고] 로그인 실패 — 이후 요청이 401 로 실패할 수 있습니다.")
 
-    if not os.path.exists(args.cases):
-        print(f"시나리오 파일이 없습니다: {args.cases}")
-        return 2
-    with open(args.cases, encoding="utf-8") as f:
-        cases = json.load(f)
+    cases = []
+    for cf in case_files:
+        if not os.path.exists(cf):
+            print(f"시나리오 파일이 없습니다: {cf}")
+            return 2
+        with open(cf, encoding="utf-8") as f:
+            cases += json.load(f)
     if args.only:
         cases = [c for c in cases if args.only in c.get("name", "")]
     if not cases:
