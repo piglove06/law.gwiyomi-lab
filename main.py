@@ -1371,23 +1371,24 @@ def _ask_sync(req: AskRequest, progress: list):
             if ai_rows or attempt == 2:
                 break
             time.sleep(1.0)
-        # ★ v1.32 — 법령 순위는 "처음 나온 순서" 가 아니라 **상위 20개 조문 중 몇 개를 차지했는지**로.
-        #   실측: 누출검사 기한 질문에서 1위 조문 하나만 걸린 석유사업법이 1위가 되고,
-        #   조문 여러 개가 걸린 토양환경보전법은 5위였습니다. (같은 수면 먼저 나온 법, 1위 조문 가점 0.5)
+        # ★ v1.32 — 법령 순위 = 그 법령(시행령·시행규칙 포함) 조문들의 **순위 역수 합** Σ 1/(1+순위).
+        #   "처음 나온 순서" 는 1위 조문 하나에 좌우되고, "조문 개수" 는 하위권에 잔뜩 걸린 법이 이깁니다.
+        #   실측(_eval/probe_ai_1.xml, "주유소 지하 저장시설 누출검사 주기"):
+        #     토양환경보전법 1·6위 → 1.17 / 액화석유가스법 4·7·14·18·19위 → 0.57 (개수로는 5 대 2 로 역전됐던 것)
         score, first = {}, {}
         for i, r in enumerate(ai_rows):
             nm = (r.get("법령명") or "").strip()
             base = re.sub(r"\s*(시행령|시행규칙)$", "", nm).strip()
             if base:
-                score[base] = score.get(base, 0.0) + 1.0 + (0.5 if i == 0 else 0.0)
+                score[base] = score.get(base, 0.0) + 1.0 / (1 + i)
                 first.setdefault(base, i)
             if nm and r.get("조문번호"):
                 ai_hits.append((nm, r.get("조문번호", ""), r.get("조문가지번호", "")))
         ai_laws = sorted(score, key=lambda b: (-score[b], first[b]))
         if ai_laws:
             steps.append({"name": "지능형 검색",
-                          "detail": "관련 법령(조문 수 순): "
-                                    + ", ".join(f"{b}({int(score[b])})" for b in ai_laws[:5])
+                          "detail": "관련 법령(관련도 점수 순): "
+                                    + ", ".join(f"{b}({score[b]:.2f})" for b in ai_laws[:5])
                                     + f" · 조문 {len(ai_hits)}개"})
         elif ai_rows == []:
             steps.append({"name": "지능형 검색", "detail": "결과 없음"})
