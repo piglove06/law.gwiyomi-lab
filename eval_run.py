@@ -340,6 +340,18 @@ def grade(case: dict, data: dict) -> dict:
                and (_law_like(it.get("question")) or any(_law_like(o) for o in it.get("options") or []))]
         ck("되묻기에 법령 이름 없음", not bad, " | ".join(bad)[:200])
 
+    if case.get("no_provision_in_clarify"):
+        # v1.34 — "별표 3 기준 이상/미만" 처럼 사용자가 알 수 없는 조문·별표를 보기로 내면 실패
+        bad = [f"{it['question']} [{' / '.join(it.get('options') or [])}]"
+               for it in (data.get("_clarify_items") or [])
+               if any(re.search(r"(별표|별지|제\s*\d+\s*조)", o) for o in (it.get("options") or []))]
+        ck("되묻기 보기에 조문·별표 없음", not bad, " | ".join(bad)[:200])
+    if case.get("clarify_has_unknown"):
+        # v1.34 — 모든 되묻기 문항에 "모름" 보기가 있어야 함
+        bad = [it["question"] for it in (data.get("_clarify_items") or [])
+               if not any(str(o).startswith("모름") for o in (it.get("options") or []))]
+        ck("되묻기마다 '모름' 보기 있음", not bad, " | ".join(bad)[:200])
+
     if case.get("no_conclusion_in_clarify"):
         bad = [it.get("question", "") for it in (data.get("_clarify_items") or [])
                if CONCLUSION_Q.search(it.get("question", "") or "")]

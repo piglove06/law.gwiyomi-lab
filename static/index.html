@@ -224,10 +224,9 @@
       border:1px solid var(--rule);border-radius:3px;background:var(--card);color:var(--ink);font-family:inherit}
   .lawpick .lp-row{display:flex;gap:5px;flex-wrap:wrap;align-items:center;margin-top:6px}
   .lawpick .lp-label{font-size:12px;color:var(--note);margin-right:2px}
-  .lawchip{padding:3px 9px;font-size:12px;background:var(--card);border:1px solid var(--rule);
-      border-radius:12px;cursor:pointer;color:var(--note);font-family:inherit}
-  .lawchip:hover,.lawchip:focus{border-color:var(--accent);color:var(--accent);background:var(--card)}
-  .lawchip.on{border-color:var(--accent);color:var(--accent);font-weight:600}
+  .lawpick .lp-names{font-size:12.5px;font-weight:600;color:var(--accent)}
+  .lawpick .lp-eg{display:block;line-height:1.7}
+  .lawpick .lp-eg .lp-label{margin-right:6px}
   .lawpick .lp-mode{font-size:12.5px;color:var(--ink)}
   .lawpick .lp-mode label{display:inline-flex;align-items:center;gap:4px;margin-right:10px;cursor:pointer;white-space:nowrap}
   .lawpick .lp-mode input{width:auto;margin:0}
@@ -380,16 +379,8 @@
         <label><input type="radio" name="lawmode" value="prefer"> 우선 참고 (다른 법령도 함께 검색)</label>
         <span class="lp-hint">조문 번호(제○조)는 질문에 적어 주세요. 이 칸은 법령 이름만 씁니다.</span>
       </div>
-      <div class="lp-row">
-        <span class="lp-label">예시</span>
-        <button class="lawchip" type="button">대기환경보전법</button>
-        <button class="lawchip" type="button">물환경보전법</button>
-        <button class="lawchip" type="button">토양환경보전법</button>
-        <button class="lawchip" type="button">폐기물관리법</button>
-        <button class="lawchip" type="button">소음ㆍ진동관리법</button>
-        <button class="lawchip" type="button">악취방지법</button>
-        <button class="lawchip" type="button">환경영향평가법</button>
-        <button class="lawchip" type="button">개인정보 보호법</button>
+      <div class="lp-row lp-eg">
+        <span class="lp-label">예시:</span><span class="lp-names">대기환경보전법 · 물환경보전법 · 토양환경보전법 · 폐기물관리법 · 소음ㆍ진동관리법 · 악취방지법 · 환경영향평가법 · 개인정보 보호법</span>
       </div>
     </div>
     <div class="row">
@@ -1244,21 +1235,10 @@ document.querySelectorAll('input[name="lawmode"]').forEach(r => r.addEventListen
   try{ localStorage.setItem("lawfinder_lawmode", lawMode()); }catch(_){}
 }));
 function syncLawChips(){
+  // v1.34 — 예시 법령은 클릭해서 넣지 않습니다(목록에 없는 법도 많아 헷갈림). 칸이 비었는지만 표시합니다.
   const box = document.querySelector(".lawpick");
   if(box) box.classList.toggle("empty", !parseLaws().length);
-  const keys = new Set(parseLaws().map(x => x.replace(/\s/g, "")));
-  document.querySelectorAll(".lawchip").forEach(b =>
-    b.classList.toggle("on", keys.has(b.textContent.replace(/\s/g, ""))));
 }
-document.querySelectorAll(".lawchip").forEach(b => b.onclick = () => {
-  const name = b.textContent.trim();
-  let cur = parseLaws();
-  const k = name.replace(/\s/g, "");
-  if(cur.some(x => x.replace(/\s/g, "") === k)) cur = cur.filter(x => x.replace(/\s/g, "") !== k);
-  else if(cur.length < 3) cur.push(name);
-  $("lawpick").value = cur.join(", ");
-  syncLawChips();
-});
 if($("lawpick")) $("lawpick").addEventListener("input", syncLawChips);
 syncLawChips();
 
@@ -1325,7 +1305,7 @@ $("clearhist").onclick = () => {
 })();
 
 // 서버 버전 확인 — 화면과 서버가 다른 버전이면 경고
-const UI_VERSION = "1.33";
+const UI_VERSION = "1.34";
 fetch("/api/version").then(r => r.json()).then(d => {
   if(d.version !== UI_VERSION){
     $("vbadge").innerHTML =

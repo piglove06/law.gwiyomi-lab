@@ -120,14 +120,70 @@ def _compact_bp(text: str) -> str:
     return "\n".join(lines)
 
 
-def _fit_keep_notes(text: str, limit: int) -> str:
+_KW_STOP = {"경우", "받아야", "하나요", "합니까", "인가요", "입니까", "어떻게", "무엇", "얼마", "있나요",
+            "되나요", "해야", "하는", "있는", "없는", "대한", "관련", "추가", "설명", "모름", "그리고", "그런데",
+            "새로", "지금", "우리", "저희", "질문", "내용", "어떤", "알려", "궁금", "때문", "정도", "이상", "미만"}
+
+
+def _bp_keywords(text: str) -> list:
+    """긴 별표에서 질문과 관련된 줄을 고를 때 쓸 낱말(조사·어미를 뗀 2글자 이상)."""
+    out = []
+    for w in re.findall(r"[가-힣A-Za-z0-9]{2,}", str(text or "")):
+        w = re.sub(r"(으로|에서|에게|까지|부터|이나|이고|이며|입니까|합니까|하나요|인가요|"
+                   r"은|는|이|가|을|를|에|의|로|와|과|도|만|야|요|고)$", "", w)
+        w = re.sub(r"(에|에서)$", "", w)                     # "경우에는" → "경우에" → "경우"
+        if len(w) >= 2 and w not in _KW_STOP and not w.isdigit() and w not in out \
+                and not re.match(r"^(받아|하나|무엇|모르|어느|어디|언제|그런|이런|저런|되는|하려|지으)", w):
+            out.append(w)
+    return out[:20]
+
+
+def _fit_keep_notes(text: str, limit: int, keywords=None) -> str:
     """
     limit 자 안으로 줄이되, 표 뒤의 **비고**(보정·예외·적용 범위)는 남깁니다.
     비고는 표의 숫자를 바꾸는 규정이라 잘리면 답이 틀립니다 (예: 공사장 소음 +5dB).
+    ★ v1.34 — keywords 가 있으면 앞부분 대신 **질문 낱말이 든 줄 주변**을 골라 넣습니다.
+      (환경영향평가 대상사업처럼 수십 쪽짜리 별표는 앞부분만 넣으면 해당 사업 줄이 통째로 빠짐)
     """
     t = str(text or "")
     if len(t) <= limit:
         return t
+    if keywords:
+        lines = t.split("\n")
+        # 거의 모든 줄에 나오는 낱말("사업" 등)은 변별력이 없으니 뺍니다(줄의 25% 넘게 나오면).
+        df = {k: sum(1 for ln in lines if k in ln) for k in keywords}
+        kws = [k for k in keywords if 0 < df[k] <= max(3, len(lines) * 0.25)]
+        score = [(sum(1 for k in kws if k in ln), i) for i, ln in enumerate(lines)]
+        hit = [i for sc, i in sorted(score, key=lambda x: (-x[0], x[1])) if sc > 0]
+        if hit:
+            keep = set(range(min(6, len(lines))))            # 제목·머리줄
+            used0 = sum(len(lines[i]) + 1 for i in keep)
+            for i in hit:                                    # 많이 맞는 줄부터 주변 줄과 함께
+                win = set(range(max(0, i - 2), min(len(lines), i + 5))) - keep
+                cost = sum(len(lines[j]) + 1 for j in win)
+                if used0 + cost > limit * 0.65:
+                    break
+                keep |= win
+                used0 += cost
+            ni = next((i for i, ln in enumerate(lines) if ln.strip().startswith("비고")), None)
+            notes = "\n".join(lines[ni:ni + 25]) if ni is not None else ""
+            budget = limit - min(len(notes), int(limit * 0.35)) - 40
+            out, used, prev = [], 0, -1
+            for i in sorted(keep):
+                if ni is not None and i >= ni:
+                    break
+                ln = lines[i]
+                if used + len(ln) + 1 > budget:
+                    break
+                if prev >= 0 and i != prev + 1:
+                    out.append("…")
+                out.append(ln)
+                used += len(ln) + 1
+                prev = i
+            body = "\n".join(out)
+            if notes:
+                body += "\n…\n" + notes[:int(limit * 0.35)]
+            return body + "\n…(질문과 관련된 줄만 발췌)"
     i = t.find("비고")
     if i > limit * 0.4:                      # 비고가 상한 밖으로 밀려나는 경우만
         notes = t[i:i + int(limit * 0.5)]
@@ -199,7 +255,7 @@ SELECT_ARTICLES = os.getenv("SELECT_ARTICLES", "1") not in ("0", "false", "False
 # 조회 후 지자체기관명으로 한 번 더 걸러냅니다.
 LOCAL_GOV = os.getenv("LOCAL_GOV", "성남시").strip()
 
-VERSION = "1.33"
+VERSION = "1.34"
 
 app = FastAPI(title="법령 조회 도우미", version=VERSION)
 
@@ -1934,6 +1990,7 @@ def _ask_after_search(req, steps, answered, found, flat, catalog, refs, it=None,
     if it is None:
         it = intent_mod.classify(req.question)
     MAX_ROUNDS = CLARIFY_ROUNDS
+    bp_kw = _bp_keywords(req.question + " " + (answered or ""))      # v1.34 긴 별표 발췌용
 
     # --- 3-1단계: 필요한 조문만 고르기 ----------------------------
     # 조문 본문을 통째로 넣으면 요청당 3만 토큰. 제목만 보여주고 고르면 2천 토큰.
@@ -2055,6 +2112,33 @@ def _ask_after_search(req, steps, answered, found, flat, catalog, refs, it=None,
             use = use + parents
             steps.append({"name": "상위 조문 자동 포함",
                           "detail": ", ".join(_ctx_key(f, a) for f, a in parents)})
+
+        # ★ v1.34 — 위임 조문 자동 포함(아래 방향). 법률 조문이 "대통령령으로 정하는 사업" 처럼 넘기면
+        #   그 시행령·시행규칙 조문(법제처 위임 데이터 기준)을 함께 넣습니다. 그래야 그 조문이 가리키는
+        #   별표(대상 사업·기준 수치)까지 자동으로 따라옵니다.
+        #   (실제 사례: "환경영향평가를 받아야 하나요?" — 법 조문만 고르고 시행령 별표 3(대상사업 범위)이
+        #    빠져, 되묻기가 "별표 3 기준 이상/미만" 같은 알 수 없는 보기를 냈고 답도 수치 없이 끝남)
+        children = []
+        for i_use, (f, a) in enumerate(list(use[:8])):
+            if f.get("level") != "법률" or len(children) >= 4:
+                continue
+            dl = (f.get("delegated") or {}).get(
+                law_client.dele_key(a.get("조문번호", ""), a.get("조문가지번호", ""))) or []
+            for d in dl:
+                if d.get("_kind_raw") == "인용법령" or not d.get("_jo"):
+                    continue
+                k = (str(d.get("_title") or "").strip(), _nk(d.get("_jo")), _nk(d.get("_jo_gaji")))
+                if k in have_k or k not in flat_idx:
+                    continue
+                have_k.add(k)
+                children.append(flat_idx[k])
+                parent_rank[id(flat_idx[k][1])] = i_use + 0.4
+                if len(children) >= 4:
+                    break
+        if children:
+            use = use + children
+            steps.append({"name": "위임 조문 자동 포함",
+                          "detail": ", ".join(_ctx_key(f, a) for f, a in children)})
 
     # ── 인용된 별표를 자동으로 끌어옵니다 ─────────────────────────
     # "누출검사주기는 별표 4와 같다" 처럼 조문이 별표에 넘기는 경우,
@@ -2203,7 +2287,7 @@ def _ask_after_search(req, steps, answered, found, flat, catalog, refs, it=None,
         if a.get("구분") in ("별표", "별지", "서식") or \
                 str(a.get("조문제목", "")).startswith(("[별표", "[별지", "[서식")):
             # v1.32: 원문 2천 자 자르기 → 테두리·공백 압축 후 비고를 남기며 자르기
-            body = _fit_keep_notes(_compact_bp(body), BP_CTX_CHARS)
+            body = _fit_keep_notes(_compact_bp(body), BP_CTX_CHARS, bp_kw)
 
         # ★ 위임법령(lsDelegated) 힌트 — 이 조문이 위임한 하위법령 조문번호를
         #   법제처 데이터로 못박아 둡니다. AI가 시행령·시행규칙 조문번호를
@@ -2300,7 +2384,8 @@ def _ask_after_search(req, steps, answered, found, flat, catalog, refs, it=None,
         parts, used = [], 0
         for f, a, txt in order:
             # 별표는 비고(보정·예외)가 보기를 가르므로 조금 더 길게, 비고를 남겨 자릅니다.
-            piece = _fit_keep_notes(txt, 2500 if _is_bp((f, a, txt)) else 1500)
+            piece = _fit_keep_notes(txt, 2500 if _is_bp((f, a, txt)) else 1500,
+                                    bp_kw if _is_bp((f, a, txt)) else None)
             if used + len(piece) > CLARIFY_CTX_TOKENS * 2 and parts:   # 글자 기준 1차 컷
                 break
             parts.append(piece)
