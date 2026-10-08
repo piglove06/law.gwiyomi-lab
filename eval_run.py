@@ -212,8 +212,11 @@ def run_case(base: str, case: dict, verbose: bool = True) -> dict:
     t0 = time.time()
     laws = list(case.get("laws") or [])         # v1.33 — "참고할 법령" 지정 시나리오
     laws_mode = case.get("laws_mode", "only")   # "only" 이 법령에서만 / "prefer" 우선 참고
+    prev = {"prev_question": case.get("prev_question", ""),          # v1.34 — 앞 질문에 이어서 묻기
+            "prev_laws": list(case.get("prev_laws") or []),
+            "prev_conclusion": case.get("prev_conclusion", "")}
     data = ask(base, {"question": q, "target": case.get("target", "auto"),
-                      "answered": "", "round": 0, "laws": laws, "laws_mode": laws_mode})
+                      "answered": "", "round": 0, "laws": laws, "laws_mode": laws_mode, **prev})
 
     r = 0
     while data.get("clarify") and r < max_rounds:
@@ -231,7 +234,7 @@ def run_case(base: str, case: dict, verbose: bool = True) -> dict:
             merged.append(f"추가 설명: {note}")
         answered = " / ".join(merged)
         data = ask(base, {"question": q, "target": case.get("target", "auto"),
-                          "answered": answered, "round": r, "laws": laws, "laws_mode": laws_mode})
+                          "answered": answered, "round": r, "laws": laws, "laws_mode": laws_mode, **prev})
 
     data["_elapsed"] = round(time.time() - t0, 1)
     data["_rounds"] = rounds

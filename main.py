@@ -387,6 +387,10 @@ class AskRequest(BaseModel):
     note: str = ""              # 사용자가 직접 적은 추가 설명
     laws: list[str] = []        # v1.33 — 사용자가 지정한 "참고할 법령" (선택, 최대 3개)
     laws_mode: str = "only"     # v1.33 — "only": 이 법령에서만 찾기 / "prefer": 우선 참고(다른 법령도 함께)
+    # v1.34 — "앞 질문에 이어서 묻기"(화면 체크박스). 앞 질문·그 답의 주 법령·결론 요약.
+    prev_question: str = ""
+    prev_laws: list[str] = []
+    prev_conclusion: str = ""
 
 
 # =====================================================================
@@ -1416,8 +1420,25 @@ def _ask_sync(req: AskRequest, progress: list):
     """
     steps = progress          # 화면으로 실시간 전달되는 목록
 
+    # ★ v1.34 — 앞 질문에 이어서 묻기. "이 경우에는 …", "그게 법률에 직접 있나요?" 처럼 앞 질문을 전제로 한 질문은
+    #   혼자서는 뜻이 없어 엉뚱한 법(하천법)을 찾았습니다. 앞 질문·결론을 조건으로 붙이고,
+    #   참고 법령을 따로 안 적었으면 앞 답의 주 법령을 "우선 참고" 로 씁니다.
+    prev_note = ""
+    if (req.prev_question or "").strip():
+        prev_note = f"앞 질문: {req.prev_question.strip()[:200]}"
+        if (req.prev_conclusion or "").strip():
+            concl = re.sub(r"\s+", " ", req.prev_conclusion.strip())[:300]
+            prev_note += f" / 앞 답변 결론: {concl}"
+        if not req.laws and req.prev_laws:
+            req.laws = [x for x in req.prev_laws if str(x).strip()][:2]
+            req.laws_mode = "prefer"
+        if req.round == 0:
+            steps.append({"name": "앞 질문에 이어서",
+                          "detail": req.prev_question.strip()[:80]
+                                    + (f" · 앞 답의 법령 우선 참고: {', '.join(req.laws)}" if req.laws else "")})
+
     # 사용자가 직접 적은 내용을 조건에 합칩니다.
-    answered = " / ".join(x for x in (req.answered, req.note.strip()) if x)
+    answered = " / ".join(x for x in (prev_note, req.answered, req.note.strip()) if x)
 
     # ★ v1.31 — 질문 의도(Intent). 규칙 기반이라 LLM 호출이 없습니다(intent.py).
     #   경로가 갈립니다: 조문 조회는 그 조문만, 정의·일반 기준은 되묻기 없이 답변.
@@ -1437,7 +1458,8 @@ def _ask_sync(req: AskRequest, progress: list):
     # 검색 결과는 되묻기 답변과 무관하게 같으므로(질문·대상이 같으면 같은 법령),
     # 조건은 키에서 뺍니다. 조건은 답변 생성에만 쓰입니다.
     user_laws = _user_laws(req)
-    cache_key = (req.question.strip(), req.target, tuple(user_laws), _laws_mode(req) if user_laws else "")
+    cache_key = (req.question.strip(), req.target, tuple(user_laws), _laws_mode(req) if user_laws else "",
+                 (req.prev_question or "").strip()[:200])
     # ★ 새 질문(round=0)이면 캐시를 쓰지 않고 반드시 새로 검색합니다.
     #   되묻기 라운드 중(round>0)에만 재사용합니다.
     #   이것이 없으면 이전 질문의 법령이 그대로 남아 엉뚱한 답이 나옵니다.
@@ -1634,6 +1656,9 @@ def _ask_sync(req: AskRequest, progress: list):
             else:
                 user_bad.append(u)
         only_mode = _laws_mode(req) == "only"
+        if not user_laws and re.search(re.escape(LAW_Q) + r"\s*:\s*직접 입력", req.answered or ""):
+            steps.append({"name": "사용자 지정 법령", "detail": "직접 입력한 내용에서 법령 이름을 찾지 못해 자동으로 찾습니다 "
+                                                              "(예: '토양환경보전법' 처럼 법령 이름을 적어 주세요)"})
         if user_laws:
             steps.append({"name": "사용자 지정 법령" + (" (이 법령에서만)" if only_mode else " (우선 참고)"),
                           "detail": (", ".join(user_resolved) or "확인된 법령 없음")
@@ -2004,7 +2029,8 @@ def _ask_after_search(req, steps, answered, found, flat, catalog, refs, it=None,
                 a.get("조문제목", ""))
 
     _ul = _user_laws(req)
-    sel_key = ("sel", req.question.strip(), req.target, tuple(_ul), _laws_mode(req) if _ul else "")
+    sel_key = ("sel", req.question.strip(), req.target, tuple(_ul), _laws_mode(req) if _ul else "",
+               (req.prev_question or "").strip()[:200])
     picked = None
     cached_sel = _cache_get(sel_key) if req.round > 0 else None
     if cached_sel:

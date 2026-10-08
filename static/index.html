@@ -226,6 +226,9 @@
   .lawpick .lp-label{font-size:12px;color:var(--note);margin-right:2px}
   .lawpick .lp-names{font-size:12.5px;font-weight:600;color:var(--accent)}
   .lawpick .lp-eg{display:block;line-height:1.7}
+  .follow{display:flex;align-items:center;gap:6px;margin-top:9px;font-size:13px;color:var(--ink);cursor:pointer}
+  .follow input{width:auto;margin:0}
+  .follow .follow-prev{font-size:12px;color:var(--note);overflow:hidden;text-overflow:ellipsis;white-space:nowrap;max-width:60%}
   .lawpick .lp-eg .lp-label{margin-right:6px}
   .lawpick .lp-mode{font-size:12.5px;color:var(--ink)}
   .lawpick .lp-mode label{display:inline-flex;align-items:center;gap:4px;margin-right:10px;cursor:pointer;white-space:nowrap}
@@ -383,6 +386,11 @@
         <span class="lp-label">예시:</span><span class="lp-names">대기환경보전법 · 물환경보전법 · 토양환경보전법 · 폐기물관리법 · 소음ㆍ진동관리법 · 악취방지법 · 환경영향평가법 · 개인정보 보호법</span>
       </div>
     </div>
+    <!-- v1.34 — 앞 질문에 이어서 묻기 (답변이 나온 뒤에만 보임) -->
+    <label id="followWrap" class="follow" style="display:none">
+      <input type="checkbox" id="follow"> 앞 질문에 이어서 묻기
+      <span class="follow-prev" id="followPrev"></span>
+    </label>
     <div class="row">
       <select id="target">
         <option value="auto">전체 (법령·시행령·규칙·고시)</option>
@@ -932,7 +940,11 @@ async function ask(skipClarify, extra, round){
   // v1.33 — 참고할 법령이 바뀌어도 새 질문으로 봅니다.
   const lawsPicked = parseLaws();
   const lawsMode = lawMode();
-  const qkey = base + "||" + lawsPicked.join(",") + "||" + (lawsPicked.length ? lawsMode : "");
+  // v1.34 — 앞 질문에 이어서 묻기: 체크돼 있고 앞 질문이 지금 질문과 다를 때만
+  const followOn = !!($("follow") && $("follow").checked && PREV_CTX && PREV_CTX.q !== base);
+  const prevSent = followOn ? PREV_CTX : null;
+  const qkey = base + "||" + lawsPicked.join(",") + "||" + (lawsPicked.length ? lawsMode : "")
+             + "||" + (prevSent ? prevSent.q : "");
   if(qkey !== ACTIVE_QUERY){
     resetQueryState();
     ACTIVE_QUERY = qkey;
@@ -964,7 +976,10 @@ async function ask(skipClarify, extra, round){
       body: JSON.stringify({question: base, target: $("target").value,
                             skip_clarify: !!skipClarify,
                             answered: extra || "", round: round || 0,
-                            laws: lawsPicked, laws_mode: lawsMode})
+                            laws: lawsPicked, laws_mode: lawsMode,
+                            prev_question: prevSent ? prevSent.q : "",
+                            prev_laws: prevSent ? prevSent.laws : [],
+                            prev_conclusion: prevSent ? prevSent.conclusion : ""})
     });
     // 서버가 NDJSON 스트림으로 보냅니다. 한 줄씩 읽어 진행 상황을 표시하고,
     // 마지막 "result" 줄을 최종 결과로 씁니다.
@@ -1065,11 +1080,13 @@ async function ask(skipClarify, extra, round){
     renderRefs(data.references);
     renderLaws(data.laws, data.cited_keys);
     applyFind();
+    setPrevContext(base, data);
 
     history.unshift({
       q: base,
       // 되묻기에서 고른 조건. 기록 목록에 함께 표시합니다.
-      answered: (lawsPicked.length ? `참고 법령(${lawsMode === "prefer" ? "우선 참고" : "이 법령에서만"}): ${lawsPicked.join(", ")}`
+      answered: (prevSent ? `앞 질문에 이어서: ${prevSent.q}` + (lawsPicked.length || extra ? " / " : "") : "")
+               + (lawsPicked.length ? `참고 법령(${lawsMode === "prefer" ? "우선 참고" : "이 법령에서만"}): ${lawsPicked.join(", ")}`
                  + (extra ? " / " : "") : "") + (extra || ""),
       // 기록에서 다시 열어볼 때도 경고가 함께 보이도록 붙여 저장합니다.
       answer: warnHead + (data.answer || ""),
@@ -1218,6 +1235,23 @@ function parseLaws(){
     if(x && !seen.has(k)){ seen.add(k); out.push(x); }
   });
   return out.slice(0, 3);
+}
+// ── v1.34 앞 질문에 이어서 묻기 ─────────────────────────────
+let PREV_CTX = null;     // {q, laws, conclusion} — 마지막으로 답이 나온 질문
+function setPrevContext(q, data){
+  const seen = new Set(), laws = [];
+  (data.laws || []).forEach(l => {
+    const n = String(l.name || "").replace(/\s*(시행령|시행규칙)$/, "").trim();
+    if(n && /(법|법률)$/.test(n) && !seen.has(n)){ seen.add(n); laws.push(n); }
+  });
+  const ans = String(data.answer || "");
+  const m = ans.match(/【결론】([\s\S]*?)(?=【|$)/);
+  PREV_CTX = {q: q, laws: laws.slice(0, 2), conclusion: (m ? m[1] : ans).replace(/\s+/g, " ").trim().slice(0, 300)};
+  if($("followWrap")){
+    $("followWrap").style.display = "flex";
+    $("followPrev").textContent = "(앞 질문: " + q + ")";
+    $("follow").checked = false;          // 기본은 새 질문. 이어서 물을 때만 체크
+  }
 }
 function lawMode(){
   const el = document.querySelector('input[name="lawmode"]:checked');
