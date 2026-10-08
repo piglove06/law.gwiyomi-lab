@@ -172,6 +172,8 @@ ANSWER_PROMPT = """너는 대한민국 국가법령 조문을 근거로 답하�
 14. 예/아니오로 답할 질문이면 【결론】 첫마디를 판정과 맞춰라. 있으면 "예", 없으면 "아니요".
     ("네, … 없습니다" 처럼 첫마디와 판정이 어긋나면 안 된다.)
     (확인된 조건)에 "앞 질문" 이 있으면 이 질문은 그 앞 질문에 이어서 묻는 것이다. "이 경우", "그것" 은 앞 질문을 가리킨다.
+15. 질문이 "**법률에** (직접) 있나요" 처럼 법령 단계를 집어 물으면 단계를 구분해 답한다.
+    시행령·시행규칙·고시에만 있는 내용이면 "법률에는 없고, 「○○법 시행령」 제○조에 있습니다" 라고 쓴다.
 
 ━━ 조문 인용 규칙 ━━━━━━━━━━━━━━━━━━━━━━━━━
 1. 조문번호는 [조문 원문]에서 눈으로 확인하고 적는다.
@@ -1600,7 +1602,13 @@ def _finalize_clarify(items: list, question: str = "") -> list:
     """되묻기 항목의 마지막 그물 — 텍스트·JSON 두 경로가 함께 씁니다 (v1.31 에 함수로 분리).
     할 일 보기·너무 짧은 보기 제거, "모름" 정리, 물음 아닌 질문·법령명 질문·결론 질문 제거."""
     cleaned = []
+    seen_q = set()
     for item in items:
+        # v1.34 — 한 라운드에 같은 질문이 두 번 나오는 경우(실측)
+        qk = re.sub(r"[\s?？.]+", "", str(item.get("question", "")))
+        if qk in seen_q:
+            continue
+        seen_q.add(qk)
         left = [o for o in item["options"] if not _is_todo_option(o)]
         if len(left) < len(item["options"]) and LLM_DEBUG:
             _dbg(f"[clarify] '할 일' 보기 {len(item['options']) - len(left)}개 제거: "
