@@ -2466,6 +2466,19 @@ def _ask_after_search(req, steps, answered, found, flat, catalog, refs, it=None,
             wanted.add((owner, kind, no))
             cite_rank.setdefault((owner, kind, no), i_use)
     # v1.35 — 질문에 이름이 나온 조문과 그 조문이 인용한 별표는 예산에서 끝까지 남깁니다.
+    # v1.35 — 질문자가 "○○이 아니다" 라고 밝힌 대상의 특례 조문(제목에 그 이름이 든 것)은 예산에서 먼저 뺍니다.
+    #   (비교15: "토양오염관리대상시설이 아니라서" 인데 시설 설치자 조문이 남고 일반 규정 제11조가 빠짐)
+    _neg_early = [re.sub(r"\s+", "", n) for n in _negated_targets(req.question)]
+    if _neg_early:
+        demoted = []
+        for f, a in use:
+            t = re.sub(r"\s+", "", str(a.get("조문제목", "")))
+            if any(n in t for n in _neg_early) and id(a) in prio:
+                prio[id(a)] += 100.0
+                demoted.append(_ctx_key(f, a))
+        if demoted:
+            steps.append({"name": "아니라고 밝힌 대상의 특례 조문 뒤로", "detail": ", ".join(demoted[:6])})
+    named_bp: set = set()          # 보호 조문이 인용한 별표 (렌더링 때 질문 낱말 줄 위주로 더 짧게)
     if named_ids:
         for i_use, (f, a) in enumerate(use):
             if id(a) not in named_ids:
@@ -2473,6 +2486,7 @@ def _ask_after_search(req, steps, answered, found, flat, catalog, refs, it=None,
             prio[id(a)] = min(prio.get(id(a), 0.0), 0.2)
             for mt in re.finditer(r"(별표|별지)\s*제?\s*(\d+)(?:\s*의\s*(\d+))?", a.get("조문내용", "")):
                 k3 = (f["name"], mt.group(1), mt.group(2) + (f"의{mt.group(3)}" if mt.group(3) else ""))
+                named_bp.add(k3)
                 if k3 in cite_rank:
                     cite_rank[k3] = min(cite_rank[k3], 0.6)
     # 선별이 직접 고른 별표도, 그 별표를 인용한 조문이 더 앞에 있으면 그 순위를 따릅니다.
@@ -2580,7 +2594,12 @@ def _ask_after_search(req, steps, answered, found, flat, catalog, refs, it=None,
         if a.get("구분") in ("별표", "별지", "서식") or \
                 str(a.get("조문제목", "")).startswith(("[별표", "[별지", "[서식")):
             # v1.32: 원문 2천 자 자르기 → 테두리·공백 압축 후 비고를 남기며 자르기
-            body = _fit_keep_notes(_compact_bp(body), BP_CTX_CHARS, bp_kw)
+            # v1.35 — 보호한 기준 별표(예: 우려기준 별표 3)는 예산에서 끝까지 남는 대신 짧게(질문 낱말 줄+머리+비고).
+            #   두 별표를 통째로 지키다 일반 규정(법 제11조)이 예산에서 밀려난 일이 있었음(비교15).
+            lim = BP_CTX_CHARS
+            if (f["name"], *(_bp_no(a) or ("", ""))) in named_bp:
+                lim = min(BP_CTX_CHARS, 1600)
+            body = _fit_keep_notes(_compact_bp(body), lim, bp_kw)
 
         # ★ 위임법령(lsDelegated) 힌트 — 이 조문이 위임한 하위법령 조문번호를
         #   법제처 데이터로 못박아 둡니다. AI가 시행령·시행규칙 조문번호를
