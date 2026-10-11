@@ -1277,16 +1277,29 @@ def _art_id(a: dict):
 
 def _diff_lines(old: str, new: str, keywords, limit: int = 12):
     """두 본문의 줄 차이(개정 전에만 있던 줄, 개정 후에 생긴 줄). 키워드가 있으면 키워드 든 줄을 앞에 둡니다."""
-    o = [ln.strip() for ln in _compact_bp(old).split("\n") if ln.strip()]
-    n = [ln.strip() for ln in _compact_bp(new).split("\n") if ln.strip()]
-    so, sn = set(o), set(n)
-    gone = [ln for ln in o if ln not in sn]
-    came = [ln for ln in n if ln not in so]
+    def _lines(t):
+        out = []
+        for ln in _compact_bp(t).replace("┃", "").split("\n"):
+            ln = ln.strip(" │|")
+            if ln:
+                out.append(ln)
+        return out
+
+    def _norm(ln):
+        # 개정 표시·부처 이름 바뀜(환경부 → 기후에너지환경부)·띄어쓰기는 내용 변경이 아니므로 무시하고 비교
+        ln = re.sub(r"<\s*(개정|신설|삭제|본조신설|전문개정|제목개정)[^>]*>", "", ln)
+        ln = re.sub(r"[■\s]+", "", ln.replace("기후에너지환경부", "환경부"))
+        return ln
+    o, n = _lines(old), _lines(new)
+    so, sn = {_norm(x) for x in o}, {_norm(x) for x in n}
+    gone = [ln for ln in o if _norm(ln) not in sn and _norm(ln)]
+    came = [ln for ln in n if _norm(ln) not in so and _norm(ln)]
     kws = [k for k in (keywords or []) if len(k) >= 2]
 
     def _rank(lst):
         hit = [ln for ln in lst if any(k in ln for k in kws)]
-        return (hit + [ln for ln in lst if ln not in hit])[:limit]
+        rest = [ln for ln in lst if ln not in hit]
+        return (hit + rest[:2 if hit else limit])[:limit]     # 질문 낱말이 든 줄이 있으면 나머지는 2줄만
     return _rank(gone), _rank(came)
 
 
@@ -1313,34 +1326,50 @@ def _history_block(question: str, use: list, prio: dict, keywords, steps: list) 
     def _old(v):
         return _hist_cached("mst", v["mst"], lambda: law_client.get_detail_mst(v["mst"]))
 
-    def _compare(nm, old):
-        """지금 컨텍스트의 이 법령 조문(상위 4개)을 old 버전과 비교 → [(라벨, 제목, 개정 전 줄, 개정 후 줄, 신설?)]"""
+    def _compare(nm, old, new_arts=None):
+        """
+        이 법령의 근거 조문(컨텍스트 상위 10개)을 old 버전과 비교 → [(라벨, 제목, 개정 전 줄, 개정 후 줄, 신설?)]
+        new_arts 를 주면 그 버전 본문과, 아니면 지금 컨텍스트(현행) 본문과 비교합니다.
+        질문 낱말(예: 불소)이 바뀐 줄에 든 항목을 앞에 두고 최대 4개.
+        """
         idx = {}
         for a in old.get("articles") or []:
             k = _art_id(a)
             if k:
                 idx.setdefault(k, a)
+        nidx = {}
+        for a in new_arts or []:
+            k = _art_id(a)
+            if k:
+                nidx.setdefault(k, a)
+        kws = [k for k in (keywords or []) if len(k) >= 2]
         out, n = [], 0
         for f, a in ordered:
-            if f.get("name") != nm or n >= 4:
+            if f.get("name") != nm or n >= 10:
                 continue
             k = _art_id(a)
             if not k:
                 continue
             n += 1
+            if new_arts is not None:
+                a = nidx.get(k)
+                if a is None:
+                    continue
             label = (f"제{k[1]}조" + (f"의{k[2]}" if k[2] else "")) if k[0] == "조" else f"[{k[1]} {k[2]}]"
             oa = idx.get(k)
             if oa is None:
-                out.append((label, str(a.get("조문제목", ""))[:30], [], [], True))
+                out.append((label, str(a.get("조문제목", ""))[:30], [], [], True, 0))
                 continue
             gone, came = _diff_lines(oa.get("조문내용", ""), a.get("조문내용", ""), keywords)
             if gone or came:
-                out.append((label, str(a.get("조문제목", ""))[:30], gone, came, False))
-        return out
+                hit = sum(1 for ln in gone + came if any(kw in ln for kw in kws))
+                out.append((label, str(a.get("조문제목", ""))[:30], gone, came, False, hit))
+        out.sort(key=lambda x: -x[5])
+        return [x[:5] for x in out[:4]]
 
     found_change = None                          # (법령명, 개정 행, 직전 행, 비교 결과)
     checked = []
-    for nm in laws[:2]:
+    for nm in laws[:3]:
         try:
             hist = _hist_cached("hist", nm, lambda: law_client.get_history(nm))
         except Exception:                        # noqa: BLE001
@@ -1350,11 +1379,13 @@ def _history_block(question: str, use: list, prio: dict, keywords, steps: list) 
         if want_date:
             for i, h in enumerate(hist[:-1]):
                 if want_date in (h["prom"], h["ef"]):
-                    diffs = _compare(nm, _old(hist[i + 1]))
+                    # 그 개정 버전 자체와 직전 버전을 비교(현행과 비교하면 이후 개정까지 섞임)
+                    new_arts = None if i == 0 else (_old(h).get("articles") or [])
+                    diffs = _compare(nm, _old(hist[i + 1]), new_arts)
                     found_change = (nm, h, hist[i + 1], diffs)
                     break
         else:
-            for j in range(1, min(len(hist), 9)):
+            for j in range(1, min(len(hist), 7)):
                 diffs = _compare(nm, _old(hist[j]))
                 checked.append(f"{nm} 시행 {_d(hist[j]['ef'])}")
                 if diffs:
@@ -1420,7 +1451,7 @@ def _title_core(title: str) -> str:
 
 def _named_in_question(question: str, flat: list, limit: int = 4) -> list:
     """
-    v1.35 — 조문 제목(알맹이)이 질문에 그대로 들어 있는 조문을 돌려줍니다(법률 → 시행령 → 시행규칙 순, 최대 limit 개).
+    v1.35 — 제목(알맹이)이 "…기준" 인 조문 중 그 제목이 질문에 그대로 들어 있는 것(법률 → 시행령 → 시행규칙 순, 최대 limit 개).
     "토양오염의 우려기준" 처럼 '의' 가 끼어도 맞춥니다. 너무 짧은 제목(정의·목적 등)은 비교하지 않습니다.
     """
     qn = re.sub(r"[\s·ㆍ]+", "", str(question or ""))
@@ -1431,7 +1462,9 @@ def _named_in_question(question: str, flat: list, limit: int = 4) -> list:
         if re.match(r"\s*\[(별지|서식)", str(a.get("조문제목", ""))):
             continue                                   # 신고서·신청서 서식은 제외
         core = _title_core(a.get("조문제목", ""))
-        if len(core.replace("의", "")) < 6:
+        # v1.35 3차 — **기준(수치표)** 조문만. "대기오염물질"·"폐기물처리업" 같은 일반 명칭까지 넣었더니
+        #   컨텍스트가 커져 되묻기가 3번으로 늘었음(대기 배출시설 시나리오). 값이 든 기준 조문이 빠지는 게 원래 문제.
+        if len(core.replace("의", "")) < 6 or not core.endswith("기준"):
             continue
         if core in qn or core.replace("의", "") in qn2:
             lv = f.get("level", "")
