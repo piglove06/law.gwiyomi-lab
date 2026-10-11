@@ -255,7 +255,7 @@ SELECT_ARTICLES = os.getenv("SELECT_ARTICLES", "1") not in ("0", "false", "False
 # 조회 후 지자체기관명으로 한 번 더 걸러냅니다.
 LOCAL_GOV = os.getenv("LOCAL_GOV", "성남시").strip()
 
-VERSION = "1.34"
+VERSION = "1.35"
 
 app = FastAPI(title="법령 조회 도우미", version=VERSION)
 
@@ -1250,7 +1250,7 @@ def _ctx_key(f: dict, a: dict) -> str:
 # 실사용 2026-10-10: "불소 우려기준이 2024년 12월 12일에 바뀌었는데 몇에서 몇으로?" → 현행 본문만 봐서
 # "변경되지 않았다" 고 답함. 질문이 개정·변경을 물으면 법제처 연혁에서 그 개정 **직전 버전** 본문을 받아
 # 지금 컨텍스트의 같은 조문·별표와 줄 단위로 비교해 [개정 이력] 블록으로 붙입니다.
-HISTORY_COMPARE = os.getenv("HISTORY_COMPARE", "0") != "0"
+HISTORY_COMPARE = os.getenv("HISTORY_COMPARE", "1") != "0"
 _CHANGE_RE = re.compile(r"(바뀌|바꼈|바뀐|변경|개정|달라졌|달라진|신구|전후|예전에는|이전에는|원래는|몇에서\s*몇|올랐|내렸|완화|강화)")
 _QDATE_RE = re.compile(r"(\d{4})\s*[년.\-/]\s*(\d{1,2})\s*[월.\-/]\s*(\d{1,2})")
 _HIST_CACHE: dict = {}
