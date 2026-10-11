@@ -156,7 +156,10 @@ def _fit_keep_notes(text: str, limit: int, keywords=None) -> str:
         score = [(sum(1 for k in kws if k in ln), i) for i, ln in enumerate(lines)]
         hit = [i for sc, i in sorted(score, key=lambda x: (-x[0], x[1])) if sc > 0]
         if hit:
-            keep = set(range(min(6, len(lines))))            # 제목·머리줄
+            # 제목·머리줄. v1.35 — 6줄 → 8줄 + 앞 15줄 안의 "1지역│2지역" 같은 열 이름 줄
+            #   (6줄만 남기면 별표 3 의 열 이름 줄(7번째)이 빠져, 불소 3개 값 중 어느 것이 어느 지역인지 모름)
+            keep = set(range(min(8, len(lines))))
+            keep |= {i for i, ln in enumerate(lines[:15]) if re.search(r"(\d\s*지역|구\s*분|항\s*목)", ln)}
             used0 = sum(len(lines[i]) + 1 for i in keep)
             for i in hit:                                    # 많이 맞는 줄부터 주변 줄과 함께
                 win = set(range(max(0, i - 2), min(len(lines), i + 5))) - keep
@@ -1323,6 +1326,13 @@ def _history_block(question: str, use: list, prio: dict, keywords, steps: list) 
     def _d(x):
         return f"{x[:4]}.{int(x[4:6])}.{int(x[6:8])}" if len(x) == 8 else x
 
+    # 날짜 없이 거슬러 올라갈 때는 "질문의 알맹이 낱말"(예: 불소)이 바뀐 줄에 들어 있어야 그 개정으로 봅니다.
+    #   (실측: 법률의 장 제목·부처명 같은 다른 변경에 먼저 걸려 엉뚱한 개정을 답함)
+    #   알맹이 = 지금 근거 조문 중 3개 이하에만 나오는 낱말(흔한 "기준"·"토양오염도" 는 제외), 변경을 묻는 말 제외.
+    texts = [str(a.get("조문내용", "")) for _, a in ordered]
+    core_kw = [k for k in (keywords or []) if len(k) >= 2 and not _CHANGE_RE.search(k)
+               and 0 < sum(1 for t in texts if k in t) <= 3]
+
     def _old(v):
         return _hist_cached("mst", v["mst"], lambda: law_client.get_detail_mst(v["mst"]))
 
@@ -1367,6 +1377,12 @@ def _history_block(question: str, use: list, prio: dict, keywords, steps: list) 
         out.sort(key=lambda x: -x[5])
         return [x[:5] for x in out[:4]]
 
+    # 알맹이 낱말이 근거 조문에 많이 든 법령부터 봅니다(불소 → 별표 3·7 이 있는 시행규칙 먼저).
+    if core_kw:
+        def _kwn(nm):
+            return sum(1 for f, a in ordered if f.get("name") == nm
+                       for k in core_kw if k in str(a.get("조문내용", "")))
+        laws.sort(key=lambda nm: -_kwn(nm))
     found_change = None                          # (법령명, 개정 행, 직전 행, 비교 결과)
     checked = []
     for nm in laws[:3]:
@@ -1388,7 +1404,8 @@ def _history_block(question: str, use: list, prio: dict, keywords, steps: list) 
             for j in range(1, min(len(hist), 7)):
                 diffs = _compare(nm, _old(hist[j]))
                 checked.append(f"{nm} 시행 {_d(hist[j]['ef'])}")
-                if diffs:
+                if diffs and (not core_kw or any(any(k in ln for k in core_kw)
+                                                 for d in diffs for ln in d[2] + d[3])):
                     found_change = (nm, hist[j - 1], hist[j], diffs)
                     break
         if found_change:
