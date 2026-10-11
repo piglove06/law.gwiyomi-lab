@@ -1247,7 +1247,7 @@ def _ctx_key(f: dict, a: dict) -> str:
 
 
 # v1.35 — 질문에 제목이 그대로 나온 조문을 맨 앞에 둘지 (.env NAMED_FIRST=0 이면 끔)
-NAMED_FIRST = os.getenv("NAMED_FIRST", "0") != "0"
+NAMED_FIRST = os.getenv("NAMED_FIRST", "1") != "0"
 
 _NEG_RE = re.compile(r"([가-힣A-Za-z0-9·ㆍ]{4,30}?)\s*(?:이|가)\s*아(?:니|닌|님)")
 
