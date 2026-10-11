@@ -1246,6 +1246,149 @@ def _ctx_key(f: dict, a: dict) -> str:
     return f"{f.get('name', '')} {str(a.get('조문제목', ''))[:40]}".strip()
 
 
+# ── v1.35 — 개정 전후 비교 ─────────────────────────────────────────
+# 실사용 2026-10-10: "불소 우려기준이 2024년 12월 12일에 바뀌었는데 몇에서 몇으로?" → 현행 본문만 봐서
+# "변경되지 않았다" 고 답함. 질문이 개정·변경을 물으면 법제처 연혁에서 그 개정 **직전 버전** 본문을 받아
+# 지금 컨텍스트의 같은 조문·별표와 줄 단위로 비교해 [개정 이력] 블록으로 붙입니다.
+HISTORY_COMPARE = os.getenv("HISTORY_COMPARE", "0") != "0"
+_CHANGE_RE = re.compile(r"(바뀌|바꼈|바뀐|변경|개정|달라졌|달라진|신구|전후|예전에는|이전에는|원래는|몇에서\s*몇|올랐|내렸|완화|강화)")
+_QDATE_RE = re.compile(r"(\d{4})\s*[년.\-/]\s*(\d{1,2})\s*[월.\-/]\s*(\d{1,2})")
+_HIST_CACHE: dict = {}
+
+
+def _hist_cached(kind: str, key: str, fn):
+    k = (kind, key)
+    hit = _HIST_CACHE.get(k)
+    if hit and time.time() - hit[0] < 3600:
+        return hit[1]
+    val = fn()
+    _HIST_CACHE[k] = (time.time(), val)
+    return val
+
+
+def _art_id(a: dict):
+    """조문·별표를 버전 사이에서 맞춰 볼 키. 조문은 (번호, 가지), 별표는 제목의 [별표 N] 머리."""
+    no = str(a.get("조문번호", "") or "").lstrip("0")
+    if no:
+        return ("조", no, str(a.get("조문가지번호", "") or "").lstrip("0"))
+    m = re.match(r"\[(별표|별지|서식)\s*(\d+)(?:의(\d+))?", str(a.get("조문제목", "")))
+    return ("표", m.group(1), m.group(2) + (f"의{m.group(3)}" if m.group(3) else "")) if m else None
+
+
+def _diff_lines(old: str, new: str, keywords, limit: int = 12):
+    """두 본문의 줄 차이(개정 전에만 있던 줄, 개정 후에 생긴 줄). 키워드가 있으면 키워드 든 줄을 앞에 둡니다."""
+    o = [ln.strip() for ln in _compact_bp(old).split("\n") if ln.strip()]
+    n = [ln.strip() for ln in _compact_bp(new).split("\n") if ln.strip()]
+    so, sn = set(o), set(n)
+    gone = [ln for ln in o if ln not in sn]
+    came = [ln for ln in n if ln not in so]
+    kws = [k for k in (keywords or []) if len(k) >= 2]
+
+    def _rank(lst):
+        hit = [ln for ln in lst if any(k in ln for k in kws)]
+        return (hit + [ln for ln in lst if ln not in hit])[:limit]
+    return _rank(gone), _rank(came)
+
+
+def _history_block(question: str, use: list, prio: dict, keywords, steps: list) -> str:
+    """
+    질문이 개정·변경을 물으면 [개정 이력] 텍스트를, 아니면 "" 를 돌려줍니다. 실패해도 조회는 계속합니다.
+      · 질문에 날짜가 있으면 그날 공포·시행된 개정과 그 직전 버전을 비교합니다.
+      · 날짜가 없으면 현행에서 한 버전씩 거슬러 올라가며(최대 8개) 지금 근거로 쓰는 조문·별표가
+        **처음으로 달라지는 버전**을 찾습니다. 그 바로 다음 개정이 바꾼 것입니다.
+    """
+    if not HISTORY_COMPARE or not _CHANGE_RE.search(question or ""):
+        return ""
+    qd = _QDATE_RE.search(question or "")
+    want_date = f"{qd.group(1)}{int(qd.group(2)):02d}{int(qd.group(3)):02d}" if qd else ""
+    ordered = sorted(use, key=lambda u: prio.get(id(u[1]), 999.0))
+    laws = []
+    for f, _ in ordered:
+        if f.get("name") and f.get("target", "law") in ("law", "eflaw") and f["name"] not in laws:
+            laws.append(f["name"])
+
+    def _d(x):
+        return f"{x[:4]}.{int(x[4:6])}.{int(x[6:8])}" if len(x) == 8 else x
+
+    def _old(v):
+        return _hist_cached("mst", v["mst"], lambda: law_client.get_detail_mst(v["mst"]))
+
+    def _compare(nm, old):
+        """지금 컨텍스트의 이 법령 조문(상위 4개)을 old 버전과 비교 → [(라벨, 제목, 개정 전 줄, 개정 후 줄, 신설?)]"""
+        idx = {}
+        for a in old.get("articles") or []:
+            k = _art_id(a)
+            if k:
+                idx.setdefault(k, a)
+        out, n = [], 0
+        for f, a in ordered:
+            if f.get("name") != nm or n >= 4:
+                continue
+            k = _art_id(a)
+            if not k:
+                continue
+            n += 1
+            label = (f"제{k[1]}조" + (f"의{k[2]}" if k[2] else "")) if k[0] == "조" else f"[{k[1]} {k[2]}]"
+            oa = idx.get(k)
+            if oa is None:
+                out.append((label, str(a.get("조문제목", ""))[:30], [], [], True))
+                continue
+            gone, came = _diff_lines(oa.get("조문내용", ""), a.get("조문내용", ""), keywords)
+            if gone or came:
+                out.append((label, str(a.get("조문제목", ""))[:30], gone, came, False))
+        return out
+
+    found_change = None                          # (법령명, 개정 행, 직전 행, 비교 결과)
+    checked = []
+    for nm in laws[:2]:
+        try:
+            hist = _hist_cached("hist", nm, lambda: law_client.get_history(nm))
+        except Exception:                        # noqa: BLE001
+            hist = []
+        if len(hist) < 2:
+            continue
+        if want_date:
+            for i, h in enumerate(hist[:-1]):
+                if want_date in (h["prom"], h["ef"]):
+                    diffs = _compare(nm, _old(hist[i + 1]))
+                    found_change = (nm, h, hist[i + 1], diffs)
+                    break
+        else:
+            for j in range(1, min(len(hist), 9)):
+                diffs = _compare(nm, _old(hist[j]))
+                checked.append(f"{nm} 시행 {_d(hist[j]['ef'])}")
+                if diffs:
+                    found_change = (nm, hist[j - 1], hist[j], diffs)
+                    break
+        if found_change:
+            break
+    if not found_change:
+        detail = (f"{_d(want_date)} 개정을 찾지 못함" if want_date
+                  else f"최근 버전({', '.join(checked[-2:]) or '없음'}까지)에서 근거 조문 변경 없음")
+        steps.append({"name": "개정 이력", "detail": detail})
+        if want_date or not checked:
+            return ""
+        return ("\n\n[개정 이력 — 법제처 연혁 본문 비교]\n"
+                f"· 지금 근거로 쓰는 조문·별표는 최근 {len(checked)}개 버전 동안 바뀐 줄이 없습니다.")
+    nm, cur_v, prev_v, diffs = found_change
+    lines = [f"「{nm}」 {_d(cur_v['prom'])} {cur_v['kind']}(제{cur_v['no']}호, 시행 {_d(cur_v['ef'])}) — "
+             f"직전 버전(시행 {_d(prev_v['ef'])})과 비교"]
+    if not diffs:
+        lines.append("· 지금 근거로 쓰는 조문·별표는 이 개정에서 바뀐 줄이 없습니다.")
+    for label, title, gone, came, is_new in diffs:
+        if is_new:
+            lines.append(f"· {label} {title}: 직전 버전에는 없던 조문·별표(이 개정에서 신설)")
+            continue
+        lines.append(f"· {label} {title} — 바뀐 줄")
+        lines += [f"    개정 전: {ln[:160]}" for ln in gone]
+        lines += [f"    개정 후: {ln[:160]}" for ln in came]
+    if not want_date:
+        lines.append("(이 개정 이후 현행까지 이 조문·별표는 더 바뀌지 않았습니다. 현행 값은 [조문 원문] 기준)")
+    steps.append({"name": "개정 이력 비교",
+                  "detail": f"{nm} {_d(cur_v['prom'])} {cur_v['kind']} ↔ 직전(시행 {_d(prev_v['ef'])}) · 바뀐 항목 {len(diffs)}개"})
+    return "\n\n[개정 이력 — 법제처 연혁 본문 비교]\n" + "\n".join(lines)
+
+
 # v1.35 — 질문에 제목이 그대로 나온 조문을 맨 앞에 둘지 (.env NAMED_FIRST=0 이면 끔)
 NAMED_FIRST = os.getenv("NAMED_FIRST", "1") != "0"
 
@@ -1285,8 +1428,10 @@ def _named_in_question(question: str, flat: list, limit: int = 4) -> list:
     order = {"법률": 0, "대통령령": 1, "총리령": 2, "부령": 2}
     hits = []
     for f, a in flat:
+        if re.match(r"\s*\[(별지|서식)", str(a.get("조문제목", ""))):
+            continue                                   # 신고서·신청서 서식은 제외
         core = _title_core(a.get("조문제목", ""))
-        if len(core.replace("의", "")) < 5:
+        if len(core.replace("의", "")) < 6:
             continue
         if core in qn or core.replace("의", "") in qn2:
             lv = f.get("level", "")
@@ -2166,13 +2311,19 @@ def _ask_after_search(req, steps, answered, found, flat, catalog, refs, it=None,
     # 선별이 놓치거나 토큰 예산 때문에 뒤로 밀려 빠지는 일이 있어(실사용 2026-10-10: "우려기준이냐 대책기준이냐"
     # 물었는데 법 제4조의2·시행규칙 제1조의5·별표 3(우려기준)이 빠지고 별표 7(대책기준)만 남아 "대책기준" 으로 답함)
     # 제목이 질문에 그대로 들어 있는 조문을 맨 앞(우선순위 최상)에 둡니다. 그 조문이 인용한 별표도 따라옵니다.
+    # (v1.35 2차 — 처음엔 맨 앞으로 옮겼더니 주유소·음식점 시나리오의 되묻기·답이 흔들려서,
+    #  순서는 그대로 두고 **빠졌으면 넣고, 토큰 예산에서 마지막까지 지키는** 방식으로 바꿨습니다.)
+    named_ids: set = set()
     if picked is not None and NAMED_FIRST:
         named = _named_in_question(req.question, flat)
         if named:
-            have_n = {_akey(f, a) for f, a in named}
-            use = named + [p for p in use if _akey(*p) not in have_n]
-            steps.append({"name": "질문에 이름이 나온 조문 우선",
-                          "detail": ", ".join(_ctx_key(f, a) for f, a in named)})
+            have_n = {_akey(f, a) for f, a in use}
+            add_n = [p for p in named if _akey(*p) not in have_n]
+            use = use + add_n
+            named_ids = {id(a) for _, a in named}
+            steps.append({"name": "질문에 이름이 나온 조문 보호",
+                          "detail": ", ".join(_ctx_key(f, a) for f, a in named)
+                                    + (f" (추가 {len(add_n)}개)" if add_n else "")})
 
     # ── v1.32 — 상위 조문 자동 포함 ─────────────────────────────────
     # 시행령·시행규칙 조문은 "법 제12조제1항에 따른 …", "영 제8조에 따라 …" 처럼 근거 조문을
@@ -2281,6 +2432,16 @@ def _ask_after_search(req, steps, answered, found, flat, catalog, refs, it=None,
                     continue          # 우리가 안 가진 법령의 별표 — 건드리지 않음
             wanted.add((owner, kind, no))
             cite_rank.setdefault((owner, kind, no), i_use)
+    # v1.35 — 질문에 이름이 나온 조문과 그 조문이 인용한 별표는 예산에서 끝까지 남깁니다.
+    if named_ids:
+        for i_use, (f, a) in enumerate(use):
+            if id(a) not in named_ids:
+                continue
+            prio[id(a)] = min(prio.get(id(a), 0.0), 0.2)
+            for mt in re.finditer(r"(별표|별지)\s*제?\s*(\d+)(?:\s*의\s*(\d+))?", a.get("조문내용", "")):
+                k3 = (f["name"], mt.group(1), mt.group(2) + (f"의{mt.group(3)}" if mt.group(3) else ""))
+                if k3 in cite_rank:
+                    cite_rank[k3] = min(cite_rank[k3], 0.6)
     # 선별이 직접 고른 별표도, 그 별표를 인용한 조문이 더 앞에 있으면 그 순위를 따릅니다.
     for f, a in use:
         k = _bp_no(a)
@@ -2557,6 +2718,11 @@ def _ask_after_search(req, steps, answered, found, flat, catalog, refs, it=None,
                     "(예: 신고·조사·명령의 일반 규정)이 직접 근거이므로 그 조문으로 답한다. "
                     "'직접적인 규정을 확인할 수 없다' 고 하지 않는다)")
         steps.append({"name": "질문자가 아니라고 밝힌 대상", "detail": ", ".join(_neg) + " — 일반 조문으로 답하도록 지시"})
+    # ★ v1.35 — 개정·변경을 묻는 질문이면 직전 버전과 비교한 [개정 이력] 을 붙입니다.
+    try:
+        _hint += _history_block(req.question + " " + (answered or ""), use, prio, bp_kw, steps)
+    except Exception as e:                                # noqa: BLE001 — 보조 정보. 실패해도 답은 냅니다
+        applog.warn(f"개정 이력 비교 실패 — 건너뜁니다: {e}")
     q_for_answer = req.question + (f"\n(확인된 조건: {answered})" if answered else "") + _hint
     ctx_n = ai_client.server_ctx()
     overhead = ai_client.count_tokens(

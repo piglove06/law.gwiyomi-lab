@@ -458,14 +458,15 @@ def _has_real_articles(d: dict) -> bool:
     return sum(len(a.get("조문내용", "")) for a in arts) >= 200
 
 
-def _get_detail_once(target: str, law_id: str) -> dict:
+def _get_detail_once(target: str, law_id: str, key: str = "") -> dict:
     """
     본문 조회 한 번.
 
     법령은 <법령><조문><조문단위> 구조가 확인됐습니다.
     행정규칙·자치법규·해석례는 구조가 다를 수 있어 방어적으로 훑습니다.
+    key — 조회 키 이름을 바꿀 때(v1.35: 연혁 버전은 "MST" 로 조회).
     """
-    key = DETAIL_PARAM.get(target, "ID")
+    key = key or DETAIL_PARAM.get(target, "ID")
     xml_text = _get(SERVICE_URL, {"target": target, key: law_id})
 
     try:
@@ -815,6 +816,9 @@ def dump_raw(target: str, query_or_id: str, mode: str = "search",
         return _get(SEARCH_URL, params)
     params = {"target": target, DETAIL_PARAM.get(target, "ID"): query_or_id,
               **(extra or {})}
+    # v1.35 — 값이 비어 있으면 ID 를 빼고 보냅니다(예: MST 로만 조회). 빈 ID 를 주면 법제처가 500 을 냅니다.
+    if not query_or_id:
+        params.pop(DETAIL_PARAM.get(target, "ID"), None)
     return _get(SERVICE_URL, params)
 
 
@@ -1410,3 +1414,53 @@ def resolve_abbrev(name: str) -> str:
     except Exception:
         return name
     return table.get(_norm_name(name), name)
+
+
+# =====================================================================
+# v1.35 — 법령 연혁(개정 이력)과 개정 전 본문
+# =====================================================================
+# 실사용 2026-10-10: "불소 우려기준이 2024년 12월 12일에 바뀌었는데 몇에서 몇으로?" — 현행 본문만 보던 탓에
+# "변경되지 않았다" 고 답함. 개정 전 버전 본문을 받아 비교해야 답할 수 있습니다.
+#
+# [실측으로 확정한 것]
+#   · lawSearch target=law 는 nw·efYd 를 줘도 현행 1건만 돌려줍니다(연혁 목록 불가).
+#   · target=lsHistory 는 **HTML 만** 줍니다. 표 한 줄 = 한 버전이고, 링크에 MST(법령일련번호)·efYd(시행일)가 있습니다.
+#     예) 토양환경보전법 시행규칙: 41건 — 267141(2024.12.12 일부개정, 환경부령 제1134호) …
+#   · 검색어가 부분일치라 "토양환경보전법" 으로 찾으면 시행령 줄도 섞여 옵니다 → 법령명으로 한 번 더 거릅니다.
+#   · 개정 전 버전 본문은 lawService target=law 에 **MST** 로 조회합니다.
+_HIST_ROW = re.compile(r"<tr[\s\S]*?</tr>")
+
+
+def get_history(law_name: str) -> list[dict]:
+    """
+    법령 연혁 목록(최신 → 과거). [{"mst","ef","prom","kind","no","name","current"}]
+    ef·prom 은 "YYYYMMDD". 실패하면 [].
+    """
+    try:
+        html_text = _get(SEARCH_URL, {"target": "lsHistory", "query": law_name, "display": 100, "type": "HTML"})
+    except LawApiError:
+        return []
+    want = _norm_name(law_name)
+    out = []
+    for row in _HIST_ROW.findall(html_text):
+        m = re.search(r"MST=(\d+)[^\"']*?efYd=(\d{8})", row)
+        if not m:
+            continue
+        cells = [re.sub(r"\s+", " ", re.sub(r"<[^>]+>", " ", c)).strip()
+                 for c in re.findall(r"<td[\s\S]*?</td>", row)]
+        txt = " ".join(cells)
+        name = next((c for c in cells if _norm_name(c) == want), "")
+        if not name:
+            continue
+        kind = next((k for k in ("전부개정", "일부개정", "타법개정", "제정", "폐지") if k in txt), "")
+        dates = re.findall(r"(\d{4})\.(\d{1,2})\.(\d{1,2})", txt)
+        prom = (f"{dates[0][0]}{int(dates[0][1]):02d}{int(dates[0][2]):02d}" if dates else "")
+        no = re.search(r"제\s*0*(\d+)\s*호", txt)
+        out.append({"mst": m.group(1), "ef": m.group(2), "prom": prom, "kind": kind,
+                    "no": no.group(1) if no else "", "name": name, "current": "현행" in txt})
+    return out
+
+
+def get_detail_mst(mst: str) -> dict:
+    """연혁 버전(법령일련번호 MST)의 본문. get_detail 과 같은 모양({"meta","articles"})."""
+    return _get_detail_once("law", str(mst), key="MST")
