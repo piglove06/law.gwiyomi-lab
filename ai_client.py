@@ -1082,6 +1082,41 @@ def _known_in_question(question: str, item: dict) -> str:
     uq, uo = _unit_of(q), _unit_of(opts + " " + ask)
     if uq & uo:
         return f"수치({', '.join(sorted(uq & uo))})가 질문에 있음"
+    # ★ v1.35 — 보기 가운데 하나가 질문에 이미 나와 있으면(같은 말·같은 뜻) 묻지 않습니다.
+    #   (2026-10-10 실사용: "땅을 파다가 기름이 나왔어" 인데
+    #    "어떤 물질로 오염되었습니까? [석유류 / 유기용제류 / 기타 / 모름]" 을 물음)
+    hit = _option_in_question(q, item.get("options", []))
+    if hit:
+        return f"'{hit}' 가 질문에 있음"
+    return ""
+
+
+# 보기 낱말 ↔ 질문에서 같은 뜻으로 쓰이는 말. 보기에 왼쪽 말이 들어 있고 질문에 오른쪽 패턴이 있으면 같은 것.
+_OPT_SYNONYMS = {
+    "석유": r"(기름|유류|석유|경유|휘발유|등유|벙커|윤활유|폐유|엔진오일|오일)",
+    "유기용제": r"(유기\s*용제|솔벤트|시너|신나|트리클로로|테트라클로로|TCE|PCE)",
+    "중금속": r"(중금속|카드뮴|비소|수은|구리|아연|니켈|크롬)",
+    "불소": r"불소",
+}
+# 고를 수 있는 내용이 없는 보기(예/아니오·모름·기타·직접 입력)는 비교하지 않습니다.
+_OPT_SKIP = re.compile(r"^(예|네|아니오|아니요|있음|없음|해당|해당\s*없음|해당하지\s*않음|모름|기타|직접)")
+
+
+def _option_in_question(question: str, options) -> str:
+    """보기 중 질문에 이미 적힌 것(같은 말 또는 같은 뜻)이 있으면 그 보기를, 없으면 "" 를 돌려줍니다."""
+    q = str(question or "")
+    qn = re.sub(r"\s+", "", q)
+    for o in options or []:
+        o = str(o).strip()
+        if not o or _OPT_SKIP.match(o) or _is_unknown_option(o):
+            continue
+        base = re.sub(r"\s+", "", re.sub(r"\(.*?\)", "", o))
+        base = re.sub(r"(류|계열|등|함|임)$", "", base)
+        if len(base) >= 3 and base in qn:
+            return o
+        for key, pat in _OPT_SYNONYMS.items():
+            if key in o and re.search(pat, q):
+                return o
     return ""
 
 # 되묻기가 "결론"(기한·의무)을 질문자에게 되묻는 꼴. clarify() 마지막 그물에서 버립니다.

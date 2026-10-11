@@ -355,6 +355,14 @@ def grade(case: dict, data: dict) -> dict:
                if not any(str(o).startswith("모름") for o in (it.get("options") or []))]
         ck("되묻기마다 '모름' 보기 있음", not bad, " | ".join(bad)[:200])
 
+    if case.get("forbid_clarify"):
+        # v1.35 — 질문에 이미 있는 사실(예: "기름" → 석유류)을 되묻기로 다시 물으면 실패
+        bad = [f"{it['question']} [{' / '.join(it.get('options') or [])}]"
+               for it in (data.get("_clarify_items") or [])
+               for w in case["forbid_clarify"]
+               if re.search(w, str(it.get("question", "")) + " " + " ".join(it.get("options") or []))]
+        ck(f"되묻기에 없어야: {' | '.join(case['forbid_clarify'])}", not bad, " | ".join(bad)[:200])
+
     if case.get("no_conclusion_in_clarify"):
         bad = [it.get("question", "") for it in (data.get("_clarify_items") or [])
                if CONCLUSION_Q.search(it.get("question", "") or "")]

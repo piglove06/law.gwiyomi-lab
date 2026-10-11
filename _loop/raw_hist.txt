@@ -1,0 +1,7 @@
+# v1.35 개발용 — 법령 연혁·신구법 API 응답 형태 확인
+law|토양환경보전법 시행규칙|search|nw=1&display=5
+law|토양환경보전법 시행규칙|search|nw=2&display=5
+law|토양환경보전법 시행규칙|search|nw=3&display=5
+law|토양환경보전법 시행규칙|search|efYd=20241201~20241231&display=5
+oldAndNew|토양환경보전법 시행규칙|search|display=10
+lsHistory|토양환경보전법 시행규칙|search|display=5
