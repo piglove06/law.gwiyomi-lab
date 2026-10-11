@@ -527,6 +527,8 @@ def main():
     ap.add_argument("--base", default="http://127.0.0.1:8000")
     ap.add_argument("--only", default="", help="이름에 이 말이 들어간 시나리오만 (| 로 여러 개)")
     ap.add_argument("--cases", default=CASES)
+    ap.add_argument("--raw-file", default="",
+                    help="v1.35 — 한 줄에 'target|value|mode|k=v&k=v' 하나씩. /api/raw 결과를 _eval/raw_N.xml 로 저장(개발용)")
     ap.add_argument("--probe-file", default="",
                     help="(진단용) 한 줄에 질문 하나. 서버 /api/raw 로 법제처 지능형 검색 원본 XML 을 "
                          "_eval/probe_ai_N.xml 로 저장하고 끝냅니다.")
@@ -561,6 +563,28 @@ def main():
         print("로그인 완료 (APP_PASSWORD)")
     elif _env_value("APP_PASSWORD"):
         print("[경고] 로그인 실패 — 이후 요청이 401 로 실패할 수 있습니다.")
+
+    if args.raw_file:
+        rf = args.raw_file if os.path.isabs(args.raw_file) else os.path.join(HERE, args.raw_file)
+        with open(rf, encoding="utf-8") as f:
+            lines = [ln.strip() for ln in f if ln.strip() and not ln.startswith("#")]
+        os.makedirs(OUTDIR, exist_ok=True)
+        for i, ln in enumerate(lines, 1):
+            parts = (ln.split("|") + ["", "", "", ""])[:4]
+            q = {"target": parts[0], "value": parts[1], "mode": parts[2] or "search"}
+            q.update(urllib.parse.parse_qsl(parts[3]))
+            url = args.base.rstrip("/") + "/api/raw?" + urllib.parse.urlencode(q)
+            headers = {"Cookie": f"lawfinder_auth={_AUTH_COOKIE}"} if _AUTH_COOKIE else {}
+            try:
+                with urllib.request.urlopen(urllib.request.Request(url, headers=headers), timeout=90) as r:
+                    body = r.read().decode("utf-8", errors="replace")
+            except Exception as e:                    # noqa: BLE001
+                body = f"ERROR {type(e).__name__}: {e}"
+            out = os.path.join(OUTDIR, f"raw_{i}.xml")
+            with open(out, "w", encoding="utf-8") as f:
+                f.write(f"<!-- {ln} -->\n" + body[:400000])
+            print(f"[raw {i}] {ln[:60]} → {out} ({len(body)}자)")
+        return 0
 
     if args.probe_file:
         pf = args.probe_file if os.path.isabs(args.probe_file) else os.path.join(HERE, args.probe_file)

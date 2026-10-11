@@ -1246,6 +1246,66 @@ def _ctx_key(f: dict, a: dict) -> str:
     return f"{f.get('name', '')} {str(a.get('조문제목', ''))[:40]}".strip()
 
 
+# v1.35 — 질문에 제목이 그대로 나온 조문을 맨 앞에 둘지 (.env NAMED_FIRST=0 이면 끔)
+NAMED_FIRST = os.getenv("NAMED_FIRST", "0") != "0"
+
+_NEG_RE = re.compile(r"([가-힣A-Za-z0-9·ㆍ]{4,30}?)\s*(?:이|가)\s*아(?:니|닌|님)")
+
+
+def _negated_targets(text: str) -> list:
+    """
+    v1.35 — 질문자가 "○○이 아니야 / 아니라서 / 아닌데도" 라고 밝힌 대상을 뽑습니다.
+    (실사용 2026-10-10: "이 부지는 토양오염관리대상시설이 아니라서" 라고 했는데, 답이 시설 특례 조문만 보고
+     "관리대상시설이 아닌 부지에 대한 직접적인 규정을 확인할 수 없다" 고 함 — 일반 규정을 적용해야 함)
+    """
+    out = []
+    for m in _NEG_RE.finditer(str(text or "")):
+        noun = m.group(1)
+        if re.search(r"(것|거|게|때문|경우|그런|그게|이게|정도|사실|문제|뭐|무엇)$", noun):
+            continue
+        if noun not in out:
+            out.append(noun)
+    return out[:3]
+
+
+def _title_core(title: str) -> str:
+    """조문 제목에서 비교용 알맹이만 — "[별표 3] 토양오염우려기준(제1조의5 관련)" → "토양오염우려기준"."""
+    t = re.sub(r"^\s*\[(별표|별지|서식)[^\]]*\]\s*", "", str(title or ""))
+    t = re.sub(r"\(.*?\)|<.*?>", "", t)
+    return re.sub(r"[\s·ㆍ]+", "", t)
+
+
+def _named_in_question(question: str, flat: list, limit: int = 4) -> list:
+    """
+    v1.35 — 조문 제목(알맹이)이 질문에 그대로 들어 있는 조문을 돌려줍니다(법률 → 시행령 → 시행규칙 순, 최대 limit 개).
+    "토양오염의 우려기준" 처럼 '의' 가 끼어도 맞춥니다. 너무 짧은 제목(정의·목적 등)은 비교하지 않습니다.
+    """
+    qn = re.sub(r"[\s·ㆍ]+", "", str(question or ""))
+    qn2 = qn.replace("의", "")
+    order = {"법률": 0, "대통령령": 1, "총리령": 2, "부령": 2}
+    hits = []
+    for f, a in flat:
+        core = _title_core(a.get("조문제목", ""))
+        if len(core.replace("의", "")) < 5:
+            continue
+        if core in qn or core.replace("의", "") in qn2:
+            lv = f.get("level", "")
+            rank = order.get(lv, 1 if str(f.get("name", "")).endswith("시행령")
+                             else 2 if str(f.get("name", "")).endswith("시행규칙") else 0)
+            hits.append((rank, -len(core), f, a))
+    hits.sort(key=lambda x: (x[0], x[1]))
+    out, seen = [], set()
+    for _, _, f, a in hits:
+        k = (f.get("name"), a.get("조문번호"), a.get("조문가지번호"), a.get("조문제목"))
+        if k in seen:
+            continue
+        seen.add(k)
+        out.append((f, a))
+        if len(out) >= limit:
+            break
+    return out
+
+
 def _resolve_law_exact(cands: list):
     """
     법령명 후보(긴 것부터)를 법제처 검색 결과와 **이름이 정확히 같은** 법령으로 확정합니다.
@@ -2101,6 +2161,19 @@ def _ask_after_search(req, steps, answered, found, flat, catalog, refs, it=None,
     #   picked/flat 을 그대로 쓰면 append 가 원본 목록을 오염시킵니다.
     use = list(picked or flat)
 
+    # ── v1.35 — 질문이 이름으로 집어 말한 조문 우선 ─────────────────────
+    # 질문에 "토양오염우려기준", "토양오염대책기준" 처럼 **조문 제목 그 자체**가 나오면 그 조문이 답의 핵심입니다.
+    # 선별이 놓치거나 토큰 예산 때문에 뒤로 밀려 빠지는 일이 있어(실사용 2026-10-10: "우려기준이냐 대책기준이냐"
+    # 물었는데 법 제4조의2·시행규칙 제1조의5·별표 3(우려기준)이 빠지고 별표 7(대책기준)만 남아 "대책기준" 으로 답함)
+    # 제목이 질문에 그대로 들어 있는 조문을 맨 앞(우선순위 최상)에 둡니다. 그 조문이 인용한 별표도 따라옵니다.
+    if picked is not None and NAMED_FIRST:
+        named = _named_in_question(req.question, flat)
+        if named:
+            have_n = {_akey(f, a) for f, a in named}
+            use = named + [p for p in use if _akey(*p) not in have_n]
+            steps.append({"name": "질문에 이름이 나온 조문 우선",
+                          "detail": ", ".join(_ctx_key(f, a) for f, a in named)})
+
     # ── v1.32 — 상위 조문 자동 포함 ─────────────────────────────────
     # 시행령·시행규칙 조문은 "법 제12조제1항에 따른 …", "영 제8조에 따라 …" 처럼 근거 조문을
     # 적습니다. 선별이 하위 조문만 고르고 그 근거(법률 조문)를 빠뜨리면 답변이 "신고 의무가 있다"
@@ -2476,6 +2549,14 @@ def _ask_after_search(req, steps, answered, found, flat, catalog, refs, it=None,
         intent_mod.GENERAL_RULE: "\n(질문 유형: 일반 기준·절차 설명 — 특정 사례를 판정하는 질문이 아니다. "
                                  "조건에 따라 기준이 달라지면 경우를 나눠 정리한다)",
     }.get(it.kind, "")
+    # ★ v1.35 — 질문자가 "○○이 아니다" 라고 밝힌 대상 → 그 대상 특례가 아니라 일반 조문으로 답하도록 명시
+    _neg = _negated_targets(req.question)
+    if _neg:
+        _hint += ("\n(질문자 확인: " + ", ".join(f"「{n}」에 해당하지 않음" for n in _neg)
+                  + " — 그 대상에만 적용되는 조문은 이 사안에 적용되지 않는다. 누구에게나 적용되는 일반 조문"
+                    "(예: 신고·조사·명령의 일반 규정)이 직접 근거이므로 그 조문으로 답한다. "
+                    "'직접적인 규정을 확인할 수 없다' 고 하지 않는다)")
+        steps.append({"name": "질문자가 아니라고 밝힌 대상", "detail": ", ".join(_neg) + " — 일반 조문으로 답하도록 지시"})
     q_for_answer = req.question + (f"\n(확인된 조건: {answered})" if answered else "") + _hint
     ctx_n = ai_client.server_ctx()
     overhead = ai_client.count_tokens(
@@ -2543,6 +2624,11 @@ def _ask_after_search(req, steps, answered, found, flat, catalog, refs, it=None,
         text = ai_client.answer(q_for_answer, context)
     except ai_client.AiError as e:
         return _err(str(e))
+    # v1.35 — "아니라고 밝힌 대상" 질문에서 【결론】 앞에 붙는 "질문은 …이나 제공된 조문은 …" 분석문은 지웁니다.
+    if _neg and "【결론】" in text:
+        pre = text[:text.index("【결론】")]
+        if pre.strip() and re.search(r"제공된\s*(\[?조문|원문)", pre):
+            text = text[text.index("【결론】"):]
 
     cites = verify_citations(text, found)
     steps.append({"name": "인용 검증", "detail": f"{sum(1 for c in cites if c['ok'])}/{len(cites)}건 확인"})
