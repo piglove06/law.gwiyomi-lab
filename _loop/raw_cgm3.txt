@@ -1,0 +1,8 @@
+meCgmExpc|비산먼지|search|display=40
+meCgmExpc|악취|search|display=40
+meCgmExpc|폐수|search|display=40
+meCgmExpc|배출시설|search|display=60
+meCgmExpc|가축분뇨|search|display=40
+meCgmExpc|생활소음|search|display=40
+meCgmExpc|건설폐기물|search|display=40
+meCgmExpc|폐기물|search|display=60

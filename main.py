@@ -271,7 +271,7 @@ SELECT_ARTICLES = os.getenv("SELECT_ARTICLES", "1") not in ("0", "false", "False
 # 조회 후 지자체기관명으로 한 번 더 걸러냅니다.
 LOCAL_GOV = os.getenv("LOCAL_GOV", "성남시").strip()
 
-VERSION = "1.35"
+VERSION = "1.36"
 
 app = FastAPI(title="법령 조회 도우미", version=VERSION)
 
@@ -1453,6 +1453,120 @@ def _history_block(question: str, use: list, prio: dict, keywords, steps: list) 
 NAMED_FIRST = os.getenv("NAMED_FIRST", "1") != "0"
 
 _NEG_RE = re.compile(r"([가-힣A-Za-z0-9·ㆍ]{4,30}?)\s*(?:이|가)\s*아(?:니|닌|님)")
+
+
+# ── v1.36 — 참고 사례(법령해석례·중앙부처 해석·판례) ─────────────────────────
+# 답변 아래에 "비슷한 질의·판결" 을 참고로 보여 줍니다. **LLM 에는 넣지 않습니다**(답변 품질·토큰 예산 영향 없음).
+# 답변 생성과 동시에 다른 스레드에서 찾으므로 응답 시간도 거의 늘지 않습니다.
+# 제목 검색 → 질문 핵심 낱말이 제목에 몇 개 들어 있는지로 점수 → 2개 이상 겹치는 것만, 최대 3건.
+RELATED_CASES = os.getenv("RELATED_CASES", "1") != "0"
+_CASE_GENERIC = {"대상", "경우", "조치", "초과", "기준", "여부", "해당", "규정", "신고", "절차", "방법", "사항",
+                 "법령", "법률", "시행령", "시행규칙", "조문", "처분", "다음", "사용", "발생", "필요", "가능",
+                 "적용", "확인", "제출", "명령", "결과", "상황", "시간", "하루", "오후", "오전", "규제", "위반"}
+_CASE_LABEL = {"expc": "법제처 법령해석", "prec": "판례"}
+_CASE_URL = {"expc": "https://www.law.go.kr/LSW/expcInfoP.do?expcSeq={id}",
+             "prec": "https://www.law.go.kr/LSW/precInfoP.do?precSeq={id}"}
+
+
+_CASE_END = re.compile(r"(.+?)(였습니다|했습니다|입니다|습니다|입니까|합니까|인가요|하나요|인데요|인데|이라서|라서|"
+                       r"으로|에서|에게|까지|부터|이나|이고|이며|한|은|는|이|가|을|를|에|의|로|와|과|도|만)$")
+
+
+def _case_words(question: str, context: str) -> tuple:
+    """(점수용 낱말, 검색어) — 질문 낱말 중 근거 조문에도 나오는 것(법령 용어). 일반어는 뺍니다."""
+    ctx = re.sub(r"\s+", "", context or "")
+    words = []
+    for w in re.findall(r"[가-힣]{2,}", str(question or "")):
+        for _ in range(2):
+            m = _CASE_END.match(w)
+            if m and len(m.group(1)) >= 2:
+                w = m.group(1)
+        if w not in _CASE_GENERIC and w not in _KW_STOP and w not in words:
+            words.append(w)
+    dom = [w for w in words if w in ctx]
+    if len(dom) < 2:
+        return words[:8], words[:3]
+    by_freq = sorted(dom, key=lambda w: -ctx.count(w))
+    by_len = sorted(dom, key=lambda w: -len(w))
+    queries = []
+    for w in by_freq[:2] + by_len:
+        if w not in queries:
+            queries.append(w)
+        if len(queries) >= 4:
+            break
+    return dom[:10], queries
+
+
+def _case_search_cached(target: str, query: str) -> list:
+    key = ("case", target, query)
+    hit = _cache_get(key)
+    if hit is not None:
+        return hit
+    rows = law_client.case_search(target, query, display=50)
+    _cache_put(key, rows)
+    return rows
+
+
+def _related_cases(question: str, context: str, found: list) -> dict:
+    """{"items": [...], "detail": "단계 설명"} — 실패해도 빈 목록."""
+    from concurrent.futures import ThreadPoolExecutor
+    words, queries = _case_words(question, context)
+    if len(words) < 2:
+        return {"items": [], "detail": "핵심 낱말 부족 — 건너뜀"}
+    targets = ["expc", "prec"]
+    cgm = ""
+    for f in found[:3]:
+        cgm = law_client.cgm_target(f.get("ministry", ""))
+        if cgm:
+            break
+    if not cgm and any("환경" in str(f.get("name", "")) or "오염" in str(f.get("name", "")) for f in found[:3]):
+        cgm = "meCgmExpc"
+    if cgm:
+        targets.insert(0, cgm)
+    jobs = [(t, q) for t in targets for q in queries]
+    with ThreadPoolExecutor(max_workers=6) as ex:
+        res = list(ex.map(lambda tq: (tq[0], _case_search_cached(*tq)), jobs))
+    seen, cands = set(), []
+    for t, rows in res:
+        for r in rows:
+            k = (t, r["id"])
+            if k in seen:
+                continue
+            seen.add(k)
+            # 제목 속 「법령명」 은 빼고 셉니다(법령명 안의 낱말이 점수를 부풀리지 않게)
+            title = re.sub(r"\s+", "", re.sub(r"「[^」]*」", "", r["title"]))
+            hits = [w for w in words if w in title]
+            if len(hits) >= 2:
+                cands.append({**r, "score": len(hits), "hits": hits})
+    cands.sort(key=lambda c: (-c["score"], -int(re.sub(r"\D", "", c.get("date") or "0")[:8] or 0)))
+    picked, per = [], {}
+    for c in cands:
+        if per.get(c["target"], 0) >= 2:
+            continue
+        per[c["target"]] = per.get(c["target"], 0) + 1
+        picked.append(c)
+        if len(picked) >= 3:
+            break
+    if not picked:
+        return {"items": [], "detail": f"찾은 낱말 {', '.join(queries)} — 겹치는 사례 없음"}
+    with ThreadPoolExecutor(max_workers=3) as ex:
+        details = list(ex.map(lambda c: law_client.case_detail(c["target"], c["id"]), picked))
+    items = []
+    for c, d in zip(picked, details):
+        t = c["target"]
+        date = re.sub(r"\D", "", (c.get("date") or d.get("date") or ""))[:8]
+        items.append({
+            "kind": _CASE_LABEL.get(t, "중앙부처 해석"),
+            "title": c["title"][:150],
+            "org": c.get("org", ""),
+            "date": f"{date[:4]}.{date[4:6]}.{date[6:8]}" if len(date) == 8 else "",
+            "q": (d.get("q") or "")[:500],
+            "a": (d.get("a") or "")[:800],
+            "url": _CASE_URL[t].format(id=c["id"]) if t in _CASE_URL else "",
+            "match": c["hits"][:4],
+        })
+    return {"items": items,
+            "detail": f"{len(items)}건 — " + " / ".join(f"{i['kind']}: {i['title'][:30]}" for i in items)}
 
 
 def _negated_targets(text: str) -> list:
@@ -2866,6 +2980,17 @@ def _ask_after_search(req, steps, answered, found, flat, catalog, refs, it=None,
     if not context.strip():
         return {"steps": steps, "answer": "조문 본문을 가져오지 못했습니다.", "laws": found}
 
+    # ★ v1.36 — 참고 사례(해석례·판례)는 답변을 만드는 동안 다른 스레드에서 찾습니다.
+    _cases_fut = None
+    if RELATED_CASES:
+        try:
+            from concurrent.futures import ThreadPoolExecutor
+            _cases_ex = ThreadPoolExecutor(max_workers=1)
+            _cases_fut = _cases_ex.submit(_related_cases, req.question, context, found)
+            _cases_ex.shutdown(wait=False)
+        except Exception as e:                            # noqa: BLE001
+            applog.warn(f"참고 사례 검색 시작 실패 — 건너뜁니다: {e}")
+
     # --- 4단계: 답변 + 검증 ---------------------------------------
     try:
         text = ai_client.answer(q_for_answer, context)
@@ -2915,8 +3040,18 @@ def _ask_after_search(req, steps, answered, found, flat, catalog, refs, it=None,
     # 법령명까지 키에 넣습니다.
     hit = sorted({(c["law"], c["jo"], c["gaji"]) for c in cites if c["ok"]})
 
+    cases = []
+    if _cases_fut is not None:
+        try:
+            rc = _cases_fut.result(timeout=20)
+            cases = rc.get("items") or []
+            steps.append({"name": "참고 사례", "detail": rc.get("detail", "")})
+        except Exception as e:                            # noqa: BLE001 — 참고 정보. 실패해도 답은 냅니다
+            applog.warn(f"참고 사례 검색 실패 — 건너뜁니다: {e}")
+
     return {
         "steps": steps, "answer": text, "laws": found, "citations": cites,
+        "cases": cases,
         "cited_keys": [f"{n}|{j}|{g}" for n, j, g in hit],
         "references": [r for r, _ in sorted(refs.items(), key=lambda x: -x[1])][:12],
         "warnings": warnings,

@@ -1464,3 +1464,116 @@ def get_history(law_name: str) -> list[dict]:
 def get_detail_mst(mst: str) -> dict:
     """연혁 버전(법령일련번호 MST)의 본문. get_detail 과 같은 모양({"meta","articles"})."""
     return _get_detail_once("law", str(mst), key="MST")
+
+
+# =====================================================================
+# v1.36 — 참고 사례: 법제처 법령해석례(expc) · 중앙부처 1차 해석(…CgmExpc) · 판례(prec)
+#   답변 아래에 "비슷한 질의·판결" 을 참고로 보여줄 때 씁니다(LLM 에는 넣지 않음).
+#   실측(2026-10-13, /api/raw):
+#     목록  expc   : 법령해석례일련번호·안건명·안건번호·질의기관명·회신기관명·회신일자
+#           meCgmExpc: 법령해석일련번호·안건명·해석기관명·해석일자(빈 칸 많음)·데이터기준일시
+#           prec   : 판례일련번호·사건명·사건번호·선고일자·법원명·데이터출처명
+#     본문  expc/…CgmExpc: 안건명·질의요지·회답·이유 (부처 해석은 관련법령·해석일자 빈 칸 많음)
+#           prec   : 사건명·사건번호·선고일자·법원명·판시사항·판결요지·참조조문
+#   주의: 목록의 상세링크에는 인증키(OC)가 들어 있으므로 화면에 그대로 내보내지 않습니다.
+# =====================================================================
+# 소관부처 → 부처 해석 target. 본문을 주지 않는 재정경제부(moef)·국세청(nts)은 뺐습니다.
+CGM_TARGETS = {
+    "기후에너지환경부": "meCgmExpc", "환경부": "meCgmExpc",
+    "고용노동부": "moelCgmExpc", "국토교통부": "molitCgmExpc", "해양수산부": "mofCgmExpc",
+    "행정안전부": "moisCgmExpc", "관세청": "kcsCgmExpc", "교육부": "moeCgmExpc",
+    "과학기술정보통신부": "msitCgmExpc", "국가보훈부": "mpvaCgmExpc", "국방부": "mndCgmExpc",
+    "농림축산식품부": "mafraCgmExpc", "문화체육관광부": "mcstCgmExpc", "법무부": "mojCgmExpc",
+    "보건복지부": "mohwCgmExpc", "산업통상부": "motieCgmExpc", "산업통상자원부": "motieCgmExpc",
+    "성평등가족부": "mogefCgmExpc", "여성가족부": "mogefCgmExpc", "외교부": "mofaCgmExpc",
+    "중소벤처기업부": "mssCgmExpc", "통일부": "mouCgmExpc", "법제처": "molegCgmExpc",
+    "식품의약품안전처": "mfdsCgmExpc", "인사혁신처": "mpmCgmExpc", "기상청": "kmaCgmExpc",
+    "국가유산청": "khsCgmExpc", "문화재청": "khsCgmExpc", "농촌진흥청": "rdaCgmExpc",
+    "경찰청": "npaCgmExpc", "방위사업청": "dapaCgmExpc", "병무청": "mmaCgmExpc",
+    "산림청": "kfsCgmExpc", "소방청": "nfaCgmExpc", "재외동포청": "okaCgmExpc",
+    "조달청": "ppsCgmExpc", "질병관리청": "kdcaCgmExpc", "국가데이터처": "kostatCgmExpc",
+    "통계청": "kostatCgmExpc", "지식재산처": "kipoCgmExpc", "특허청": "kipoCgmExpc",
+    "해양경찰청": "kcgCgmExpc", "행정중심복합도시건설청": "naaccCgmExpc",
+}
+
+
+def cgm_target(ministry: str) -> str:
+    """소관부처 이름(여러 개면 쉼표 등으로 이어짐)에서 첫 번째로 맞는 부처 해석 target."""
+    s = re.sub(r"\s+", "", str(ministry or ""))
+    for name in sorted(CGM_TARGETS, key=len, reverse=True):      # 긴 이름 먼저(기후에너지환경부 > 환경부)
+        if name in s:
+            return CGM_TARGETS[name]
+    return ""
+
+
+def _case_text(s: str) -> str:
+    """본문 필드 정리 — <br/>·태그·&nbsp; 를 걷어내고 공백을 줄입니다."""
+    s = html.unescape(str(s or ""))
+    s = re.sub(r"<br\s*/?>", "\n", s, flags=re.I)
+    s = re.sub(r"<[^>]+>", " ", s)
+    s = s.replace("\xa0", " ")
+    s = re.sub(r"[ \t]+", " ", s)
+    s = re.sub(r"\n\s*\n+", "\n", s)
+    return s.strip()
+
+
+def case_search(target: str, query: str, display: int = 50) -> list[dict]:
+    """
+    해석례·판례 목록 검색(제목 기준). 공통 모양으로 돌려줍니다.
+      [{"target","id","title","date","org"}]
+    실패하면 [] (참고 기능이라 답변을 막지 않습니다).
+    """
+    if not query or not target:
+        return []
+    try:
+        xml_text = _get(SEARCH_URL, {"target": target, "query": query,
+                                     "display": _clamp_display(display)})
+        root = ET.fromstring(xml_text)
+    except (LawApiError, ET.ParseError):
+        return []
+    out = []
+    for child in root:
+        if len(child) == 0:
+            continue
+        r = _elem_to_dict(child)
+        if target == "prec":
+            cid, title = r.get("판례일련번호", ""), r.get("사건명", "")
+            date, org = r.get("선고일자", ""), r.get("법원명", "")
+            if r.get("사건번호"):
+                org = f"{org} {r['사건번호']}".strip()
+        elif target == "expc":
+            cid, title = r.get("법령해석례일련번호", ""), r.get("안건명", "")
+            date, org = r.get("회신일자", ""), r.get("회신기관명", "") or "법제처"
+        else:
+            cid, title = r.get("법령해석일련번호", ""), r.get("안건명", "")
+            date = r.get("해석일자", "") or ""
+            org = r.get("해석기관명", "")
+        title = _case_text(title)
+        # 실측: 부처 해석 목록 중 안건명 칸에 회답 본문 조각이 들어간 레코드가 있습니다 → 버림
+        if not cid or not title or len(title) > 150 or re.match(r"^[\d\)\]’'\-·.,]", title):
+            continue
+        out.append({"target": target, "id": cid, "title": title, "date": date, "org": org})
+    return out
+
+
+def case_detail(target: str, cid: str) -> dict:
+    """해석례·판례 본문. {"q": 질의요지/판시사항, "a": 회답/판결요지, "date"} — 실패하면 {}."""
+    try:
+        xml_text = _get(SERVICE_URL, {"target": target, "ID": str(cid)})
+        root = ET.fromstring(xml_text)
+    except (LawApiError, ET.ParseError):
+        return {}
+    d = {}
+    for el in root.iter():
+        if len(el) == 0 and (el.text or "").strip() and el.tag not in d:
+            d[el.tag] = el.text.strip()
+    if target == "prec":
+        q, a = d.get("판시사항", ""), d.get("판결요지", "")
+        date = d.get("선고일자", "")
+    else:
+        q, a = d.get("질의요지", ""), d.get("회답", "")
+        date = d.get("해석일자", "") or d.get("회신일자", "")
+    q, a = _case_text(q), _case_text(a)
+    if not (q or a):
+        return {}
+    return {"q": q, "a": a, "date": date}

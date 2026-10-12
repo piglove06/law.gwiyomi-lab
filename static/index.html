@@ -244,6 +244,16 @@
   .ref{padding:4px 9px;font-size:12.5px;background:var(--card);border:1px solid var(--rule);
        border-radius:3px;cursor:pointer;font-family:inherit;color:var(--ink)}
   .ref:hover{border-color:var(--accent);color:var(--accent)}
+  /* v1.36 참고 해석례·판례 */
+  h2 .sub{font-size:11.5px;font-weight:400;color:var(--note);margin-left:6px}
+  .case{border:1px solid var(--rule);border-radius:3px;padding:8px 10px;margin-bottom:7px;background:var(--card)}
+  .case-k{display:inline-block;padding:1px 6px;margin-right:5px;border-radius:2px;font-size:11px;
+          background:#e8eef7;color:#2c4a7a;font-weight:700;vertical-align:1px}
+  .case-h b{font-size:13.5px}
+  .case-m{font-size:12px;color:var(--note);margin-top:3px}
+  .case-m a{color:var(--accent)}
+  .case .more div{font-size:12.5px;line-height:1.6;margin-top:6px;white-space:pre-wrap}
+  .case .more div>span{font-weight:700;margin-right:4px}
 
   /* 햄스터 */
   #hammy{position:fixed;bottom:6px;left:40px;width:52px;height:44px;z-index:40;
@@ -424,6 +434,9 @@
       <button class="mini" id="copy" type="button" style="float:right;margin-top:-3px">복사</button>
     </h2>
     <div id="answer" class="empty">질문을 입력하고 조문 찾기를 누르세요.</div>
+
+    <h2>참고 해석례·판례 <span class="sub">비슷한 질의·판결 — 해석 당시 법령 기준이라 현행과 다를 수 있습니다</span></h2>
+    <div id="cases"><div class="empty">검색하면 표시됩니다.</div></div>
 
     <h2>관련 법령 (조문에 인용된 다른 법)</h2>
     <div class="refs" id="refs"><div class="empty">검색하면 표시됩니다.</div></div>
@@ -714,6 +727,23 @@ function linkify(html){
 // 서버가 보낸 경고를 답변 위에 답니다.
 // 지금은 "별표 본문을 못 받았는데 답변이 그 별표의 수치를 말했다" 가 유일한 경우입니다.
 // 이 수치는 근거가 없으므로 담당자가 그대로 민원 안내에 쓰면 안 됩니다.
+// v1.36 — 참고 해석례·판례. 답변 근거가 아니라 "비슷한 사례" 참고용입니다.
+function renderCases(cs){
+  if(!cs || !cs.length){ $("cases").innerHTML = '<div class="empty">비슷한 해석례·판례를 찾지 못했습니다.</div>'; return; }
+  $("cases").innerHTML = cs.map(c => {
+    const isPrec = c.kind === "판례";
+    const meta = [c.org, c.date].filter(Boolean).map(esc).join(" · ");
+    const link = c.url ? ` · <a href="${esc(c.url)}" target="_blank" rel="noopener">원문 보기</a>` : "";
+    const body = (c.q || c.a)
+      ? `<details class="more"><summary>${isPrec ? "판시사항·판결요지" : "질의·회답"} 보기</summary>` +
+        (c.q ? `<div><span>${isPrec ? "판시사항" : "질의"}</span>${esc(c.q)}</div>` : "") +
+        (c.a ? `<div><span>${isPrec ? "판결요지" : "회답"}</span>${esc(c.a)}</div>` : "") +
+        `</details>` : "";
+    return `<div class="case"><div class="case-h"><span class="case-k">${esc(c.kind || "")}</span>` +
+           `<b>${esc(c.title || "")}</b></div><div class="case-m">${meta}${link}</div>${body}</div>`;
+  }).join("");
+}
+
 function renderWarnings(ws){
   if(!ws || !ws.length) return "";
   const rows = ws.map(w => {
@@ -901,6 +931,7 @@ function renderHistory(){
     };
     renderCites(h.citations);
     renderRefs(h.references);
+    renderCases(h.cases);
     renderLaws(h.laws, h.cited_keys);
   });
 }
@@ -953,6 +984,7 @@ function clearPanels(msg){
   $("cites").innerHTML = m;
   $("laws").innerHTML  = m;
   $("refs").innerHTML  = m;
+  if($("cases")) $("cases").innerHTML = m;
 }
 
 async function ask(skipClarify, extra, round){
@@ -1101,6 +1133,7 @@ async function ask(skipClarify, extra, round){
     };
     renderCites(data.citations);
     renderRefs(data.references);
+    renderCases(data.cases);
     renderLaws(data.laws, data.cited_keys);
     applyFind();
     setPrevContext(base, data);
@@ -1116,6 +1149,7 @@ async function ask(skipClarify, extra, round){
       laws: slimLaws(data.laws, data.cited_keys),      // v1.35 — 인용 조문만 (저장 한도)
       citations: data.citations || [],
       references: data.references || [],
+      cases: data.cases || [],
       cited_keys: data.cited_keys || [],
       time: new Date().toLocaleTimeString("ko-KR", {hour:"2-digit", minute:"2-digit"})
     });
@@ -1202,7 +1236,7 @@ document.addEventListener("copy", (e) => {
 
   const node = sel.anchorNode;
   if(!node) return;
-  const inPanel = ["answer", "cites", "laws", "refs"].some(id => {
+  const inPanel = ["answer", "cites", "laws", "refs", "cases"].some(id => {
     const el = $(id);
     return el && el.contains(node);
   });
@@ -1362,7 +1396,7 @@ $("clearhist").onclick = () => {
 })();
 
 // 서버 버전 확인 — 화면과 서버가 다른 버전이면 경고
-const UI_VERSION = "1.35";
+const UI_VERSION = "1.36";
 fetch("/api/version").then(r => r.json()).then(d => {
   if(d.version !== UI_VERSION){
     $("vbadge").innerHTML =
