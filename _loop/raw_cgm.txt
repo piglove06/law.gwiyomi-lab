@@ -1,0 +1,5 @@
+meCgmExpc|토양오염|search|display=20
+meCgmExpc|토양오염|search|search=2&display=20
+prec|토양오염|search|display=20
+expc|토양오염|search|display=20
+meCgmExpc|소음|search|display=10

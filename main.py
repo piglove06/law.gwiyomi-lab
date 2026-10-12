@@ -144,6 +144,10 @@ def _bp_keywords(text: str) -> list:
     return out[:20]
 
 
+# 별표의 비고 시작 줄 — 줄 첫머리(표 테두리 문자 뒤 포함)의 "비고" / "비 고"
+_NOTES_HEAD = re.compile(r"^[ \t┃│|]*비\s*고", re.M)
+
+
 def _fit_keep_notes(text: str, limit: int, keywords=None) -> str:
     """
     limit 자 안으로 줄이되, 표 뒤의 **비고**(보정·예외·적용 범위)는 남깁니다.
@@ -174,7 +178,7 @@ def _fit_keep_notes(text: str, limit: int, keywords=None) -> str:
                     break
                 keep |= win
                 used0 += cost
-            ni = next((i for i, ln in enumerate(lines) if ln.strip().startswith("비고")), None)
+            ni = next((i for i, ln in enumerate(lines) if _NOTES_HEAD.match(ln)), None)
             notes = "\n".join(lines[ni:ni + 25]) if ni is not None else ""
             budget = limit - min(len(notes), int(limit * 0.35)) - 40
             out, used, prev = [], 0, -1
@@ -193,7 +197,10 @@ def _fit_keep_notes(text: str, limit: int, keywords=None) -> str:
             if notes:
                 body += "\n…\n" + notes[:int(limit * 0.35)]
             return body + "\n…(질문과 관련된 줄만 발췌)"
-    i = t.find("비고")
+    # ★ v1.36 (예약 점검 C-20261012-2) — 문서에서 처음 나오는 "비고" 글자가 아니라 **줄 첫머리의 비고**를 찾습니다.
+    #   표 머리 칸 이름이 '비고' 인 별표에서 그 칸을 비고로 착각해, 표 아래 진짜 비고(보정 규정)를 잘라 낼 수 있었습니다.
+    mt = _NOTES_HEAD.search(t)
+    i = mt.start() if mt else -1
     if i > limit * 0.4:                      # 비고가 상한 밖으로 밀려나는 경우만
         notes = t[i:i + int(limit * 0.5)]
         head = t[:max(200, limit - len(notes) - 30)]
