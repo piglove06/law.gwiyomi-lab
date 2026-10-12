@@ -1552,7 +1552,8 @@ def case_search(target: str, query: str, display: int = 50) -> list[dict]:
         # 실측: 부처 해석 목록 중 안건명 칸에 회답 본문 조각이 들어간 레코드가 있습니다 → 버림
         if not cid or not title or len(title) > 150 or re.match(r"^[\d\)\]’'\-·.,]", title):
             continue
-        out.append({"target": target, "id": cid, "title": title, "date": date, "org": org})
+        out.append({"target": target, "id": cid, "title": title, "date": date, "org": org,
+                    "kind": r.get("사건종류명", "")})
     return out
 
 

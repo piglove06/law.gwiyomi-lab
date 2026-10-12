@@ -1466,13 +1466,16 @@ _CASE_GENERIC = {"대상", "경우", "조치", "초과", "기준", "여부", "�
                  # 1차 실측(10-13 02:22) — 아래 낱말만 겹쳐 하수도·골프장·공연장 해석례가 걸렸습니다
                  "설치", "부지", "시설", "시설물", "새로", "예정", "지하", "같은", "다음", "기한", "주기", "검사",
                  "리터", "합계", "언제", "언제부터", "무엇", "누구", "회사", "업체", "건물", "변경", "운영", "관리",
-                 "이전", "이후", "기존", "신규", "처리", "의무", "허가", "등록", "대하여", "관하여", "따른", "따라"}
+                 "이전", "이후", "기존", "신규", "처리", "의무", "허가", "등록", "대하여", "관하여", "따른", "따라",
+                 # 2차 실측(10-13 03:30) — '지역·지정할·하나·하는지' 로 자동차 배출가스 해석례가 걸림
+                 "지역", "하나", "단독", "뭐야", "알려줘", "궁금", "문의"}
+_CASE_KEEP_GA = re.compile(r"(허가|평가|증가|추가|국가|단가|대가)$")
 _CASE_LABEL = {"expc": "법제처 법령해석", "prec": "판례"}
 _CASE_URL = {"expc": "https://www.law.go.kr/LSW/expcInfoP.do?expcSeq={id}",
              "prec": "https://www.law.go.kr/LSW/precInfoP.do?precSeq={id}"}
 
 
-_CASE_END = re.compile(r"(.+?)(였습니다|했습니다|입니다|습니다|입니까|합니까|인가요|하나요|인데요|인데|이라서|라서|"
+_CASE_END = re.compile(r"(.+?)(였습니다|했습니다|입니다|습니다|입니까|합니까|인가요|하나요|인데요|인데|이라서|라서|인지|이면|"
                        r"으로|에서|에게|까지|부터|이나|이고|이며|한|은|는|이|가|을|를|에|의|로|와|과|도|만)$")
 
 
@@ -1482,9 +1485,14 @@ def _case_words(question: str, context: str) -> tuple:
     words = []
     for w in re.findall(r"[가-힣]{2,}", str(question or "")):
         for _ in range(2):
+            if _CASE_KEEP_GA.search(w):                   # "설치허가" 의 '가' 는 조사가 아님
+                break
             m = _CASE_END.match(w)
             if m and len(m.group(1)) >= 2:
                 w = m.group(1)
+        # 동사·어미 조각(하는지·지정할·되는·있는…)은 낱말로 쓰지 않습니다
+        if re.search(r"(는지|는가|할|하는|되는|있는|없는|하려|해야|하고|하면|한다|된다|려고|니다|어요|아요|왔|었|았|나오|나서)$", w):
+            continue
         if w not in _CASE_GENERIC and w not in _KW_STOP and w not in words:
             words.append(w)
     dom = [w for w in words if w in ctx]
@@ -1542,9 +1550,13 @@ def _related_cases(question: str, context: str, found: list) -> dict:
     for t, rows in res:
         for r in rows:
             k = (t, r["id"])
-            if k in seen:
+            tk = (t, re.sub(r"\s+", "", r["title"])[:60])      # 실측: 같은 안건이 다른 번호로 두 번 실린 경우가 있음
+            if k in seen or tk in seen:
                 continue
             seen.add(k)
+            seen.add(tk)
+            if t == "prec" and r.get("kind") in ("세무", "조세"):   # 세금 사건은 이 도구의 질문과 거리가 멉니다
+                continue
             # 제목 속 「법령명」 은 빼고 셉니다(법령명 안의 낱말이 점수를 부풀리지 않게)
             raw = re.sub(r"\s+", "", r["title"])
             title = re.sub(r"「[^」]*」", "", raw)
