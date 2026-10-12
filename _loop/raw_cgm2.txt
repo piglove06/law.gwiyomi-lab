@@ -1,0 +1,6 @@
+meCgmExpc|토양|search|display=20
+meCgmExpc|20316|service|
+expc|313240|service|
+prec|605773|service|
+meCgmExpc|공사장|search|display=20
+meCgmExpc|폐기물|search|display=5
