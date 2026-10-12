@@ -1462,7 +1462,11 @@ _NEG_RE = re.compile(r"([가-힣A-Za-z0-9·ㆍ]{4,30}?)\s*(?:이|가)\s*아(?:�
 RELATED_CASES = os.getenv("RELATED_CASES", "1") != "0"
 _CASE_GENERIC = {"대상", "경우", "조치", "초과", "기준", "여부", "해당", "규정", "신고", "절차", "방법", "사항",
                  "법령", "법률", "시행령", "시행규칙", "조문", "처분", "다음", "사용", "발생", "필요", "가능",
-                 "적용", "확인", "제출", "명령", "결과", "상황", "시간", "하루", "오후", "오전", "규제", "위반"}
+                 "적용", "확인", "제출", "명령", "결과", "상황", "시간", "하루", "오후", "오전", "규제", "위반",
+                 # 1차 실측(10-13 02:22) — 아래 낱말만 겹쳐 하수도·골프장·공연장 해석례가 걸렸습니다
+                 "설치", "부지", "시설", "시설물", "새로", "예정", "지하", "같은", "다음", "기한", "주기", "검사",
+                 "리터", "합계", "언제", "언제부터", "무엇", "누구", "회사", "업체", "건물", "변경", "운영", "관리",
+                 "이전", "이후", "기존", "신규", "처리", "의무", "허가", "등록", "대하여", "관하여", "따른", "따라"}
 _CASE_LABEL = {"expc": "법제처 법령해석", "prec": "판례"}
 _CASE_URL = {"expc": "https://www.law.go.kr/LSW/expcInfoP.do?expcSeq={id}",
              "prec": "https://www.law.go.kr/LSW/precInfoP.do?precSeq={id}"}
@@ -1485,9 +1489,11 @@ def _case_words(question: str, context: str) -> tuple:
             words.append(w)
     dom = [w for w in words if w in ctx]
     if len(dom) < 2:
-        return words[:8], words[:3]
-    by_freq = sorted(dom, key=lambda w: -ctx.count(w))
-    by_len = sorted(dom, key=lambda w: -len(w))
+        dom = words
+    # 검색어는 3글자 이상 전문어(주유소·공사장·생활소음·배출시설…)를 먼저 씁니다
+    anchors = [w for w in dom if len(w) >= 3] or dom
+    by_freq = sorted(anchors, key=lambda w: -ctx.count(w))
+    by_len = sorted(anchors, key=lambda w: -len(w))
     queries = []
     for w in by_freq[:2] + by_len:
         if w not in queries:
@@ -1495,6 +1501,10 @@ def _case_words(question: str, context: str) -> tuple:
         if len(queries) >= 4:
             break
     return dom[:10], queries
+
+
+def _norm_lawname(s: str) -> str:
+    return re.sub(r"[\s·ㆍ・‧∙]", "", str(s or ""))
 
 
 def _case_search_cached(target: str, query: str) -> list:
@@ -1523,6 +1533,8 @@ def _related_cases(question: str, context: str, found: list) -> dict:
         cgm = "meCgmExpc"
     if cgm:
         targets.insert(0, cgm)
+    law_keys = {_norm_lawname(re.sub(r"\s*(시행령|시행규칙)$", "", str(f.get("name", "")))) for f in found[:6]}
+    law_keys.discard("")
     jobs = [(t, q) for t in targets for q in queries]
     with ThreadPoolExecutor(max_workers=6) as ex:
         res = list(ex.map(lambda tq: (tq[0], _case_search_cached(*tq)), jobs))
@@ -1534,10 +1546,16 @@ def _related_cases(question: str, context: str, found: list) -> dict:
                 continue
             seen.add(k)
             # 제목 속 「법령명」 은 빼고 셉니다(법령명 안의 낱말이 점수를 부풀리지 않게)
-            title = re.sub(r"\s+", "", re.sub(r"「[^」]*」", "", r["title"]))
+            raw = re.sub(r"\s+", "", r["title"])
+            title = re.sub(r"「[^」]*」", "", raw)
             hits = [w for w in words if w in title]
-            if len(hits) >= 2:
-                cands.append({**r, "score": len(hits), "hits": hits})
+            # ① 2개 이상 겹치고 ② 그중 하나는 3글자 이상 전문어여야 합니다(2글자 일반어 두 개로는 부족)
+            if len(hits) < 2 or not any(len(w) >= 3 for w in hits):
+                continue
+            # ③ 법제처 해석례는 제목에 법령명이 있으면 그 법령이 이번 근거 법령 중 하나여야 합니다
+            if t == "expc" and "「" in raw and law_keys and not any(k in _norm_lawname(raw) for k in law_keys):
+                continue
+            cands.append({**r, "score": len(hits) + 0.5 * sum(1 for w in hits if len(w) >= 3), "hits": hits})
     cands.sort(key=lambda c: (-c["score"], -int(re.sub(r"\D", "", c.get("date") or "0")[:8] or 0)))
     picked, per = [], {}
     for c in cands:
