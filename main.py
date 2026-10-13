@@ -2417,6 +2417,7 @@ def _ask_sync(req: AskRequest, progress: list):
         # 여러 측면 질문은 후보 법률들의 본문을 먼저 받습니다(위임 행정규칙이 칸을 다 채우지 않게). 안정 정렬이라 주 법령 순서는 유지.
         _fetch = sorted(found, key=lambda f: (0 if f.get("level") == "법률" else
                                               1 if f.get("level") in ("시행령", "시행규칙") else 2))
+    _fetched = {id(x) for x in _fetch[:FETCH_MAX_LAWS + (3 if weak_extra else 0)]}
     for f in _fetch[:FETCH_MAX_LAWS + (3 if weak_extra else 0)]:
         try:
             detail = law_client.get_detail(f["target"], f["id"])
@@ -2449,7 +2450,7 @@ def _ask_sync(req: AskRequest, progress: list):
 
     # 조문을 하나의 목록으로 펼칩니다. (법령, 조문) 쌍에 번호를 매깁니다.
     flat = []
-    for f in found[:7]:
+    for f in [x for x in found if id(x) in _fetched]:   # v1.37 — 조문을 받은 법령 그대로(보통 앞 7개)
         for a in f.get("articles", []):
             if a.get("조문여부") == "전문":
                 continue
@@ -2622,7 +2623,7 @@ def _ask_after_search(req, steps, answered, found, flat, catalog, refs, it=None,
                      if _law_key(ln) == _law_key(f["name"])}
             scored = []
             for ff, a in flat:
-                if ff is not f:
+                if ff.get("name") != f["name"]:          # flat 의 법령 dict 는 found 와 다른 객체일 수 있음
                     continue
                 if (str(a.get("조문번호") or "").lstrip("0"), str(a.get("조문가지번호") or "").lstrip("0")) in _hitk:
                     scored.append((100, ff, a))
