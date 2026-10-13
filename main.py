@@ -224,6 +224,8 @@ LAW_CANDIDATES = int(os.getenv("LAW_CANDIDATES", "3"))
 #   애매 = 지능형 검색 1위 법령의 점수 비중이 LAW_ASK_SHARE 미만 **이고** AI 추측 법령과 1위가 다를 때.
 #   (2026-10-08 평가 25개 기준: 누출검사 2건만 해당, 나머지 21건은 해당 없음·법령 전부 정답)
 LAW_ASK_SHARE = float(os.getenv("LAW_ASK_SHARE", "0.5"))
+# v1.37 — 지능형 1위 비중이 이보다 낮고 AI 추측 법령(실재)이 지능형 상위 5개에 없으면 지능형을 믿지 않음
+WEAK_AI_SHARE = float(os.getenv("WEAK_AI_SHARE", "0.4"))
 LAW_Q = "어느 법의 규정을 찾으시나요?"
 LAW_Q_DIRECT = "직접 입력 (아래 '추가로 알려줄 내용' 칸에 법령명)"
 LAW_Q_UNKNOWN = "모름 (모두 찾아보기)"
@@ -1960,8 +1962,32 @@ def _ask_sync(req: AskRequest, progress: list):
         elif ai_rows == []:
             steps.append({"name": "지능형 검색", "detail": "결과 없음"})
 
+    # ★ v1.37 — 지능형 검색이 약하고(1위 비중 낮음) AI 가 추측한 법령이 **실제로 있는데** 지능형 상위 5개에
+    #   하나도 없으면, 지능형 결과는 질문의 낱말(징계·촬영 등)에 걸린 엉뚱한 법일 가능성이 큽니다.
+    #   실사용 2026-10-13 "공무원이 동료를 불법촬영 … 징계·민형사 책임" → 지능형 1위 변호사법(28%)·5ㆍ18 특별법 →
+    #   "어느 법?" 보기에 그 법들이 나오고, 모름을 고르자 변호사법·5ㆍ18 법만 수집해 답을 못 함.
+    #   이때는 되묻지 않고 AI 추측 법령을 먼저 봅니다(지능형 상위 법은 후보 앞으로 올리지 않음).
+    weak_ai = False
+    if ai_laws and names and not user_laws and req.target in ("auto", "law"):
+        _tot = sum(ai_score.values()) or 1.0
+        _share = ai_score.get(ai_laws[0], 0.0) / _tot
+        _ai5 = {_law_key(x) for x in ai_laws[:5]}
+        _gbase = [re.sub(r"\s*(시행령|시행규칙)$", "", n).strip() for n in names]
+        if _share < WEAK_AI_SHARE and not any(_law_key(b) in _ai5 for b in _gbase):
+            _real = []
+            for b in _gbase:
+                rows = _stmd_rows(b)
+                row = _pick_stmd(rows, b) if rows else None
+                if row is not None and _law_key(law_client.row_name("lsStmd", row)) == _law_key(b):
+                    _real.append(b)
+            if _real:
+                weak_ai = True
+                steps.append({"name": "지능형 검색 신뢰 낮음",
+                              "detail": f"1위 '{ai_laws[0]}' 비중 {_share:.0%} 이고 AI 추측 법령 "
+                                        f"'{', '.join(_real)}' 이(가) 지능형 상위 5개에 없음 — AI 추측 법령을 먼저 봅니다"})
+
     # ★ v1.33 — 법령이 애매하면 첫 라운드에 "어느 법" 인지 묻습니다(조문 수집 전에 — 헛수집을 줄임).
-    if (not user_laws and req.round == 0 and not req.skip_clarify
+    if (not user_laws and req.round == 0 and not req.skip_clarify and not weak_ai
             and req.target in ("auto", "law")):
         tot = sum(ai_score.values()) or 1.0
         share = ai_score.get(ai_laws[0], 0.0) / tot if ai_laws else 0.0
@@ -2215,7 +2241,7 @@ def _ask_sync(req: AskRequest, progress: list):
 
         # ★ v1.31 — 지능형 검색 1순위 법령을 후보 맨 앞에 둡니다. 로컬 LLM 의 추측은
         #   (체계도에 실제로 있으면) 2순위로 남겨 둡니다 — 둘 다 수집하고 조문 선별이 고릅니다.
-        if ai_laws and not (user_resolved and only_mode):
+        if ai_laws and not (user_resolved and only_mode) and not weak_ai:
             top = ai_laws[0]
             if not any(_law_key(top) == _law_key(c) for c in cand):
                 steps.append({"name": "법령 후보 보정(지능형 검색)",
