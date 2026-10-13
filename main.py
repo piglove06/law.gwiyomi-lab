@@ -2337,7 +2337,7 @@ def _ask_sync(req: AskRequest, progress: list):
                 own = {_law_key(base), _law_key(base + " 시행령"), _law_key(base + " 시행규칙")}
                 core = [L for L in tree_laws if L.get("level") == "법률" or _law_key(L["name"]) in own]
                 # 법령명에서 나온 조각('공무원' 등)은 모든 하위법령에 걸리므로 검색 **용어**의 조각만 씁니다
-                wfr = {w[i:i + 2] for w in words for i in range(len(w) - 1)}
+                wfr = {w2[i:i + 2] for w2 in (re.sub(r"\s+", "", w) for w in words) for i in range(len(w2) - 1)}
 
                 def _wscore(L):
                     return sum(1 for fr in wfr if fr in L.get("name", ""))
@@ -2412,7 +2412,12 @@ def _ask_sync(req: AskRequest, progress: list):
     # --- 3단계: 조문 수집 ---------------------------------------
     refs = {}
     # v1.37 — 여러 측면을 묻는 질문(후보 보강됨)은 조문을 받을 법령 수를 늘립니다(다른 질문은 그대로 7개).
-    for f in found[:FETCH_MAX_LAWS + (3 if weak_extra else 0)]:
+    _fetch = found
+    if weak_extra:
+        # 여러 측면 질문은 후보 법률들의 본문을 먼저 받습니다(위임 행정규칙이 칸을 다 채우지 않게). 안정 정렬이라 주 법령 순서는 유지.
+        _fetch = sorted(found, key=lambda f: (0 if f.get("level") == "법률" else
+                                              1 if f.get("level") in ("시행령", "시행규칙") else 2))
+    for f in _fetch[:FETCH_MAX_LAWS + (3 if weak_extra else 0)]:
         try:
             detail = law_client.get_detail(f["target"], f["id"])
         except law_client.LawApiError:
@@ -2603,20 +2608,28 @@ def _ask_after_search(req, steps, answered, found, flat, catalog, refs, it=None,
     if picked is not None and any(f.get("_multi") for f in found):
         _terms = next((s_.get("detail") for s_ in steps
                        if s_.get("name") == "검색어 변환" and isinstance(s_.get("detail"), dict)), {}) or {}
-        _ws = [w for w in _bp_keywords(req.question) if w not in _CASE_GENERIC] + list(_terms.get("용어", []))
-        _fr = {w[i:i + 2] for w in _ws for i in range(len(w) - 1)}
+        _ws = [w for w in _bp_keywords(req.question)
+               if w not in _CASE_GENERIC and w not in ("또는", "내지", "및", "그리고")
+               and not re.search(r"(는데|해서|렸다|했다|해줘|라는)$", w)] + list(_terms.get("용어", []))
+        _fr = {w2[i:i + 2] for w2 in (re.sub(r"\s+", "", w) for w in _ws) for i in range(len(w2) - 1)}
         _have_laws = {f["name"] for f, _ in use}
         _added = []
         for f in found:
             if f.get("level") != "법률" or f["name"] in _have_laws:
                 continue
+            # 지능형 검색이 이 법에서 지목한 조문이 있으면 그것부터(예: 성폭력처벌법 제14조 카메라 등 이용 촬영)
+            _hitk = {(str(j).lstrip("0"), str(g).lstrip("0")) for ln, j, g in (ai_hits or [])
+                     if _law_key(ln) == _law_key(f["name"])}
             scored = []
             for ff, a in flat:
                 if ff is not f:
                     continue
+                if (str(a.get("조문번호") or "").lstrip("0"), str(a.get("조문가지번호") or "").lstrip("0")) in _hitk:
+                    scored.append((100, ff, a))
+                    continue
                 t = str(a.get("조문제목") or "")
                 sc = sum(1 for fr in _fr if fr in t)
-                if sc >= 2:
+                if sc >= 1:
                     scored.append((sc, ff, a))
             scored.sort(key=lambda x: -x[0])
             for _, ff, a in scored[:2]:
