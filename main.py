@@ -2336,7 +2336,12 @@ def _ask_sync(req: AskRequest, progress: list):
             if len(tree_laws) > TREE_MAX_LAWS:
                 own = {_law_key(base), _law_key(base + " 시행령"), _law_key(base + " 시행규칙")}
                 core = [L for L in tree_laws if L.get("level") == "법률" or _law_key(L["name"]) in own]
-                more = sorted([L for L in tree_laws if L not in core and _score(L) > 0], key=lambda L: -_score(L))
+                # 법령명에서 나온 조각('공무원' 등)은 모든 하위법령에 걸리므로 검색 **용어**의 조각만 씁니다
+                wfr = {w[i:i + 2] for w in words for i in range(len(w) - 1)}
+
+                def _wscore(L):
+                    return sum(1 for fr in wfr if fr in L.get("name", ""))
+                more = sorted([L for L in tree_laws if L not in core and _wscore(L) > 0], key=lambda L: -_wscore(L))
                 kept = (core + more)[:max(TREE_MAX_LAWS, len(core))]
                 steps.append({"name": "체계도 축소",
                               "detail": f"{base}: 하위법령 {len(tree_laws)}개 중 {len(kept)}개만 — "
@@ -2361,6 +2366,9 @@ def _ask_sync(req: AskRequest, progress: list):
                         "kind": A["kind"], "enforced": A["enforced"],
                         "promulgation_no": A["promulgation_no"], "ministry": "",
                     })
+        if weak_extra:
+            for f in found:
+                f["_multi"] = True               # v1.37 — 여러 측면 질문 표시(_ask_after_search 의 측면 보강용)
         if stmd_fail:
             applog.warn("법령 후보 체계도 실패: " + ", ".join(stmd_fail))
             steps.append({"name": "법령 후보 일부 실패",
@@ -2587,6 +2595,35 @@ def _ask_after_search(req, steps, answered, found, flat, catalog, refs, it=None,
     # ★ 아래에서 별표를 덧붙이므로 반드시 복사본으로 씁니다.
     #   picked/flat 을 그대로 쓰면 append 가 원본 목록을 오염시킵니다.
     use = list(picked or flat)
+
+    # ── v1.37 — 측면 보강: 여러 측면(징계·형사·민사)을 묻는 질문에서 선별이 한 법에만 몰리면
+    #   조문을 하나도 못 받은 후보 **법률**마다 제목이 질문·검색 용어와 겹치는 조문을 2개까지 넣습니다.
+    #   실사용 2026-10-13 불법촬영 질문: 성폭력처벌법·형법·민법을 수집했는데 선별이 국가공무원법 10개만 골라
+    #   "민형사 책임은 제공된 조문으로 확인 불가" 라고 답함.
+    if picked is not None and any(f.get("_multi") for f in found):
+        _terms = next((s_.get("detail") for s_ in steps
+                       if s_.get("name") == "검색어 변환" and isinstance(s_.get("detail"), dict)), {}) or {}
+        _ws = [w for w in _bp_keywords(req.question) if w not in _CASE_GENERIC] + list(_terms.get("용어", []))
+        _fr = {w[i:i + 2] for w in _ws for i in range(len(w) - 1)}
+        _have_laws = {f["name"] for f, _ in use}
+        _added = []
+        for f in found:
+            if f.get("level") != "법률" or f["name"] in _have_laws:
+                continue
+            scored = []
+            for ff, a in flat:
+                if ff is not f:
+                    continue
+                t = str(a.get("조문제목") or "")
+                sc = sum(1 for fr in _fr if fr in t)
+                if sc >= 2:
+                    scored.append((sc, ff, a))
+            scored.sort(key=lambda x: -x[0])
+            for _, ff, a in scored[:2]:
+                use.append((ff, a))
+                _added.append(_ctx_key(ff, a))
+        if _added:
+            steps.append({"name": "측면 보강", "detail": "선별이 한 법에 몰려 다른 후보 법률의 조문 추가 — " + ", ".join(_added)})
 
     # ── v1.35 — 질문이 이름으로 집어 말한 조문 우선 ─────────────────────
     # 질문에 "토양오염우려기준", "토양오염대책기준" 처럼 **조문 제목 그 자체**가 나오면 그 조문이 답의 핵심입니다.
