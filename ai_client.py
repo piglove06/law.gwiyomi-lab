@@ -788,6 +788,59 @@ def _looks_like_law(s: str) -> bool:
     return bool(re.search(r"(법|법률|령|규칙|조례|고시|지침|예규|훈령)$", s))
 
 
+# ── v1.37 — 법령과 무관한 질문 거르기 ─────────────────────────────
+# 실사용 2026-10-13: "공무원 시험 합격은 에듀윌이야?" 에 공무원임용시험령을 찾아 답했습니다.
+# 법령으로 답할 수 없는 질문(업체·학원·상품 추천, 공부법, 잡담 등)은 검색 전에 거릅니다.
+# 애매하면 통과(법령 질문으로 봄) — 진짜 법령 질문을 막는 쪽이 더 나쁩니다.
+SCOPE_PROMPT = """너는 질문이 '법령 조회 도우미'가 답할 질문인지 가르는 도구다.
+이 도우미는 대한민국 법령(법률·시행령·시행규칙·행정규칙·자치법규)의 조문을 근거로
+기준·절차·의무·자격·처벌·징계·배상·세금·허가·신고 같은 것을 찾아 답한다.
+
+legal=true (답할 질문):
+- 법·제도·행정 절차·자격 요건·처벌·책임·권리·의무처럼 법령 조문으로 답할 수 있는 모든 질문
+- 생활 표현으로 물어도 법적 판단이 필요하면 true (예: "이웃 공사 소음이 심한데 어떻게 하나")
+- 애매하면 true
+
+legal=false (답하지 않을 질문):
+- 특정 업체·학원·상품·브랜드의 추천이나 비교, 어디가 좋은지
+- 시험 합격 요령·공부법·강의 추천, 진로 상담
+- 인사·잡담·농담, 날씨·맛집·여행·연예·스포츠
+- 법령과 무관한 일반 상식·계산·번역·글쓰기
+
+예시:
+"공무원 시험 합격은 에듀윌이야?" → false (학원 비교)
+"9급 공무원 시험 응시 나이 제한이 있나요?" → true (공무원임용시험령)
+"공무원이 동료를 불법촬영하면 징계와 처벌은?" → true
+"오늘 점심 뭐 먹을까" → false
+"옥외광고물 허가 절차" → true
+"토익 900점 받는 방법" → false
+
+JSON 하나만 출력한다: {{"legal": true 또는 false, "reason": "한 줄 이유"}}
+
+질문: {question}
+"""
+SCOPE_SCHEMA = {
+    "type": "object",
+    "properties": {"legal": {"type": "boolean"}, "reason": {"type": "string", "maxLength": 80}},
+    "required": ["legal", "reason"],
+}
+
+
+def scope_check(question: str) -> tuple:
+    """(법령 질문인가, 이유). 실패하면 (True, "") — 막지 않습니다."""
+    try:
+        obj, raw = call_json(SCOPE_PROMPT.format(question=str(question or "")[:600]),
+                             SCOPE_SCHEMA, temperature=0, max_tokens=80, stage="scope")
+    except AiError:
+        return True, ""
+    if not isinstance(obj, dict):
+        m = re.search(r'"legal"\s*:\s*(true|false)', raw or "")
+        if not m:
+            return True, ""
+        return m.group(1) == "true", ""
+    return bool(obj.get("legal", True)), str(obj.get("reason", ""))[:80]
+
+
 def extract_terms(question: str) -> dict:
     """
     질문 -> 검색어 후보. 반환: {"법령명": [...], "용어": [...]}

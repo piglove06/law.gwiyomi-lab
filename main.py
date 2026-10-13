@@ -1460,6 +1460,8 @@ _NEG_RE = re.compile(r"([가-힣A-Za-z0-9·ㆍ]{4,30}?)\s*(?:이|가)\s*아(?:�
 # 답변 생성과 동시에 다른 스레드에서 찾으므로 응답 시간도 거의 늘지 않습니다.
 # 제목 검색 → 질문 핵심 낱말이 제목에 몇 개 들어 있는지로 점수 → 2개 이상 겹치는 것만, 최대 3건.
 RELATED_CASES = os.getenv("RELATED_CASES", "1") != "0"
+# v1.37 — 법령과 무관한 질문 거르기(ai_client.scope_check). 0 이면 끔
+SCOPE_CHECK = os.getenv("SCOPE_CHECK", "1") != "0"
 _CASE_GENERIC = {"대상", "경우", "조치", "초과", "기준", "여부", "해당", "규정", "신고", "절차", "방법", "사항",
                  "법령", "법률", "시행령", "시행규칙", "조문", "처분", "다음", "사용", "발생", "필요", "가능",
                  "적용", "확인", "제출", "명령", "결과", "상황", "시간", "하루", "오후", "오전", "규제", "위반",
@@ -1864,6 +1866,23 @@ def _ask_sync(req: AskRequest, progress: list):
         steps.append({"name": "조문 직접 조회 실패", "detail": "일반 검색으로 진행합니다"})
         it = intent_mod.Intent(intent_mod.OTHER, intent_mod.LABEL[intent_mod.OTHER], True,
                                signals=["조문 직접 조회 실패"])
+
+    # ★ v1.37 — 법령과 무관한 질문(학원·업체 추천, 잡담 등)은 검색 전에 거릅니다.
+    #   참고 법령을 직접 고른 경우·앞 질문에 이어 묻는 경우는 법령 질문으로 보고 건너뜁니다.
+    if (SCOPE_CHECK and req.round == 0 and not req.answered and not req.laws
+            and not (req.prev_question or "").strip()):
+        ok, why = ai_client.scope_check(req.question)
+        if not ok:
+            steps.append({"name": "법령 질문 아님", "detail": why or "법령과 무관한 질문"})
+            return {
+                "steps": steps, "laws": [], "citations": [], "cited_keys": [], "references": [],
+                "warnings": [], "cases": [], "out_of_scope": True, "intent": it.as_dict(),
+                "answer": ("【결론】\n이 도우미는 대한민국 법령·제도에 관한 질문에만 답합니다. "
+                           "이 질문은 법령 조문으로 답할 수 있는 내용이 아니어서 답하지 않았습니다.\n\n"
+                           "【설명】\n법령·행정 절차·자격 요건·처벌·신고·허가처럼 법령에 근거한 내용으로 바꿔 물어보시면 "
+                           "관련 조문을 찾아 답해 드립니다.\n"
+                           "예) \"9급 공무원 시험 응시 자격(나이·학력) 기준이 어떻게 되나요?\""),
+            }
 
     # 되묻기 라운드가 넘어갈 때마다 아래 1~3단계를 다시 실행하고 있었습니다.
     # 검색 결과는 되묻기 답변과 무관하게 같으므로(질문·대상이 같으면 같은 법령),
