@@ -226,6 +226,9 @@ LAW_CANDIDATES = int(os.getenv("LAW_CANDIDATES", "3"))
 LAW_ASK_SHARE = float(os.getenv("LAW_ASK_SHARE", "0.5"))
 # v1.37 — 지능형 1위 비중이 이보다 낮고 AI 추측 법령(실재)이 지능형 상위 5개에 없으면 지능형을 믿지 않음
 WEAK_AI_SHARE = float(os.getenv("WEAK_AI_SHARE", "0.4"))
+# v1.37 — 체계도 하나에서 가져올 법령 수 상한(법률·같은 이름 시행령·시행규칙은 항상), 조문을 받을 법령 수 상한
+TREE_MAX_LAWS = int(os.getenv("TREE_MAX_LAWS", "4"))
+FETCH_MAX_LAWS = int(os.getenv("FETCH_MAX_LAWS", "7"))
 LAW_Q = "어느 법의 규정을 찾으시나요?"
 LAW_Q_DIRECT = "직접 입력 (아래 '추가로 알려줄 내용' 칸에 법령명)"
 LAW_Q_UNKNOWN = "모름 (모두 찾아보기)"
@@ -1968,6 +1971,7 @@ def _ask_sync(req: AskRequest, progress: list):
     #   "어느 법?" 보기에 그 법들이 나오고, 모름을 고르자 변호사법·5ㆍ18 법만 수집해 답을 못 함.
     #   이때는 되묻지 않고 AI 추측 법령을 먼저 봅니다(지능형 상위 법은 후보 앞으로 올리지 않음).
     weak_ai = False
+    weak_extra = 0
     if ai_laws and names and not user_laws and req.target in ("auto", "law"):
         _tot = sum(ai_score.values()) or 1.0
         _share = ai_score.get(ai_laws[0], 0.0) / _tot
@@ -2241,6 +2245,19 @@ def _ask_sync(req: AskRequest, progress: list):
 
         # ★ v1.31 — 지능형 검색 1순위 법령을 후보 맨 앞에 둡니다. 로컬 LLM 의 추측은
         #   (체계도에 실제로 있으면) 2순위로 남겨 둡니다 — 둘 다 수집하고 조문 선별이 고릅니다.
+        if weak_ai and ai_laws and not user_resolved:
+            # ★ v1.37 — 지능형을 믿지 않더라도, 지능형 상위 법령 중 **이름에 검색 용어가 들어 있는 것**
+            #   (예: 용어 '성폭력범죄' ↔ 「성폭력범죄의 처벌 등에 관한 특례법」)은 교차 확인된 것으로 보고
+            #   AI 추측 1순위 다음에 넣습니다. 여러 측면(징계·형사·민사)을 묻는 질문은 후보를 하나 늘립니다.
+            wkeys = [_law_key(w) for w in words if len(_law_key(w)) >= 3]
+            corr_ai = [b for b in ai_laws[:5]
+                       if ai_score.get(b, 0) >= 0.3 and any(k in _law_key(b) for k in wkeys)
+                       and not any(_law_key(b) == _law_key(c) for c in cand)]
+            if corr_ai:
+                cand = cand[:1] + corr_ai[:1] + cand[1:]
+                weak_extra = 1
+                steps.append({"name": "법령 후보 보강(용어 일치)",
+                              "detail": f"'{corr_ai[0]}' — 이름에 검색 용어가 들어 있어 후보에 넣음"})
         if ai_laws and not (user_resolved and only_mode) and not weak_ai:
             top = ai_laws[0]
             if not any(_law_key(top) == _law_key(c) for c in cand):
@@ -2276,7 +2293,7 @@ def _ask_sync(req: AskRequest, progress: list):
                                           if not any(_law_key(c) == _law_key(u) for u in user_resolved)]
             cand_limit = max(LAW_CANDIDATES, len(user_resolved) + 1)
         else:
-            cand_limit = LAW_CANDIDATES
+            cand_limit = LAW_CANDIDATES + weak_extra
         stmd_ok, stmd_fail = 0, []
         for nm in cand:
             if stmd_ok >= cand_limit:
@@ -2297,11 +2314,6 @@ def _ask_sync(req: AskRequest, progress: list):
                 stmd_fail.append(f"{base}(체계도 조회 실패: {str(e)[:60]})")
                 continue
             stmd_ok += 1
-            for L in tree["laws"]:                       # 법률·시행령·시행규칙
-                if L["id"] and L["id"] not in seen:
-                    seen.add(L["id"])
-                    # mst(법령일련번호) 는 법제처 3단비교 URL 의 lsiSeq 로 씁니다.
-                    found.append({**L, "target": LAW_T, "kind": L["level"], "ministry": ""})
             # 위임행정규칙은 체계도에 딸려오지만 질문과 무관한 것이 섞입니다.
             # (예: 토양환경보전법 체계도에 "금강수계 수변구역 변경" 이 포함됨)
             # 검색어와 겹치는 것을 우선하고, 겹치는 게 없으면 앞에서부터 씁니다.
@@ -2316,6 +2328,24 @@ def _ask_sync(req: AskRequest, progress: list):
             def _score(ar):
                 nm = ar.get("name", "")
                 return sum(1 for fr in frags if fr in nm)
+
+            tree_laws = [L for L in tree["laws"] if L["id"] and L["id"] not in seen]
+            # ★ v1.37 — 하위법령이 아주 많은 체계도(국가공무원법: 시행령 30여 개)는 법률·같은 이름의 시행령·시행규칙과
+            #   질문 낱말이 이름에 겹치는 하위법령만 남깁니다. 전에는 이 체계도 하나가 조문 수집 칸(앞 7개 법령)을
+            #   다 채워 다음 후보(형법·민법 등)는 조문을 아예 못 가져왔습니다(실사용 2026-10-13 불법촬영 질문).
+            if len(tree_laws) > TREE_MAX_LAWS:
+                own = {_law_key(base), _law_key(base + " 시행령"), _law_key(base + " 시행규칙")}
+                core = [L for L in tree_laws if L.get("level") == "법률" or _law_key(L["name"]) in own]
+                more = sorted([L for L in tree_laws if L not in core and _score(L) > 0], key=lambda L: -_score(L))
+                kept = (core + more)[:max(TREE_MAX_LAWS, len(core))]
+                steps.append({"name": "체계도 축소",
+                              "detail": f"{base}: 하위법령 {len(tree_laws)}개 중 {len(kept)}개만 — "
+                                        + ", ".join(L["name"] for L in kept)})
+                tree_laws = kept
+            for L in tree_laws:                          # 법률·시행령·시행규칙
+                seen.add(L["id"])
+                # mst(법령일련번호) 는 법제처 3단비교 URL 의 lsiSeq 로 씁니다.
+                found.append({**L, "target": LAW_T, "kind": L["level"], "ministry": ""})
 
             ranked = sorted(tree["admruls"], key=lambda x: -_score(x))
             # 겹치는 조각이 하나도 없으면(0점) 무관한 것으로 보고 버립니다.
@@ -2373,7 +2403,8 @@ def _ask_sync(req: AskRequest, progress: list):
 
     # --- 3단계: 조문 수집 ---------------------------------------
     refs = {}
-    for f in found[:7]:
+    # v1.37 — 여러 측면을 묻는 질문(후보 보강됨)은 조문을 받을 법령 수를 늘립니다(다른 질문은 그대로 7개).
+    for f in found[:FETCH_MAX_LAWS + (3 if weak_extra else 0)]:
         try:
             detail = law_client.get_detail(f["target"], f["id"])
         except law_client.LawApiError:
