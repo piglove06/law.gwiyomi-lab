@@ -832,6 +832,12 @@ function renderLaws(laws, citedKeys){
   const cited = new Set(citedKeys || []);
   const order = ["법률","시행령","시행규칙"];
   const groups = {};
+  // v1.37 — 답변이 조문을 인용했으면, 인용 조문이 하나도 없는 법령은 목록에서 빼고
+  //   맨 아래 접힌 칸("답변에 쓰이지 않은 법령")에만 둡니다. 검색 후보일 뿐 근거가 아니기 때문입니다.
+  const hitLaw = l => (l.articles || []).some(a => a.조문번호 &&
+                        cited.has(`${l.name}|${a.조문번호}|${a.조문가지번호 || ""}`));
+  const unused = cited.size ? laws.filter(l => !hitLaw(l)) : [];
+  if(cited.size) laws = laws.filter(hitLaw);
   laws.forEach(l => {
     const g = /위임/.test(l.level || "") ? "위임 행정규칙"
             : order.includes(l.level) ? "법령"
@@ -905,6 +911,10 @@ function renderLaws(laws, citedKeys){
   Object.keys(groups).forEach(g => {
     html += `<div class="grp">${esc(g)}</div>` + groups[g].map(block).join("");
   });
+  if(unused.length){
+    html += `<details class="more unused"><summary>답변에 쓰이지 않은 법령 ${unused.length}개 (검색 후보)</summary>` +
+            unused.map(block).join("") + `</details>`;
+  }
   $("laws").innerHTML = html;
 }
 
@@ -1396,7 +1406,7 @@ $("clearhist").onclick = () => {
 })();
 
 // 서버 버전 확인 — 화면과 서버가 다른 버전이면 경고
-const UI_VERSION = "1.36";
+const UI_VERSION = "1.37";
 fetch("/api/version").then(r => r.json()).then(d => {
   if(d.version !== UI_VERSION){
     $("vbadge").innerHTML =
