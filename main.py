@@ -1465,61 +1465,15 @@ _NEG_RE = re.compile(r"([가-힣A-Za-z0-9·ㆍ]{4,30}?)\s*(?:이|가)\s*아(?:�
 # 답변 생성과 동시에 다른 스레드에서 찾으므로 응답 시간도 거의 늘지 않습니다.
 # 제목 검색 → 질문 핵심 낱말이 제목에 몇 개 들어 있는지로 점수 → 2개 이상 겹치는 것만, 최대 3건.
 RELATED_CASES = os.getenv("RELATED_CASES", "1") != "0"
+# v1.38 — 참고 사례 후보 중 LLM 에 보일 개수
+CASE_LLM_POOL = int(os.getenv("CASE_LLM_POOL", "10"))
 # v1.37 — 법령과 무관한 질문 거르기(ai_client.scope_check). 0 이면 끔
 SCOPE_CHECK = os.getenv("SCOPE_CHECK", "1") != "0"
-_CASE_GENERIC = {"대상", "경우", "조치", "초과", "기준", "여부", "해당", "규정", "신고", "절차", "방법", "사항",
-                 "법령", "법률", "시행령", "시행규칙", "조문", "처분", "다음", "사용", "발생", "필요", "가능",
-                 "적용", "확인", "제출", "명령", "결과", "상황", "시간", "하루", "오후", "오전", "규제", "위반",
-                 # 1차 실측(10-13 02:22) — 아래 낱말만 겹쳐 하수도·골프장·공연장 해석례가 걸렸습니다
-                 "설치", "부지", "시설", "시설물", "새로", "예정", "지하", "같은", "다음", "기한", "주기", "검사",
-                 "리터", "합계", "언제", "언제부터", "무엇", "누구", "회사", "업체", "건물", "변경", "운영", "관리",
-                 "이전", "이후", "기존", "신규", "처리", "의무", "허가", "등록", "대하여", "관하여", "따른", "따라",
-                 # 2차 실측(10-13 03:30) — '지역·지정할·하나·하는지' 로 자동차 배출가스 해석례가 걸림
-                 "지역", "하나", "단독", "뭐야", "알려줘", "궁금", "문의"}
-_CASE_KEEP_GA = re.compile(r"(허가|평가|증가|추가|국가|단가|대가)$")
 _CASE_LABEL = {"expc": "법제처 법령해석", "prec": "판례"}
 _CASE_URL = {"expc": "https://www.law.go.kr/LSW/expcInfoP.do?expcSeq={id}",
              "prec": "https://www.law.go.kr/LSW/precInfoP.do?precSeq={id}"}
-
-
-_CASE_END = re.compile(r"(.+?)(였습니다|했습니다|입니다|습니다|입니까|합니까|인가요|하나요|인데요|인데|이라서|라서|인지|이면|"
-                       r"으로|에서|에게|까지|부터|이나|이고|이며|한|은|는|이|가|을|를|에|의|로|와|과|도|만)$")
-
-
-def _case_words(question: str, context: str) -> tuple:
-    """(점수용 낱말, 검색어) — 질문 낱말 중 근거 조문에도 나오는 것(법령 용어). 일반어는 뺍니다."""
-    ctx = re.sub(r"\s+", "", context or "")
-    words = []
-    for w in re.findall(r"[가-힣]{2,}", str(question or "")):
-        for _ in range(2):
-            if _CASE_KEEP_GA.search(w):                   # "설치허가" 의 '가' 는 조사가 아님
-                break
-            m = _CASE_END.match(w)
-            if m and len(m.group(1)) >= 2:
-                w = m.group(1)
-        # 동사·어미 조각(하는지·지정할·되는·있는…)은 낱말로 쓰지 않습니다
-        if re.search(r"(는지|는가|할|하는|되는|있는|없는|하려|해야|하고|하면|한다|된다|려고|니다|어요|아요|왔|었|았|나오|나서)$", w):
-            continue
-        if w not in _CASE_GENERIC and w not in _KW_STOP and w not in words:
-            words.append(w)
-    dom = [w for w in words if w in ctx]
-    if len(dom) < 2:
-        dom = words
-    # 검색어는 3글자 이상 전문어(주유소·공사장·생활소음·배출시설…)를 먼저 씁니다
-    anchors = [w for w in dom if len(w) >= 3] or dom
-    by_freq = sorted(anchors, key=lambda w: -ctx.count(w))
-    by_len = sorted(anchors, key=lambda w: -len(w))
-    queries = []
-    for w in by_freq[:2] + by_len:
-        if w not in queries:
-            queries.append(w)
-        if len(queries) >= 4:
-            break
-    return dom[:10], queries
-
-
-def _norm_lawname(s: str) -> str:
-    return re.sub(r"[\s·ㆍ・‧∙]", "", str(s or ""))
+# v1.38 — 검색어로 쓰기엔 너무 넓은 말(제목 검색 결과가 수백 건). 관련성 판단은 LLM 이 하므로 목록은 짧게 둡니다.
+_CASE_WIDE = {"경우", "여부", "관련", "대상", "기준", "절차", "방법", "신고", "규정", "해당", "의무", "처분", "허가"}
 
 
 def _case_search_cached(target: str, query: str) -> list:
@@ -1532,12 +1486,20 @@ def _case_search_cached(target: str, query: str) -> list:
     return rows
 
 
-def _related_cases(question: str, context: str, found: list) -> dict:
-    """{"items": [...], "detail": "단계 설명"} — 실패해도 빈 목록."""
+def _case_candidates(question: str, terms_words: list, found: list) -> list:
+    """
+    ★ v1.38 — 참고 사례 **후보** 모으기(API 만, 다른 스레드에서). 관련성은 답변 뒤에 LLM 이 고릅니다(_case_finalize).
+    검색어 = 검색어 변환 단계의 법령 용어(LLM). v1.36~37 의 불용어 목록·점수 기준(2개 이상 겹침·3글자 전문어 등)을 대체.
+    """
     from concurrent.futures import ThreadPoolExecutor
-    words, queries = _case_words(question, context)
-    if len(words) < 2:
-        return {"items": [], "detail": "핵심 낱말 부족 — 건너뜀"}
+    queries = []
+    for w in list(terms_words or []) + re.findall(r"[가-힣]{3,}", str(question or "")):
+        w = re.sub(r"\s+", "", str(w))
+        if 2 <= len(w) <= 15 and w not in _CASE_WIDE and w not in queries:
+            queries.append(w)
+    queries = queries[:4]
+    if not queries:
+        return []
     targets = ["expc", "prec"]
     cgm = ""
     for f in found[:3]:
@@ -1548,44 +1510,38 @@ def _related_cases(question: str, context: str, found: list) -> dict:
         cgm = "meCgmExpc"
     if cgm:
         targets.insert(0, cgm)
-    law_keys = {_norm_lawname(re.sub(r"\s*(시행령|시행규칙)$", "", str(f.get("name", "")))) for f in found[:6]}
-    law_keys.discard("")
     jobs = [(t, q) for t in targets for q in queries]
     with ThreadPoolExecutor(max_workers=6) as ex:
         res = list(ex.map(lambda tq: (tq[0], _case_search_cached(*tq)), jobs))
+    qset = [q for q in queries]
+    qfr = {w[i:i + 2] for w in re.findall(r"[가-힣]{2,}", str(question or "")) for i in range(len(w) - 1)}
     seen, cands = set(), []
     for t, rows in res:
         for r in rows:
-            k = (t, r["id"])
-            tk = (t, re.sub(r"\s+", "", r["title"])[:60])      # 실측: 같은 안건이 다른 번호로 두 번 실린 경우가 있음
-            if k in seen or tk in seen:
+            tk = (t, re.sub(r"\s+", "", r["title"])[:60])
+            if (t, r["id"]) in seen or tk in seen:
                 continue
-            seen.add(k)
+            seen.add((t, r["id"]))
             seen.add(tk)
-            if t == "prec" and r.get("kind") in ("세무", "조세"):   # 세금 사건은 이 도구의 질문과 거리가 멉니다
-                continue
-            # 제목 속 「법령명」 은 빼고 셉니다(법령명 안의 낱말이 점수를 부풀리지 않게)
-            raw = re.sub(r"\s+", "", r["title"])
-            title = re.sub(r"「[^」]*」", "", raw)
-            hits = [w for w in words if w in title]
-            # ① 2개 이상 겹치고 ② 그중 하나는 3글자 이상 전문어여야 합니다(2글자 일반어 두 개로는 부족)
-            if len(hits) < 2 or not any(len(w) >= 3 for w in hits):
-                continue
-            # ③ 법제처 해석례는 제목에 법령명이 있으면 그 법령이 이번 근거 법령 중 하나여야 합니다
-            if t == "expc" and "「" in raw and law_keys and not any(k in _norm_lawname(raw) for k in law_keys):
-                continue
-            cands.append({**r, "score": len(hits) + 0.5 * sum(1 for w in hits if len(w) >= 3), "hits": hits})
+            title = re.sub(r"\s+", "", r["title"])
+            # 넓게 거른 뒤(용어가 제목에 있거나 질문과 겹치는 조각이 여럿) 상위 몇 건만 LLM 에 보입니다
+            sc = 2 * sum(1 for q in qset if q in title) + 0.2 * sum(1 for fr in qfr if fr in title)
+            if sc >= 1:
+                cands.append({**r, "score": sc})
     cands.sort(key=lambda c: (-c["score"], -int(re.sub(r"\D", "", c.get("date") or "0")[:8] or 0)))
-    picked, per = [], {}
-    for c in cands:
-        if per.get(c["target"], 0) >= 2:
-            continue
-        per[c["target"]] = per.get(c["target"], 0) + 1
-        picked.append(c)
-        if len(picked) >= 3:
-            break
+    return cands[:CASE_LLM_POOL]
+
+
+def _case_finalize(question: str, cands: list) -> dict:
+    """답변 뒤: LLM 이 후보 제목 중 같은 쟁점만 고르고(최대 3) 본문을 붙입니다. {"items", "detail"}."""
+    from concurrent.futures import ThreadPoolExecutor
+    if not cands:
+        return {"items": [], "detail": "후보 없음"}
+    titles = [f"[{_CASE_LABEL.get(c['target'], '중앙부처 해석')}] {c['title'][:110]}" for c in cands]
+    picks = ai_client.pick_cases(question, titles)
+    picked = [cands[i] for i in picks if 0 <= i < len(cands)][:3]
     if not picked:
-        return {"items": [], "detail": f"찾은 낱말 {', '.join(queries)} — 겹치는 사례 없음"}
+        return {"items": [], "detail": f"후보 {len(cands)}건 — 같은 쟁점 없음(LLM 판단)"}
     with ThreadPoolExecutor(max_workers=3) as ex:
         details = list(ex.map(lambda c: law_client.case_detail(c["target"], c["id"]), picked))
     items = []
@@ -1600,10 +1556,10 @@ def _related_cases(question: str, context: str, found: list) -> dict:
             "q": (d.get("q") or "")[:500],
             "a": (d.get("a") or "")[:800],
             "url": _CASE_URL[t].format(id=c["id"]) if t in _CASE_URL else "",
-            "match": c["hits"][:4],
         })
     return {"items": items,
-            "detail": f"{len(items)}건 — " + " / ".join(f"{i['kind']}: {i['title'][:30]}" for i in items)}
+            "detail": f"후보 {len(cands)}건 중 {len(items)}건(LLM 판단) — "
+                      + " / ".join(f"{i['kind']}: {i['title'][:30]}" for i in items)}
 
 
 def _negated_targets(text: str) -> list:
@@ -3167,7 +3123,9 @@ def _ask_after_search(req, steps, answered, found, flat, catalog, refs, it=None,
         try:
             from concurrent.futures import ThreadPoolExecutor
             _cases_ex = ThreadPoolExecutor(max_workers=1)
-            _cases_fut = _cases_ex.submit(_related_cases, req.question, context, found)
+            _tw = next((s_.get("detail", {}).get("용어", []) for s_ in steps
+                        if s_.get("name") == "검색어 변환" and isinstance(s_.get("detail"), dict)), [])
+            _cases_fut = _cases_ex.submit(_case_candidates, req.question, _tw, found)
             _cases_ex.shutdown(wait=False)
         except Exception as e:                            # noqa: BLE001
             applog.warn(f"참고 사례 검색 시작 실패 — 건너뜁니다: {e}")
@@ -3224,7 +3182,7 @@ def _ask_after_search(req, steps, answered, found, flat, catalog, refs, it=None,
     cases = []
     if _cases_fut is not None:
         try:
-            rc = _cases_fut.result(timeout=20)
+            rc = _case_finalize(req.question, _cases_fut.result(timeout=20))
             cases = rc.get("items") or []
             steps.append({"name": "참고 사례", "detail": rc.get("detail", "")})
         except Exception as e:                            # noqa: BLE001 — 참고 정보. 실패해도 답은 냅니다

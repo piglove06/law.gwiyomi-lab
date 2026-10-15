@@ -860,6 +860,49 @@ def scope_check(question: str) -> tuple:
     return bool(obj.get("legal", True)), str(obj.get("reason", ""))[:80]
 
 
+# ── v1.38 — 참고 사례 고르기 ─────────────────────────────────────
+# 해석례·판례 후보(제목)를 질문과 같은 쟁점인지 LLM 이 고릅니다. 불용어·점수 규칙을 대체.
+CASE_PICK_PROMPT = """아래는 법령 질문과, 제목으로 찾은 법령해석례·부처 해석·판례 후보 목록이다.
+질문과 **같은 쟁점**(같은 행위·시설·제도에 대한 같은 법적 문제)을 다뤄 담당 공무원이 참고할 가치가 있는 것만 고른다.
+- 낱말만 겹치고 쟁점이 다른 것(다른 시설·다른 법·다른 절차, 세금 사건 등)은 고르지 않는다.
+- 최대 3개. 없으면 빈 배열.
+JSON 하나만 출력한다: {{"picks": [후보 번호, ...]}}
+
+질문: {question}
+
+후보:
+{cands}
+"""
+CASE_PICK_SCHEMA = {
+    "type": "object",
+    "properties": {"picks": {"type": "array", "items": {"type": "integer"}, "maxItems": 3}},
+    "required": ["picks"],
+}
+
+
+def pick_cases(question: str, titles: list) -> list:
+    """후보 제목 목록 → 고른 번호(0부터). 실패하면 []."""
+    if not titles:
+        return []
+    cands = "\n".join(f"{i + 1}. {t}" for i, t in enumerate(titles))
+    try:
+        obj, _ = call_json(CASE_PICK_PROMPT.format(question=str(question or "")[:500], cands=cands),
+                           CASE_PICK_SCHEMA, temperature=0, max_tokens=60, stage="cases")
+    except AiError:
+        return []
+    if not isinstance(obj, dict):
+        return []
+    out = []
+    for n in obj.get("picks") or []:
+        try:
+            k = int(n) - 1
+        except (TypeError, ValueError):
+            continue
+        if 0 <= k < len(titles) and k not in out:
+            out.append(k)
+    return out[:3]
+
+
 def extract_terms(question: str) -> dict:
     """
     질문 -> 검색어 후보. 반환: {"법령명": [...], "용어": [...]}
