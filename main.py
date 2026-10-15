@@ -2000,18 +2000,25 @@ def _ask_sync(req: AskRequest, progress: list):
             top = ranked[0] if ranked else ""
             share = sc.get(top, 0.0) / (sum(sc.values()) or 1.0) if top else 0.0
             guess = re.sub(r"\s*(시행령|시행규칙)$", "", a.get("law", "")).strip()
-            # 측면 검색 1위가 뚜렷하거나 LLM 추측과 같으면 검색 결과를, 아니면 LLM 추측을 그 측면의 법으로 씁니다
-            if top and (share >= WEAK_AI_SHARE or (guess and _law_key(guess) == _law_key(top))):
-                law, backup = top, guess
-            elif guess:
-                law, backup = guess, top
+            # LLM 이 그 측면의 법을 말했으면 그 법이 기본입니다. 다만 측면 검색 상위 5개에 그 법이 없고
+            # 검색 1위가 뚜렷하면(비중 ≥ WEAK_AI_SHARE) 검색 결과를 씁니다(예: 형법 → 성폭력처벌법).
+            # (1차 실측 10-15: 검색 1위를 먼저 믿었더니 '일요일 공사장 소음' 이 주택건설기준으로 감)
+            g_in = bool(guess) and any(_law_key(guess) == _law_key(b) for b in ranked[:5])
+            if guess and (g_in or not top or share < WEAK_AI_SHARE):
+                law, backup = guess, (top if top and _law_key(top) != _law_key(guess) else "")
             else:
-                law, backup = top, ""
+                law, backup = top, guess
             if not law:
                 continue
             ph = [h for h in hits
                   if _law_key(re.sub(r"\s*(시행령|시행규칙)$", "", h[0])) == _law_key(law)][:3]
             asp_plan.append({"q": a["q"], "law": law, "backup": backup, "hits": ph})
+        # 측면들이 모두 같은 법이면 쪼갤 필요가 없습니다(한 법 안의 여러 사항 — 기존 흐름이 더 낫다)
+        if len({_law_key(p["law"]) for p in asp_plan}) < 2:
+            if asp_plan:
+                steps.append({"name": "질문 쪼개기 생략",
+                              "detail": f"측면 {len(asp_plan)}개가 모두 같은 법({asp_plan[0]['law']})"})
+            asp_plan = []
         if len(asp_plan) >= 2:
             steps.append({"name": "질문 쪼개기",
                           "detail": " / ".join(f"{i + 1}) {p['q'][:45]} → {p['law']}" for i, p in enumerate(asp_plan))})
