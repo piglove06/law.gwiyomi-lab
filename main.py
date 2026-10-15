@@ -276,7 +276,7 @@ SELECT_ARTICLES = os.getenv("SELECT_ARTICLES", "1") not in ("0", "false", "False
 # 조회 후 지자체기관명으로 한 번 더 걸러냅니다.
 LOCAL_GOV = os.getenv("LOCAL_GOV", "성남시").strip()
 
-VERSION = "1.37"
+VERSION = "1.38"
 
 app = FastAPI(title="법령 조회 도우미", version=VERSION)
 
@@ -1970,9 +1970,63 @@ def _ask_sync(req: AskRequest, progress: list):
     #   실사용 2026-10-13 "공무원이 동료를 불법촬영 … 징계·민형사 책임" → 지능형 1위 변호사법(28%)·5ㆍ18 특별법 →
     #   "어느 법?" 보기에 그 법들이 나오고, 모름을 고르자 변호사법·5ㆍ18 법만 수집해 답을 못 함.
     #   이때는 되묻지 않고 AI 추측 법령을 먼저 봅니다(지능형 상위 법은 후보 앞으로 올리지 않음).
+    # ★ v1.38 — 질문 쪼개기: 여러 법적 측면(징계·형사·민사 등)을 함께 물으면, 검색어 변환 단계에서 LLM 이 낸
+    #   측면별 하위 질문으로 **지능형 검색을 따로** 돌려 측면마다 법령 1개와 그 법의 지목 조문을 고릅니다.
+    #   (v1.37 의 '용어 일치 후보 보강'·'제목 조각 측면 보강' 규칙을 대체 — 낱말 목록·점수 기준 없이 검색 결과로 판단)
+    asp_plan = []
+    aspects = terms.get("측면") or []
+    if len(aspects) >= 2 and not user_laws and req.target in ("auto", "law"):
+        from concurrent.futures import ThreadPoolExecutor
+
+        def _asp_search(a):
+            try:
+                return law_client.ai_search(a["q"], display=10)
+            except Exception as e:                      # noqa: BLE001
+                applog.warn(f"측면 지능형 검색 실패: {e}")
+                return []
+        with ThreadPoolExecutor(max_workers=3) as ex:
+            asp_rows = list(ex.map(_asp_search, aspects))
+        for a, rows in zip(aspects, asp_rows):
+            sc, first, hits = {}, {}, []
+            for i, r in enumerate(rows):
+                nm = (r.get("법령명") or "").strip()
+                b = re.sub(r"\s*(시행령|시행규칙)$", "", nm).strip()
+                if b:
+                    sc[b] = sc.get(b, 0.0) + 1.0 / (1 + i)
+                    first.setdefault(b, i)
+                if nm and r.get("조문번호"):
+                    hits.append((nm, r.get("조문번호", ""), r.get("조문가지번호", "")))
+            ranked = sorted(sc, key=lambda b: (-sc[b], first[b]))
+            top = ranked[0] if ranked else ""
+            share = sc.get(top, 0.0) / (sum(sc.values()) or 1.0) if top else 0.0
+            guess = re.sub(r"\s*(시행령|시행규칙)$", "", a.get("law", "")).strip()
+            # 측면 검색 1위가 뚜렷하거나 LLM 추측과 같으면 검색 결과를, 아니면 LLM 추측을 그 측면의 법으로 씁니다
+            if top and (share >= WEAK_AI_SHARE or (guess and _law_key(guess) == _law_key(top))):
+                law, backup = top, guess
+            elif guess:
+                law, backup = guess, top
+            else:
+                law, backup = top, ""
+            if not law:
+                continue
+            ph = [h for h in hits
+                  if _law_key(re.sub(r"\s*(시행령|시행규칙)$", "", h[0])) == _law_key(law)][:3]
+            asp_plan.append({"q": a["q"], "law": law, "backup": backup, "hits": ph})
+        if len(asp_plan) >= 2:
+            steps.append({"name": "질문 쪼개기",
+                          "detail": " / ".join(f"{i + 1}) {p['q'][:45]} → {p['law']}" for i, p in enumerate(asp_plan))})
+            # 측면별 지목 조문을 번갈아 앞에 둡니다(조문 선별의 '지능형 검색 조문 추가'가 앞 6개를 씀)
+            inter = []
+            for k in range(3):
+                for p in asp_plan:
+                    if k < len(p["hits"]) and p["hits"][k] not in inter:
+                        inter.append(p["hits"][k])
+            ai_hits = inter + [h for h in ai_hits if h not in inter]
+        else:
+            asp_plan = []
+
     weak_ai = False
-    weak_extra = 0
-    if ai_laws and names and not user_laws and req.target in ("auto", "law"):
+    if ai_laws and names and not user_laws and not asp_plan and req.target in ("auto", "law"):
         _tot = sum(ai_score.values()) or 1.0
         _share = ai_score.get(ai_laws[0], 0.0) / _tot
         _ai5 = {_law_key(x) for x in ai_laws[:5]}
@@ -1991,7 +2045,7 @@ def _ask_sync(req: AskRequest, progress: list):
                                         f"'{', '.join(_real)}' 이(가) 지능형 상위 5개에 없음 — AI 추측 법령을 먼저 봅니다"})
 
     # ★ v1.33 — 법령이 애매하면 첫 라운드에 "어느 법" 인지 묻습니다(조문 수집 전에 — 헛수집을 줄임).
-    if (not user_laws and req.round == 0 and not req.skip_clarify and not weak_ai
+    if (not user_laws and req.round == 0 and not req.skip_clarify and not weak_ai and not asp_plan
             and req.target in ("auto", "law")):
         tot = sum(ai_score.values()) or 1.0
         share = ai_score.get(ai_laws[0], 0.0) / tot if ai_laws else 0.0
@@ -2245,20 +2299,14 @@ def _ask_sync(req: AskRequest, progress: list):
 
         # ★ v1.31 — 지능형 검색 1순위 법령을 후보 맨 앞에 둡니다. 로컬 LLM 의 추측은
         #   (체계도에 실제로 있으면) 2순위로 남겨 둡니다 — 둘 다 수집하고 조문 선별이 고릅니다.
-        if weak_ai and ai_laws and not user_resolved:
-            # ★ v1.37 — 지능형을 믿지 않더라도, 지능형 상위 법령 중 **이름에 검색 용어가 들어 있는 것**
-            #   (예: 용어 '성폭력범죄' ↔ 「성폭력범죄의 처벌 등에 관한 특례법」)은 교차 확인된 것으로 보고
-            #   AI 추측 1순위 다음에 넣습니다. 여러 측면(징계·형사·민사)을 묻는 질문은 후보를 하나 늘립니다.
-            wkeys = [_law_key(w) for w in words if len(_law_key(w)) >= 3]
-            corr_ai = [b for b in ai_laws[:5]
-                       if ai_score.get(b, 0) >= 0.3 and any(k in _law_key(b) for k in wkeys)
-                       and not any(_law_key(b) == _law_key(c) for c in cand)]
-            if corr_ai:
-                cand = cand[:1] + corr_ai[:1] + cand[1:]
-                weak_extra = 1
-                steps.append({"name": "법령 후보 보강(용어 일치)",
-                              "detail": f"'{corr_ai[0]}' — 이름에 검색 용어가 들어 있어 후보에 넣음"})
-        if ai_laws and not (user_resolved and only_mode) and not weak_ai:
+        if asp_plan and not user_resolved:
+            # v1.38 — 측면별 법을 앞에(측면 순서대로), 그다음 측면별 예비 법, 그다음 기존 후보
+            prim = []
+            for x in [p["law"] for p in asp_plan] + [p["backup"] for p in asp_plan if p["backup"]] + cand:
+                if x and not any(_law_key(x) == _law_key(y) for y in prim):
+                    prim.append(x)
+            cand = prim
+        if ai_laws and not (user_resolved and only_mode) and not weak_ai and not asp_plan:
             top = ai_laws[0]
             if not any(_law_key(top) == _law_key(c) for c in cand):
                 steps.append({"name": "법령 후보 보정(지능형 검색)",
@@ -2293,7 +2341,7 @@ def _ask_sync(req: AskRequest, progress: list):
                                           if not any(_law_key(c) == _law_key(u) for u in user_resolved)]
             cand_limit = max(LAW_CANDIDATES, len(user_resolved) + 1)
         else:
-            cand_limit = LAW_CANDIDATES + weak_extra
+            cand_limit = max(LAW_CANDIDATES, len(asp_plan))
         stmd_ok, stmd_fail = 0, []
         for nm in cand:
             if stmd_ok >= cand_limit:
@@ -2366,9 +2414,9 @@ def _ask_sync(req: AskRequest, progress: list):
                         "kind": A["kind"], "enforced": A["enforced"],
                         "promulgation_no": A["promulgation_no"], "ministry": "",
                     })
-        if weak_extra:
+        if asp_plan:
             for f in found:
-                f["_multi"] = True               # v1.37 — 여러 측면 질문 표시(_ask_after_search 의 측면 보강용)
+                f["_aspects"] = [p["q"] for p in asp_plan]   # v1.38 — 답변 단계에서 측면별로 나눠 답하도록
         if stmd_fail:
             applog.warn("법령 후보 체계도 실패: " + ", ".join(stmd_fail))
             steps.append({"name": "법령 후보 일부 실패",
@@ -2411,14 +2459,14 @@ def _ask_sync(req: AskRequest, progress: list):
 
     # --- 3단계: 조문 수집 ---------------------------------------
     refs = {}
-    # v1.37 — 여러 측면을 묻는 질문(후보 보강됨)은 조문을 받을 법령 수를 늘립니다(다른 질문은 그대로 7개).
+    # v1.37 — 여러 측면을 묻는 질문은 조문을 받을 법령 수를 늘립니다(다른 질문은 그대로 7개).
     _fetch = found
-    if weak_extra:
+    if asp_plan:
         # 여러 측면 질문은 후보 법률들의 본문을 먼저 받습니다(위임 행정규칙이 칸을 다 채우지 않게). 안정 정렬이라 주 법령 순서는 유지.
         _fetch = sorted(found, key=lambda f: (0 if f.get("level") == "법률" else
                                               1 if f.get("level") in ("시행령", "시행규칙") else 2))
-    _fetched = {id(x) for x in _fetch[:FETCH_MAX_LAWS + (3 if weak_extra else 0)]}
-    for f in _fetch[:FETCH_MAX_LAWS + (3 if weak_extra else 0)]:
+    _fetched = {id(x) for x in _fetch[:FETCH_MAX_LAWS + (3 if asp_plan else 0)]}
+    for f in _fetch[:FETCH_MAX_LAWS + (3 if asp_plan else 0)]:
         try:
             detail = law_client.get_detail(f["target"], f["id"])
         except law_client.LawApiError:
@@ -2602,42 +2650,6 @@ def _ask_after_search(req, steps, answered, found, flat, catalog, refs, it=None,
     #   picked/flat 을 그대로 쓰면 append 가 원본 목록을 오염시킵니다.
     use = list(picked or flat)
 
-    # ── v1.37 — 측면 보강: 여러 측면(징계·형사·민사)을 묻는 질문에서 선별이 한 법에만 몰리면
-    #   조문을 하나도 못 받은 후보 **법률**마다 제목이 질문·검색 용어와 겹치는 조문을 2개까지 넣습니다.
-    #   실사용 2026-10-13 불법촬영 질문: 성폭력처벌법·형법·민법을 수집했는데 선별이 국가공무원법 10개만 골라
-    #   "민형사 책임은 제공된 조문으로 확인 불가" 라고 답함.
-    if picked is not None and any(f.get("_multi") for f in found):
-        _terms = next((s_.get("detail") for s_ in steps
-                       if s_.get("name") == "검색어 변환" and isinstance(s_.get("detail"), dict)), {}) or {}
-        _ws = [w for w in _bp_keywords(req.question)
-               if w not in _CASE_GENERIC and w not in ("또는", "내지", "및", "그리고")
-               and not re.search(r"(는데|해서|렸다|했다|해줘|라는)$", w)] + list(_terms.get("용어", []))
-        _fr = {w2[i:i + 2] for w2 in (re.sub(r"\s+", "", w) for w in _ws) for i in range(len(w2) - 1)}
-        _have_laws = {f["name"] for f, _ in use}
-        _added = []
-        for f in found:
-            if f.get("level") != "법률" or f["name"] in _have_laws:
-                continue
-            # 지능형 검색이 이 법에서 지목한 조문이 있으면 그것부터(예: 성폭력처벌법 제14조 카메라 등 이용 촬영)
-            _hitk = {(str(j).lstrip("0"), str(g).lstrip("0")) for ln, j, g in (ai_hits or [])
-                     if _law_key(ln) == _law_key(f["name"])}
-            scored = []
-            for ff, a in flat:
-                if ff.get("name") != f["name"]:          # flat 의 법령 dict 는 found 와 다른 객체일 수 있음
-                    continue
-                if (str(a.get("조문번호") or "").lstrip("0"), str(a.get("조문가지번호") or "").lstrip("0")) in _hitk:
-                    scored.append((100, ff, a))
-                    continue
-                t = str(a.get("조문제목") or "")
-                sc = sum(1 for fr in _fr if fr in t)
-                if sc >= 1:
-                    scored.append((sc, ff, a))
-            scored.sort(key=lambda x: -x[0])
-            for _, ff, a in scored[:2]:
-                use.append((ff, a))
-                _added.append(_ctx_key(ff, a))
-        if _added:
-            steps.append({"name": "측면 보강", "detail": "선별이 한 법에 몰려 다른 후보 법률의 조문 추가 — " + ", ".join(_added)})
 
     # ── v1.35 — 질문이 이름으로 집어 말한 조문 우선 ─────────────────────
     # 질문에 "토양오염우려기준", "토양오염대책기준" 처럼 **조문 제목 그 자체**가 나오면 그 조문이 답의 핵심입니다.
@@ -3070,6 +3082,11 @@ def _ask_after_search(req, steps, answered, found, flat, catalog, refs, it=None,
                     "(예: 신고·조사·명령의 일반 규정)이 직접 근거이므로 그 조문으로 답한다. "
                     "'직접적인 규정을 확인할 수 없다' 고 하지 않는다)")
         steps.append({"name": "질문자가 아니라고 밝힌 대상", "detail": ", ".join(_neg) + " — 일반 조문으로 답하도록 지시"})
+    # ★ v1.38 — 여러 측면을 묻는 질문이면 측면별로 나눠 답하도록 알려 줍니다(질문 쪼개기 결과).
+    _asp = next((f.get("_aspects") for f in found if f.get("_aspects")), None)
+    if _asp:
+        _hint += ("\n(이 질문은 여러 측면을 함께 묻는다: " + " / ".join(f"{i + 1}) {q}" for i, q in enumerate(_asp))
+                  + " — 【결론】과 【설명】에서 측면마다 근거 조문을 들어 나눠 답한다. 조문이 없는 측면은 그렇다고 밝힌다)")
     # ★ v1.35 — 개정·변경을 묻는 질문이면 직전 버전과 비교한 [개정 이력] 을 붙입니다.
     try:
         _hint += _history_block(req.question + " " + (answered or ""), use, prio, bp_kw, steps)

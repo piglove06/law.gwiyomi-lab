@@ -27,7 +27,7 @@ import applog
 # 상한이 없으면 모델이 계속 생성합니다.
 # 단계마다 필요한 분량이 다르므로 따로 잡습니다.
 # (llama-server 에서는 남은 컨텍스트보다 크면 자동으로 줄여서 보냅니다)
-MAXTOK_TERMS   = int(os.getenv("MAXTOK_TERMS",   "300"))    # 두 줄
+MAXTOK_TERMS   = int(os.getenv("MAXTOK_TERMS",   "420"))    # 두 줄
 MAXTOK_SELECT  = int(os.getenv("MAXTOK_SELECT",  "400"))    # 번호 나열
 MAXTOK_CLARIFY = int(os.getenv("MAXTOK_CLARIFY", "800"))    # 질문 몇 줄
 MAXTOK_ANSWER  = int(os.getenv("MAXTOK_ANSWER",  "4000"))   # 근거 + 설명
@@ -93,7 +93,7 @@ TERM_PROMPT = """너는 대한민국 국가법령 검색을 돕는 도구다.
   질문에 명시되지 않은 특수·예외 분야 법을 1순위로 올리지 마라.
   예) "사업장에서 폐기물을 배출한다" → 폐기물관리법 (O)
       방사성폐기물 관리법 (X — 질문에 방사성이라는 말이 없다)
-- **질문이 여러 측면(예: 징계 + 형사처벌 + 손해배상)을 함께 물으면, 측면마다 가장 직접 적용되는 법을 1개씩
+- **질문이 서로 다른 법적 측면(예: 징계 + 형사처벌 + 손해배상)을 함께 물으면, 측면마다 가장 직접 적용되는 법을 1개씩
   최대 3개까지** 쓴다. 범죄 행위는 그 행위를 직접 처벌하는 특별법이 있으면 그 법을 쓴다(형법보다 우선).
 - 조문 번호(제○조)를 지어내지 마라.
 - 영어를 쓰지 마라. 한국어 법령 용어만 쓴다.
@@ -128,15 +128,24 @@ _TERM_RULES_TEXT = """아래 두 줄만 출력한다.
 - 백틱(`), 따옴표, 괄호, 번호를 붙이지 마라."""
 
 _TERM_RULES_JSON = """JSON 하나만 출력한다.
-  {"laws": ["법령 이름 1~3개"], "terms": ["법령 용어 3~5개"]}"""
+  {"laws": ["법령 이름 1~3개"], "terms": ["법령 용어 3~5개"],
+   "aspects": [{"q": "측면별 하위 질문(한 문장)", "law": "그 측면에 가장 직접 적용되는 법 1개"}]}
+- aspects 는 질문이 **서로 다른 법적 측면을 2개 이상** 함께 물을 때만 측면마다 하나씩(최대 3개) 쓴다.
+  예) "징계와 형사처벌과 손해배상" → 3개. 한 가지(예: 신고 절차만, 기준만)를 물으면 빈 배열 [] 이다.
+  하위 질문에는 원래 질문의 상황(누가·무엇을)을 그대로 담는다."""
 
 TERM_SCHEMA = {
     "type": "object",
     "properties": {
         "laws": {"type": "array", "items": {"type": "string"}, "maxItems": 3},
         "terms": {"type": "array", "items": {"type": "string"}, "minItems": 1, "maxItems": 6},
+        # v1.38 — 여러 측면을 묻는 질문의 하위 질문(측면별 검색용). 한 가지만 물으면 [].
+        "aspects": {"type": "array", "maxItems": 3, "items": {
+            "type": "object",
+            "properties": {"q": {"type": "string", "maxLength": 120}, "law": {"type": "string", "maxLength": 40}},
+            "required": ["q", "law"]}},
     },
-    "required": ["laws", "terms"],
+    "required": ["laws", "terms", "aspects"],
 }
 
 
@@ -855,7 +864,7 @@ def extract_terms(question: str) -> dict:
     로컬 모델은 형식을 자주 어깁니다. 라벨이 있으면 그것을 쓰고,
     없으면 줄 단위로 훑어 법령처럼 생긴 것과 아닌 것을 나눕니다.
     """
-    out = {"법령명": [], "용어": []}
+    out = {"법령명": [], "용어": [], "측면": []}
 
     # ★ v1.31 — JSON 형식 강제를 먼저 시도합니다. 안 되면 예전 텍스트 방식.
     obj, _ = call_json(TERM_PROMPT.format(question=question, output_rules=_TERM_RULES_JSON),
@@ -863,6 +872,13 @@ def extract_terms(question: str) -> dict:
     if isinstance(obj, dict):
         raw = ("법령명: " + ", ".join(str(x) for x in (obj.get("laws") or []) if x) + "\n"
                + "용어: " + ", ".join(str(x) for x in (obj.get("terms") or []) if x))
+        # v1.38 — 측면별 하위 질문(2개 이상일 때만 의미가 있음)
+        for a in (obj.get("aspects") or [])[:3]:
+            if isinstance(a, dict) and str(a.get("q") or "").strip():
+                out["측면"].append({"q": str(a["q"]).strip()[:120],
+                                   "law": str(a.get("law") or "").strip().strip("「」")[:40]})
+        if len(out["측면"]) < 2:
+            out["측면"] = []
     else:
         raw = _call(TERM_PROMPT.format(question=question, output_rules=_TERM_RULES_TEXT),
                     temperature=0, max_tokens=MAXTOK_TERMS, stage="terms")
