@@ -1,0 +1,5 @@
+{
+ "L-20261016-2244-1": {"runs": 1, "pass_streak": 0, "last_run": "2026-10-16 22:55", "last_verdict": "부분일치", "status": "대기"},
+ "L-20261016-2244-2": {"runs": 1, "pass_streak": 0, "last_run": "2026-10-16 22:55", "last_verdict": "부분일치", "status": "대기"},
+ "L-20261016-2244-3": {"runs": 1, "pass_streak": 0, "last_run": "2026-10-16 22:55", "last_verdict": "불일치", "status": "대기"}
+}
