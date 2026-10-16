@@ -1935,8 +1935,10 @@ def _ask_sync(req: AskRequest, progress: list):
         from concurrent.futures import ThreadPoolExecutor
 
         def _asp_search(a):
+            # v1.38b — 측면의 법 이름을 검색어 앞에 붙여 그 법의 조문이 잡히게 합니다
+            g = re.sub(r"\s*(시행령|시행규칙)$", "", a.get("law", "")).strip()
             try:
-                return law_client.ai_search(a["q"], display=10)
+                return law_client.ai_search((g + " " + a["q"]).strip(), display=10)
             except Exception as e:                      # noqa: BLE001
                 applog.warn(f"측면 지능형 검색 실패: {e}")
                 return []
@@ -1956,19 +1958,24 @@ def _ask_sync(req: AskRequest, progress: list):
             top = ranked[0] if ranked else ""
             share = sc.get(top, 0.0) / (sum(sc.values()) or 1.0) if top else 0.0
             guess = re.sub(r"\s*(시행령|시행규칙)$", "", a.get("law", "")).strip()
-            # LLM 이 그 측면의 법을 말했으면 그 법이 기본입니다. 다만 측면 검색 상위 5개에 그 법이 없고
-            # 검색 1위가 뚜렷하면(비중 ≥ WEAK_AI_SHARE) 검색 결과를 씁니다(예: 형법 → 성폭력처벌법).
-            # (1차 실측 10-15: 검색 1위를 먼저 믿었더니 '일요일 공사장 소음' 이 주택건설기준으로 감)
-            g_in = bool(guess) and any(_law_key(guess) == _law_key(b) for b in ranked[:5])
-            if guess and (g_in or not top or share < WEAK_AI_SHARE):
-                law, backup = guess, (top if top and _law_key(top) != _law_key(guess) else "")
+            # ★ v1.38b (U-19) — 측면의 법은 **LLM 이 정한다**(그 법이 법제처에 실제로 있으면). 검색은 그 법의 조문을 대 주는 역할.
+            #   검색 1위로 바꾸던 규칙(상위 5개에 없고 1위 비중 ≥ 0.4)은 '불법촬영 민형사' 측면에 아동ㆍ청소년성보호법을 붙였음
+            #   (질문에 미성년자 언급 없음). 법이 없는 이름(지어낸 법)일 때만 검색 1위를 씁니다.
+            real = False
+            if guess:
+                _rows = _stmd_rows(guess)
+                _row = _pick_stmd(_rows, guess) if _rows else None
+                real = _row is not None and _law_key(law_client.row_name("lsStmd", _row)) == _law_key(guess)
+            if real:
+                law, backup = guess, ""
             else:
-                law, backup = top, guess
+                law, backup = top, ""
             if not law:
                 continue
             ph = [h for h in hits
                   if _law_key(re.sub(r"\s*(시행령|시행규칙)$", "", h[0])) == _law_key(law)][:3]
-            asp_plan.append({"q": a["q"], "law": law, "backup": backup, "hits": ph})
+            asp_plan.append({"q": a["q"], "law": law, "backup": backup, "hits": ph,
+                             "note": ("" if real else f"(추측 '{guess}' 없음 → 검색 1위)") if guess else "(검색 1위)"})
         # 측면들이 모두 같은 법이면 쪼갤 필요가 없습니다(한 법 안의 여러 사항 — 기존 흐름이 더 낫다)
         if len({_law_key(p["law"]) for p in asp_plan}) < 2:
             if asp_plan:
@@ -1977,7 +1984,8 @@ def _ask_sync(req: AskRequest, progress: list):
             asp_plan = []
         if len(asp_plan) >= 2:
             steps.append({"name": "질문 쪼개기",
-                          "detail": " / ".join(f"{i + 1}) {p['q'][:45]} → {p['law']}" for i, p in enumerate(asp_plan))})
+                          "detail": " / ".join(f"{i + 1}) {p['q'][:45]} → {p['law']}{p['note']} 조문 {len(p['hits'])}개"
+                                               for i, p in enumerate(asp_plan))})
             # 측면별 지목 조문을 번갈아 앞에 둡니다(조문 선별의 '지능형 검색 조문 추가'가 앞 6개를 씀)
             inter = []
             for k in range(3):
