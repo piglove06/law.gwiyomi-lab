@@ -1,0 +1,8 @@
+moelCgmExpc|기간제|search|display=30
+moelCgmExpc|연차|search|display=30
+molitCgmExpc|건축신고|search|display=30
+molitCgmExpc|용도변경|search|display=30
+mfdsCgmExpc|영업신고|search|display=30
+nfaCgmExpc|소방안전관리자|search|display=30
+moisCgmExpc|주민등록|search|display=30
+npaCgmExpc|운전면허|search|display=30
