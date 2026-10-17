@@ -1000,13 +1000,18 @@ def pick_aspect_laws(question: str, aspects: list) -> list:
 # 검색어 변환 LLM 의 법령 추측과 지능형 검색 순위가 엇갈릴 때, 예전에는 규칙(지능형 1위 앞세우기·
 # 신뢰 낮음 비율·'어느 법?' 되묻기)으로 정했습니다. 지방공무원 육아휴직에 남녀고용평등법(민간 근로자 법)이
 # 1위로 오거나, 외부강의 사례금에 청탁금지법이 3위라 빠지는 일이 생겨, 두 목록을 합쳐 LLM 이 고르게 합니다.
-MAIN_LAW_PROMPT = """질문과 후보 법령 목록이 있다. 이 질문에 답할 때 **조문을 봐야 할 법**을 고른다.
+MAIN_LAW_PROMPT = """질문과 후보 법령 목록이 있다. 후보마다 법제처 지능형 검색이 질문으로 찾은 **조문 제목**이 붙어 있다.
+이 질문에 답할 때 **조문을 봐야 할 법**을 고른다.
 먼저 subject 에 질문의 주체와 행위를 한 줄로 적는다. 예) "지방공무원 + 육아휴직 요건·기간"
+- **조문 제목을 근거로** 고른다. 질문이 묻는 행위·의무(예: 누출검사, 육아휴직, 외부강의)를 정한 조문이
+  붙은 법이 답할 법이다. 업종 이름만 같은 법(주유소 → 석유사업법)이 아니라 그 의무를 정한 법을 고른다.
 - 그 주체·행위를 **직접 규율하는 법**을 고른다. 주체가 다른 법은 고르지 않는다.
   예) 지방공무원 질문에 민간 근로자 대상 법(근로기준법·남녀고용평등법), 국가공무원 법
 - 그 행위를 직접 규정하는 특별법이 있으면 일반법보다 특별법을 먼저 고른다.
   예) 공무원 외부강의 사례금 → 부정청탁 및 금품등 수수의 금지에 관한 법률
 - 직제·행동강령·내부 규정보다 법률을 먼저 고른다. 최대 2개, 중요한 것부터.
+- **조문 제목으로 보아 질문의 행위·의무를 정한 법이 후보에 하나도 없으면 picks 를 비운다**(그러면 질문자에게 묻는다).
+  애매하면 비운다. 억지로 고르지 마라.
 - 후보에 직접 규율하는 법이 없고, 그 법의 **정식 이름을 확실히 알면** other 에 적는다(모르면 빈칸).
 JSON 하나만 출력한다: {{"subject": "...", "picks": [후보 번호, ...], "other": ""}}
 
@@ -1024,11 +1029,14 @@ MAIN_LAW_SCHEMA = {
 }
 
 
-def pick_main_laws(question: str, cands: list) -> tuple:
-    """후보 법령명 목록 → (고른 법령명 목록, 후보 밖 법령명 또는 "", 주체 한 줄). 실패하면 ([], "", "")."""
+def pick_main_laws(question: str, cands: list, evidence: list | None = None) -> tuple:
+    """후보 법령명 목록 → (고른 법령명 목록, 후보 밖 법령명 또는 "", 주체 한 줄). 실패하면 ([], "", "").
+    evidence: 후보마다 근거 한 줄(지능형 검색이 집은 조문 제목)."""
     if not cands:
         return [], "", ""
-    lines = "\n".join(f"{i + 1}. {c}" for i, c in enumerate(cands))
+    ev = list(evidence or [])
+    lines = "\n".join(f"{i + 1}. {c}" + (f"\n   — {ev[i]}" if i < len(ev) and ev[i] else "")
+                      for i, c in enumerate(cands))
     try:
         obj, _ = call_json(MAIN_LAW_PROMPT.format(question=str(question or "")[:600], cands=lines),
                            MAIN_LAW_SCHEMA, temperature=0, max_tokens=90, stage="main_laws")
@@ -1173,24 +1181,20 @@ def answer(question: str, context: str) -> str:
 # 대신 다 쓴 답변을 **한 번 더 읽혀** 네 가지 오류만 찾게 하고, 오류마다 원문·질문·답변에서 그대로 복사한
 # 근거 글자를 붙이게 합니다. 코드가 그 글자가 실제로 있는지 확인해(검토자가 지어낸 지적은 버림),
 # 남은 지적이 있으면 그 지적을 붙여 답변을 한 번 다시 씁니다.
-REVIEW_PROMPT = """너는 법령 답변 검토자다. [질문]·[답변]·[조문 원문]을 대조해 아래 네 가지 오류만 찾는다.
-**결론·판정·수치·요건·기한이 틀린 중대한 오류만** 올린다. 표기 차이(dB/㏈, 띄어쓰기, 말 바꿔 쓰기), 덜 자세한 설명,
-더 넣으면 좋을 내용은 오류가 아니다. 대부분의 답변은 오류가 없다 — 그러면 빈 목록을 낸다.
-문제마다 근거 글자(quote)를 **복사해서** 붙인다. 바꿔 쓰지 마라. 확실하지 않으면 올리지 마라.
+REVIEW_PROMPT = """너는 법령 답변 검토자다. [답변]의 핵심 주장을 [조문 원문]과 하나씩 대조한다.
 
-1. 원문불일치 — 답변이 어떤 조문·별표가 정한다고 쓴 내용이 [조문 원문]과 다르다.
-   (원문에 없는 조·항·호·칸·수치를 지어냄, 표의 다른 줄·칸을 읽음, 질문 사실과 맞지 않는 호를 근거로 듦)
-   quote: 답변과 다른 [조문 원문]의 실제 문구(답변이 틀렸음을 보여 주는 원문)
-2. 단서누락 — 결론을 바꾸는 단서를 빠뜨리거나 거꾸로 읽었다.
-   ('다만', '제외한다', 괄호 안 예외, '…로 한정한다', 별표 비고·보정)
-   quote: [조문 원문]의 그 단서 문구
-3. 전제위반 — [질문]·(확인된 조건)에 적힌 사실과 반대로 단정했다. (예: 질문은 '공장이 아님'인데 '공장이므로')
-   quote: [질문]의 그 문구
-4. 결론모순 — 【결론】의 판정과 【설명】·【계산】의 판정이 다르다.
-   quote: [답변]에서 서로 다른 판정 문구 하나
-
-fix 에는 무엇을 어떻게 고쳐야 하는지 한 줄로 쓴다. 최대 3개.
-JSON 하나만 출력한다: {{"problems": [{{"kind": "원문불일치|단서누락|전제위반|결론모순", "quote": "...", "fix": "..."}}]}}
+1. claims — [답변]의 【결론】·【계산】에서 **판정을 정하는 핵심 주장**을 최대 4개 뽑는다.
+   (기준 수치, 기한, 대상·요건, 보정값, 적용되는 조·호. 예: "주거지역 공사장 주간 기준 65dB", "4명 이하 사업장에도 제60조 적용")
+   주장마다 [조문 원문]에서 그 주장을 확인하거나 반박하는 문구를 **그대로 복사**해 quote 에 넣고 verdict 를 정한다.
+     일치 — 원문 문구가 주장과 같다
+     불일치 — 원문 문구가 주장과 다르다(다른 수치·다른 표 칸·다른 호·단서/괄호 예외를 빠뜨림)
+     원문없음 — 원문 어디에도 그 주장의 근거가 없다(quote 는 빈칸)
+   fix 에는 불일치·원문없음일 때 무엇으로 고쳐야 하는지 한 줄.
+2. premise — 답변이 [질문]·(확인된 조건)에 적힌 사실과 **반대로** 단정했으면 [질문]의 그 문구를 복사(없으면 빈칸).
+3. contradiction — 【결론】의 판정과 【계산】·【설명】의 판정이 다르면 [답변]에서 어긋나는 문구를 복사(없으면 빈칸).
+표기 차이(dB/㏈, 띄어쓰기, 말 바꿔 쓰기)는 일치로 본다. 확실하지 않으면 일치로 본다.
+JSON 하나만 출력한다:
+{{"claims": [{{"claim": "...", "quote": "...", "verdict": "일치|불일치|원문없음", "fix": ""}}], "premise": "", "premise_fix": "", "contradiction": "", "contradiction_fix": ""}}
 
 [질문]
 {question}
@@ -1203,13 +1207,20 @@ JSON 하나만 출력한다: {{"problems": [{{"kind": "원문불일치|단서누
 """
 REVIEW_SCHEMA = {
     "type": "object",
-    "properties": {"problems": {"type": "array", "maxItems": 3, "items": {
-        "type": "object",
-        "properties": {"kind": {"type": "string", "enum": ["원문불일치", "단서누락", "전제위반", "결론모순"]},
-                       "quote": {"type": "string", "maxLength": 160},
-                       "fix": {"type": "string", "maxLength": 160}},
-        "required": ["kind", "quote", "fix"]}}},
-    "required": ["problems"],
+    "properties": {
+        "claims": {"type": "array", "maxItems": 4, "items": {
+            "type": "object",
+            "properties": {"claim": {"type": "string", "maxLength": 100},
+                           "quote": {"type": "string", "maxLength": 160},
+                           "verdict": {"type": "string", "enum": ["일치", "불일치", "원문없음"]},
+                           "fix": {"type": "string", "maxLength": 120}},
+            "required": ["claim", "quote", "verdict", "fix"]}},
+        "premise": {"type": "string", "maxLength": 120},
+        "premise_fix": {"type": "string", "maxLength": 120},
+        "contradiction": {"type": "string", "maxLength": 120},
+        "contradiction_fix": {"type": "string", "maxLength": 120},
+    },
+    "required": ["claims", "premise", "premise_fix", "contradiction", "contradiction_fix"],
 }
 MAXTOK_REVIEW = int(os.getenv("MAXTOK_REVIEW", "800"))
 
@@ -1221,28 +1232,37 @@ def _qnorm(t: str) -> str:
 
 
 def review_answer(question: str, answer_text: str, context: str) -> list:
-    """다 쓴 답변의 오류를 찾습니다. 근거 글자가 실제로 있는 지적만 돌려줍니다. 실패하면 []."""
+    """다 쓴 답변의 핵심 주장을 원문과 대조합니다. 근거 글자가 실제로 있는 지적만 돌려줍니다. 실패하면 []."""
     try:
         obj, _ = call_json(REVIEW_PROMPT.format(question=question, answer=answer_text, context=context),
                            REVIEW_SCHEMA, temperature=0, max_tokens=MAXTOK_REVIEW, stage="review")
     except AiError:
         return []
-    probs = (obj or {}).get("problems") if isinstance(obj, dict) else None
+    if not isinstance(obj, dict):
+        return []
     nq, na, nc = _qnorm(question), _qnorm(answer_text), _qnorm(context)
     out = []
-    for p in probs or []:
-        if not isinstance(p, dict):
+    for c in obj.get("claims") or []:
+        if not isinstance(c, dict):
             continue
-        kind, quote, fix = str(p.get("kind", "")), str(p.get("quote", "")).strip(), str(p.get("fix", "")).strip()
-        q = _qnorm(quote)
-        if len(q) < 4 or not fix:
-            continue
-        where = {"원문불일치": (nc,), "단서누락": (nc,), "전제위반": (nq,), "결론모순": (na,)}.get(kind)
-        if not where or not any(q in w for w in where):
-            _dbg(f"[review] 근거 글자를 찾지 못해 버림: {kind} / {quote[:60]}")
-            continue
-        out.append({"kind": kind, "quote": quote, "fix": fix})
-    return out
+        v, claim = str(c.get("verdict", "")), str(c.get("claim", "")).strip()
+        quote, fix = str(c.get("quote", "")).strip(), str(c.get("fix", "")).strip()
+        if v == "불일치":
+            q = _qnorm(quote)
+            if len(q) >= 4 and q in nc and fix:
+                out.append({"kind": "원문불일치", "quote": quote, "fix": f"{claim} → {fix}"})
+            else:
+                _dbg(f"[review] 원문 문구를 찾지 못해 버림: {claim[:50]} / {quote[:50]}")
+        elif v == "원문없음" and fix and re.search(r"\d", claim):
+            # 수치·기한 주장인데 원문에 근거가 없으면 지어낸 것일 가능성이 큼
+            out.append({"kind": "원문없음", "quote": claim, "fix": fix})
+    pr, prf = str(obj.get("premise", "")).strip(), str(obj.get("premise_fix", "")).strip()
+    if pr and prf and len(_qnorm(pr)) >= 4 and _qnorm(pr) in nq:
+        out.append({"kind": "전제위반", "quote": pr, "fix": prf})
+    ct, ctf = str(obj.get("contradiction", "")).strip(), str(obj.get("contradiction_fix", "")).strip()
+    if ct and ctf and len(_qnorm(ct)) >= 4 and _qnorm(ct) in na:
+        out.append({"kind": "결론모순", "quote": ct, "fix": ctf})
+    return out[:4]
 
 
 def answer_revised(question: str, context: str, problems: list) -> str:

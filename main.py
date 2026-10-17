@@ -1912,6 +1912,7 @@ def _ask_sync(req: AskRequest, progress: list):
     #   로컬 LLM 의 법령명 추측(가끔 없는 법을 지어냄)과 가나다순 본문검색을 보완합니다.
     #   실패하거나 비어 있으면 예전 방식 그대로 갑니다.
     ai_hits, ai_laws, ai_score = [], [], {}
+    ai_titles: dict = {}          # v1.40 — 법령(본법 기준) → 지능형 검색이 집은 조문 제목들(주 법령 고르기 근거)
     if req.target in ("auto", "law"):
         ai_rows = []
         # ★ v1.32 — 같은 질문이 어떤 때는 결과 0건으로 옵니다(실측: 21:18 20건 → 22:04 0건).
@@ -1945,6 +1946,11 @@ def _ask_sync(req: AskRequest, progress: list):
                 first.setdefault(base, i)
             if nm and r.get("조문번호"):
                 ai_hits.append((nm, r.get("조문번호", ""), r.get("조문가지번호", "")))
+                if base and len(ai_titles.get(base, [])) < 3:
+                    lvl = nm[len(base):].strip()
+                    ai_titles.setdefault(base, []).append(
+                        (lvl + " " if lvl else "") + f"제{str(r.get('조문번호', '')).lstrip('0')}조"
+                        + (f"({r.get('조문제목')})" if r.get("조문제목") else ""))
         ai_laws = sorted(score, key=lambda b: (-score[b], first[b]))
         ai_score = score
         if ai_laws:
@@ -2059,7 +2065,7 @@ def _ask_sync(req: AskRequest, progress: list):
 
     # ★ v1.40 — 주 법령 고르기: 검색어 변환의 법령 추측과 지능형 검색 1위가 엇갈리면, 두 목록을 합쳐
     #   LLM 이 '질문의 주체·행위를 직접 규율하는 법'을 고릅니다(후보에 없으면 정식 이름을 직접 제시 → 실제로
-    #   있는 법인지 체계도로 확인). 고르면 지능형 1위 앞세우기·신뢰 낮음·'어느 법?' 되묻기를 건너뜁니다.
+    #   있는 법인지 체계도로 확인). 고른 법이 후보에 없으면 후보에 **더하기만** 합니다(아래 '법령 후보 추가').
     #   (L-1751-1 지방공무원 육아휴직 → 남녀고용평등법 1위·'어느 법?' / L-1751-3 외부강의 사례금 → 청탁금지법 누락)
     law_pick = []
     if (LAW_PICK and not user_laws and not asp_plan and not asp_same and req.target in ("auto", "law")
@@ -2083,8 +2089,10 @@ def _ask_sync(req: AskRequest, progress: list):
                 if n and not any(_law_key(n) == _law_key(x) for x in pool):
                     pool.append(n)
             if pool:
-                picks, other, subj = ai_client.pick_main_laws(req.question + (f"\n(확인된 조건: {answered})"
-                                                                               if answered else ""), pool)
+                picks, other, subj = ai_client.pick_main_laws(
+                    req.question + (f"\n(확인된 조건: {answered})" if answered else ""), pool,
+                    [("지능형 검색 조문: " + ", ".join(ai_titles[x])) if ai_titles.get(x)
+                     else "지능형 검색 조문 없음(이름 추측)" for x in pool])
                 if other and not any(_law_key(other) == _law_key(x) for x in pool + picks):
                     rows = _stmd_rows(other)
                     row = _pick_stmd(rows, other) if rows else None
@@ -2098,8 +2106,7 @@ def _ask_sync(req: AskRequest, progress: list):
                                   "detail": f"{subj} → {', '.join(law_pick)} (후보: {', '.join(pool)})"})
 
     weak_ai = False
-    if ai_laws and names and not user_laws and not asp_plan and not asp_same and not law_pick \
-            and req.target in ("auto", "law"):
+    if ai_laws and names and not user_laws and not asp_plan and not asp_same and req.target in ("auto", "law"):
         _tot = sum(ai_score.values()) or 1.0
         _share = ai_score.get(ai_laws[0], 0.0) / _tot
         _ai5 = {_law_key(x) for x in ai_laws[:5]}
@@ -2119,7 +2126,7 @@ def _ask_sync(req: AskRequest, progress: list):
 
     # ★ v1.33 — 법령이 애매하면 첫 라운드에 "어느 법" 인지 묻습니다(조문 수집 전에 — 헛수집을 줄임).
     if (not user_laws and req.round == 0 and not req.skip_clarify and not weak_ai and not asp_plan
-            and not asp_same and not law_pick and req.target in ("auto", "law")):
+            and not asp_same and req.target in ("auto", "law")):
         tot = sum(ai_score.values()) or 1.0
         share = ai_score.get(ai_laws[0], 0.0) / tot if ai_laws else 0.0
         guess_keys = {_law_key(re.sub(r"\s*(시행령|시행규칙)$", "", n)) for n in names}
@@ -2372,17 +2379,16 @@ def _ask_sync(req: AskRequest, progress: list):
 
         # ★ v1.31 — 지능형 검색 1순위 법령을 후보 맨 앞에 둡니다. 로컬 LLM 의 추측은
         #   (체계도에 실제로 있으면) 2순위로 남겨 둡니다 — 둘 다 수집하고 조문 선별이 고릅니다.
-        if (asp_plan or asp_same or law_pick) and not user_resolved:
+        if (asp_plan or asp_same) and not user_resolved:
             # v1.38 — 측면별 법을 앞에(측면 순서대로), 그다음 측면별 예비 법, 그다음 기존 후보
             #   v1.38e — 측면이 모두 같은 법이면 그 법을 맨 앞에 / v1.40 — LLM 이 고른 주 법령을 맨 앞에
             prim = []
-            for x in list(law_pick) + ([asp_same] if asp_same else []) + [p["law"] for p in asp_plan] \
+            for x in ([asp_same] if asp_same else []) + [p["law"] for p in asp_plan] \
                     + [p["backup"] for p in asp_plan if p["backup"]] + cand:
                 if x and not any(_law_key(x) == _law_key(y) for y in prim):
                     prim.append(x)
             cand = prim
-        if ai_laws and not (user_resolved and only_mode) and not weak_ai and not asp_plan and not asp_same \
-                and not law_pick:
+        if ai_laws and not (user_resolved and only_mode) and not weak_ai and not asp_plan and not asp_same:
             top = ai_laws[0]
             if not any(_law_key(top) == _law_key(c) for c in cand):
                 steps.append({"name": "법령 후보 보정(지능형 검색)",
@@ -2403,6 +2409,15 @@ def _ask_sync(req: AskRequest, progress: list):
             cand = [top] + corr + ai2[:1] + [c for c in others
                                               if not any(_law_key(c) == _law_key(x) for x in ai2[:1])]
 
+        # ★ v1.40 — LLM 이 고른 주 법령 중 후보에 없는 것 하나를 **2순위로 더합니다**(순서·되묻기는 예전 그대로).
+        #   1차 시험에서 LLM 선택을 맨 앞에 두고 '어느 법?' 되묻기까지 건너뛰게 했더니, 주유소 누출검사에
+        #   석유사업법을 골라(지능형 검색 조문 제목을 보여 줘도) 회귀 → 추가만 합니다(외부강의 → 청탁금지법 추가).
+        extra_pick = [] if user_resolved else [
+            x for x in law_pick if not any(_law_key(x) == _law_key(c) for c in cand)][:1]
+        if extra_pick:
+            cand = cand[:1] + extra_pick + cand[1:]
+            steps.append({"name": "법령 후보 추가(LLM 선택)", "detail": f"'{extra_pick[0]}' 을(를) 후보에 더합니다"})
+
         # v1.3 의 조문 선별이 붙어 토큰 부담이 크게 줄었으므로 후보를 2개로 되돌립니다.
         # 1개만 쓰면 "누출검사" 처럼 여러 법에 쓰이는 용어에서 엉뚱한 법 하나만
         # 잡고 끝나 답이 통째로 틀립니다. (토양환경보전법 → 위험물안전관리법)
@@ -2417,7 +2432,7 @@ def _ask_sync(req: AskRequest, progress: list):
                                           if not any(_law_key(c) == _law_key(u) for u in user_resolved)]
             cand_limit = max(LAW_CANDIDATES, len(user_resolved) + 1)
         else:
-            cand_limit = max(LAW_CANDIDATES, len(asp_plan))
+            cand_limit = max(LAW_CANDIDATES, len(asp_plan)) + len(extra_pick)
         stmd_ok, stmd_fail = 0, []
         for nm in cand:
             if stmd_ok >= cand_limit:
