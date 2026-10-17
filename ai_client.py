@@ -911,6 +911,46 @@ def pick_cases(question: str, titles: list) -> list:
     return out[:3]
 
 
+# ── v1.40 — 참고 해석례 확인 (답변에 넣기 전) ───────────────────────
+# 제목만 보고 고른 사례 중 쟁점이 다른 것(세차장 질문에 '학교환경위생 정화구역')이 섞여, 답변에 넣기 전에
+# 질의요지·회답 본문을 보고 한 번 더 거릅니다.
+CASE_CONFIRM_PROMPT = """질문과, 참고 후보 해석례(질의요지·회답)가 있다. 질문과 **같은 대상·같은 법적 쟁점**에
+결론을 낸 해석례만 고른다. 대상(시설·업종·사람)이나 쟁점(신고·허가·기준·처분 등)이 다르면 고르지 않는다.
+확실하지 않으면 고르지 않는다. JSON 하나만 출력한다: {{"keep": [후보 번호, ...]}}
+
+질문: {question}
+
+{cands}
+"""
+CASE_CONFIRM_SCHEMA = {
+    "type": "object",
+    "properties": {"keep": {"type": "array", "items": {"type": "integer"}, "maxItems": 3}},
+    "required": ["keep"],
+}
+
+
+def confirm_cases(question: str, items: list) -> list:
+    """items: [{"title","q","a"}] → 남길 번호(0부터). 실패하면 []."""
+    if not items:
+        return []
+    cands = "\n\n".join(f"{i + 1}. {c.get('title', '')[:90]}\n   질의: {str(c.get('q', ''))[:300]}\n"
+                         f"   회답: {str(c.get('a', ''))[:300]}" for i, c in enumerate(items))
+    try:
+        obj, _ = call_json(CASE_CONFIRM_PROMPT.format(question=str(question or "")[:500], cands=cands),
+                           CASE_CONFIRM_SCHEMA, temperature=0, max_tokens=30, stage="case_confirm")
+    except AiError:
+        return []
+    out = []
+    for n in (obj or {}).get("keep") or [] if isinstance(obj, dict) else []:
+        try:
+            k = int(n) - 1
+        except (TypeError, ValueError):
+            continue
+        if 0 <= k < len(items) and k not in out:
+            out.append(k)
+    return out
+
+
 # ── v1.38c — 측면별 법 고르기 (U-19) ──────────────────────────────
 # 측면마다 후보 법(LLM 추측 + 그 측면 지능형 검색 상위)을 보여 주고 가장 직접 적용되는 법 하나를 고르게 합니다.
 # (추측만 믿으면 '형사 → 형법'(조문 0개), 검색 1위만 믿으면 '형사 → 아동ㆍ청소년성보호법'(미성년자 없음)이 붙었음)
@@ -954,6 +994,58 @@ def pick_aspect_laws(question: str, aspects: list) -> list:
             k = -1
         out.append(a["cands"][k] if 0 <= k < len(a["cands"]) else "")
     return out
+
+
+# ── v1.40 — 주 법령 고르기 (L-1751-1·1751-3, L-1016-1, U-8) ─────────────────────
+# 검색어 변환 LLM 의 법령 추측과 지능형 검색 순위가 엇갈릴 때, 예전에는 규칙(지능형 1위 앞세우기·
+# 신뢰 낮음 비율·'어느 법?' 되묻기)으로 정했습니다. 지방공무원 육아휴직에 남녀고용평등법(민간 근로자 법)이
+# 1위로 오거나, 외부강의 사례금에 청탁금지법이 3위라 빠지는 일이 생겨, 두 목록을 합쳐 LLM 이 고르게 합니다.
+MAIN_LAW_PROMPT = """질문과 후보 법령 목록이 있다. 이 질문에 답할 때 **조문을 봐야 할 법**을 고른다.
+먼저 subject 에 질문의 주체와 행위를 한 줄로 적는다. 예) "지방공무원 + 육아휴직 요건·기간"
+- 그 주체·행위를 **직접 규율하는 법**을 고른다. 주체가 다른 법은 고르지 않는다.
+  예) 지방공무원 질문에 민간 근로자 대상 법(근로기준법·남녀고용평등법), 국가공무원 법
+- 그 행위를 직접 규정하는 특별법이 있으면 일반법보다 특별법을 먼저 고른다.
+  예) 공무원 외부강의 사례금 → 부정청탁 및 금품등 수수의 금지에 관한 법률
+- 직제·행동강령·내부 규정보다 법률을 먼저 고른다. 최대 2개, 중요한 것부터.
+- 후보에 직접 규율하는 법이 없고, 그 법의 **정식 이름을 확실히 알면** other 에 적는다(모르면 빈칸).
+JSON 하나만 출력한다: {{"subject": "...", "picks": [후보 번호, ...], "other": ""}}
+
+질문: {question}
+
+후보:
+{cands}
+"""
+MAIN_LAW_SCHEMA = {
+    "type": "object",
+    "properties": {"subject": {"type": "string", "maxLength": 80},
+                   "picks": {"type": "array", "items": {"type": "integer"}, "maxItems": 2},
+                   "other": {"type": "string", "maxLength": 40}},
+    "required": ["subject", "picks", "other"],
+}
+
+
+def pick_main_laws(question: str, cands: list) -> tuple:
+    """후보 법령명 목록 → (고른 법령명 목록, 후보 밖 법령명 또는 "", 주체 한 줄). 실패하면 ([], "", "")."""
+    if not cands:
+        return [], "", ""
+    lines = "\n".join(f"{i + 1}. {c}" for i, c in enumerate(cands))
+    try:
+        obj, _ = call_json(MAIN_LAW_PROMPT.format(question=str(question or "")[:600], cands=lines),
+                           MAIN_LAW_SCHEMA, temperature=0, max_tokens=90, stage="main_laws")
+    except AiError:
+        return [], "", ""
+    if not isinstance(obj, dict):
+        return [], "", ""
+    out = []
+    for n in obj.get("picks") or []:
+        try:
+            k = int(n) - 1
+        except (TypeError, ValueError):
+            continue
+        if 0 <= k < len(cands) and cands[k] not in out:
+            out.append(cands[k])
+    other = re.sub(r"[「」\s]+$", "", str(obj.get("other") or "").strip().strip("「」"))
+    return out[:2], other[:40], str(obj.get("subject") or "")[:80]
 
 
 def extract_terms(question: str) -> dict:
@@ -1076,6 +1168,91 @@ def answer(question: str, context: str) -> str:
                               max_tokens=MAXTOK_ANSWER, stage="answer"))
 
 
+# ── v1.40 — 답변 검토 (U-20·22·23, L-2244-1·3, U-7) ─────────────────────
+# 답변 지시문에 규칙을 더 붙여도 로컬 모델이 긴 지시문을 다 지키지 못합니다(지시문이 이미 200줄).
+# 대신 다 쓴 답변을 **한 번 더 읽혀** 네 가지 오류만 찾게 하고, 오류마다 원문·질문·답변에서 그대로 복사한
+# 근거 글자를 붙이게 합니다. 코드가 그 글자가 실제로 있는지 확인해(검토자가 지어낸 지적은 버림),
+# 남은 지적이 있으면 그 지적을 붙여 답변을 한 번 다시 씁니다.
+REVIEW_PROMPT = """너는 법령 답변 검토자다. [질문]·[답변]·[조문 원문]을 대조해 아래 네 가지 오류만 찾는다.
+**결론·판정·수치·요건·기한이 틀린 중대한 오류만** 올린다. 표기 차이(dB/㏈, 띄어쓰기, 말 바꿔 쓰기), 덜 자세한 설명,
+더 넣으면 좋을 내용은 오류가 아니다. 대부분의 답변은 오류가 없다 — 그러면 빈 목록을 낸다.
+문제마다 근거 글자(quote)를 **복사해서** 붙인다. 바꿔 쓰지 마라. 확실하지 않으면 올리지 마라.
+
+1. 원문불일치 — 답변이 어떤 조문·별표가 정한다고 쓴 내용이 [조문 원문]과 다르다.
+   (원문에 없는 조·항·호·칸·수치를 지어냄, 표의 다른 줄·칸을 읽음, 질문 사실과 맞지 않는 호를 근거로 듦)
+   quote: 답변과 다른 [조문 원문]의 실제 문구(답변이 틀렸음을 보여 주는 원문)
+2. 단서누락 — 결론을 바꾸는 단서를 빠뜨리거나 거꾸로 읽었다.
+   ('다만', '제외한다', 괄호 안 예외, '…로 한정한다', 별표 비고·보정)
+   quote: [조문 원문]의 그 단서 문구
+3. 전제위반 — [질문]·(확인된 조건)에 적힌 사실과 반대로 단정했다. (예: 질문은 '공장이 아님'인데 '공장이므로')
+   quote: [질문]의 그 문구
+4. 결론모순 — 【결론】의 판정과 【설명】·【계산】의 판정이 다르다.
+   quote: [답변]에서 서로 다른 판정 문구 하나
+
+fix 에는 무엇을 어떻게 고쳐야 하는지 한 줄로 쓴다. 최대 3개.
+JSON 하나만 출력한다: {{"problems": [{{"kind": "원문불일치|단서누락|전제위반|결론모순", "quote": "...", "fix": "..."}}]}}
+
+[질문]
+{question}
+
+[답변]
+{answer}
+
+[조문 원문]
+{context}
+"""
+REVIEW_SCHEMA = {
+    "type": "object",
+    "properties": {"problems": {"type": "array", "maxItems": 3, "items": {
+        "type": "object",
+        "properties": {"kind": {"type": "string", "enum": ["원문불일치", "단서누락", "전제위반", "결론모순"]},
+                       "quote": {"type": "string", "maxLength": 160},
+                       "fix": {"type": "string", "maxLength": 160}},
+        "required": ["kind", "quote", "fix"]}}},
+    "required": ["problems"],
+}
+MAXTOK_REVIEW = int(os.getenv("MAXTOK_REVIEW", "800"))
+
+
+def _qnorm(t: str) -> str:
+    """근거 글자 대조용 — 띄어쓰기·강조 표시·가운뎃점·괄호 차이는 무시합니다."""
+    t = re.sub(r"\*\*|__|!!", "", str(t or ""))
+    return re.sub(r"[\s「」『』\[\]()·ㆍ,.\"'“”‘’…]+", "", t)
+
+
+def review_answer(question: str, answer_text: str, context: str) -> list:
+    """다 쓴 답변의 오류를 찾습니다. 근거 글자가 실제로 있는 지적만 돌려줍니다. 실패하면 []."""
+    try:
+        obj, _ = call_json(REVIEW_PROMPT.format(question=question, answer=answer_text, context=context),
+                           REVIEW_SCHEMA, temperature=0, max_tokens=MAXTOK_REVIEW, stage="review")
+    except AiError:
+        return []
+    probs = (obj or {}).get("problems") if isinstance(obj, dict) else None
+    nq, na, nc = _qnorm(question), _qnorm(answer_text), _qnorm(context)
+    out = []
+    for p in probs or []:
+        if not isinstance(p, dict):
+            continue
+        kind, quote, fix = str(p.get("kind", "")), str(p.get("quote", "")).strip(), str(p.get("fix", "")).strip()
+        q = _qnorm(quote)
+        if len(q) < 4 or not fix:
+            continue
+        where = {"원문불일치": (nc,), "단서누락": (nc,), "전제위반": (nq,), "결론모순": (na,)}.get(kind)
+        if not where or not any(q in w for w in where):
+            _dbg(f"[review] 근거 글자를 찾지 못해 버림: {kind} / {quote[:60]}")
+            continue
+        out.append({"kind": kind, "quote": quote, "fix": fix})
+    return out
+
+
+def answer_revised(question: str, context: str, problems: list) -> str:
+    """검토 지적을 붙여 답변을 다시 씁니다."""
+    notes = "\n".join(f"- [{p['kind']}] \"{p['quote']}\" → {p['fix']}" for p in problems)
+    q = (question + "\n\n[검토 의견 — 앞서 쓴 답변에서 발견된 오류. 이 오류를 반드시 바로잡아 처음부터 다시 쓴다. "
+         "검토 의견을 답변에 옮겨 적지는 마라]\n" + notes)
+    return answer(q, context)
+
+
 CLARIFY_PROMPT = """너는 법령 질문에 답하기 전에, 결론을 가르는 사실 중 빠진 것만 되묻는 도구다.
 질문자는 법령에 익숙하지 않다. 무엇을 알려줘야 결론이 정해지는지 스스로 모른다.
 
@@ -1195,11 +1372,16 @@ OK
 질문|보기1|보기2|보기3"""
 
 _CLARIFY_RULES_JSON = """JSON 하나만 출력한다.
-먼저 "known" 에 [질문]·[이미 답변된 조건]에 **이미 적힌 사실**을 짧게 옮겨 적는다.
+먼저 "asked" 에 질문자가 **알고 싶은 것**을 한 줄로 적는다. 예) "소방안전관리자 재선임 기한과 선임신고 기한"
+그다음 "known" 에 [질문]·[이미 답변된 조건]에 **이미 적힌 사실**을 짧게 옮겨 적는다.
   예) ["측정 시각 오후 3시", "장비 사용 하루 2시간", "주거지역", "평일"]
 그다음 "questions" 를 만든다. **known 에 적은 사실로 정해지는 갈래는 묻지 않는다.**
-  물을 것이 없으면:  {"known": [...], "done": true, "questions": []}
-  물을 것이 있으면:  {"known": [...], "done": false, "questions": [{"question": "질문", "options": ["보기1", "보기2", "모름"]}]}"""
+질문마다 반드시
+  "basis": 그 질문이 가르는 갈래가 적힌 [관련 조문]의 문구를 **그대로 복사**(바꿔 쓰지 마라, 80자 이내)
+  "changes": 이 질문의 답에 따라 asked 의 답이 **어떻게 달라지는지** 한 줄 (예: "2만L 이상이면 신고 대상, 미만이면 아님")
+를 적는다. asked 의 답이 달라지지 않으면(갈래가 다른 의무에 관한 것이면) 그 질문은 만들지 마라.
+  물을 것이 없으면:  {"asked": "...", "known": [...], "done": true, "questions": []}
+  물을 것이 있으면:  {"asked": "...", "known": [...], "done": false, "questions": [{"question": "질문", "options": ["보기1", "보기2", "모름"], "basis": "조문 문구", "changes": "..."}]}"""
 
 CLARIFY_SCHEMA = {
     "type": "object",
@@ -1207,6 +1389,10 @@ CLARIFY_SCHEMA = {
         # ★ v1.32 — 질문에 이미 있는 사실을 **먼저** 적게 합니다(구조화된 출력 안의 짧은 추론).
         #   실제 사례: "평일 오후 3시 · 하루 2시간 · 주거지역" 이라고 적힌 질문에
         #   측정 시각·사용 시간·지역을 3라운드에 걸쳐 되물었고, 답변까지 꼬였습니다.
+        # ★ v1.40 — 질문자가 알고 싶은 것(asked)을 먼저 적고, 되묻기마다 근거 조문 문구(basis)와
+        #   '그 답에 따라 asked 의 답이 어떻게 달라지는지'(changes)를 적게 합니다. basis 가 [관련 조문]에
+        #   실제로 없으면 코드가 그 질문을 버립니다(조문에 없는 성별·신청 기간 같은 되묻기 — L-1751-1).
+        "asked": {"type": "string", "maxLength": 100},
         "known": {"type": "array", "items": {"type": "string"}, "maxItems": 8},
         "done": {"type": "boolean"},
         "questions": {
@@ -1217,12 +1403,14 @@ CLARIFY_SCHEMA = {
                     "question": {"type": "string"},
                     "options": {"type": "array", "items": {"type": "string"},
                                 "minItems": 2, "maxItems": 4},
+                    "basis": {"type": "string", "maxLength": 120},
+                    "changes": {"type": "string", "maxLength": 120},
                 },
-                "required": ["question", "options"],
+                "required": ["question", "options", "basis", "changes"],
             },
         },
     },
-    "required": ["known", "done", "questions"],
+    "required": ["asked", "known", "done", "questions"],
 }
 
 # ── v1.32 — 질문 원문에 이미 있는 사실을 되묻는 항목 거르기 (마지막 그물) ──────────
@@ -1921,9 +2109,17 @@ def clarify(question: str, answered: str = "", catalog: str = "") -> list[dict]:
                        max_tokens=MAXTOK_CLARIFY, stage="clarify")
     if isinstance(obj, dict):
         items = []
+        ncat = _qnorm(catalog)
         if not obj.get("done") or obj.get("questions"):
             for it in (obj.get("questions") or [])[:3]:
                 if not isinstance(it, dict):
+                    continue
+                # v1.40 — 근거 조문 문구가 [관련 조문]에 실제로 있는 되묻기만 남깁니다.
+                #   (날짜 입력 칸 질문은 조문 문구가 '설치 후 ○년' 처럼 있으므로 같은 기준을 씁니다)
+                b = _qnorm(it.get("basis") or "")
+                if catalog and (len(b) < 4 or b not in ncat):
+                    _dbg(f"[clarify] 근거 문구가 조문에 없어 버림: {str(it.get('question'))[:50]} "
+                         f"/ basis={str(it.get('basis'))[:50]}")
                     continue
                 q = _clean_question(str(it.get("question") or "").strip()[:80],
                                     [str(o) for o in (it.get("options") or [])])

@@ -860,9 +860,19 @@ def verify_citations(answer_text: str, laws: list[dict]) -> list[dict]:
                         f"'{law_name}' 의 조문입니다 — 원문을 반드시 확인하세요")
         if hit is None:
             # 법령명 추정이 빗나갔을 수 있으니, 번호만으로 한 번 더 찾아봅니다.
+            # ★ v1.40 (C-20261017-2) — 답변이 법령명을 **직접 밝힌** 인용(「…시행규칙」 제16조)인데 그 법령에
+            #   그 조문이 없으면, 같은 번호의 다른 법령 조문(법률 제16조 '협약의 체결')을 '확인'으로 붙이지 않습니다.
+            #   예전에는 ok=True 로 집계돼 '인용 검증 n/n 확인' 이 실제보다 좋게 나왔습니다(U-20261017-21).
+            #   법령명 없이 "제16조" 만 쓴 인용은 추정이 빗나갔을 수 있으니 예전처럼 번호로 찾습니다.
+            explicit = bool(named) or bool(re.search(
+                r"(「[^」]+」|\[[^\]]+\]|[가-힣ㆍ·]+(법|법률|시행령|시행규칙|규칙|규정))\s*$", (prefix or "").strip()))
             for (nm, j, g), v in index.items():
                 if (j, g) == (jo, gaji):
                     if _norm(nm) != _norm(law_name):
+                        if explicit:
+                            mismatch = (f"답변이 든 '{law_name}' {label} 은 수집한 조문에 없습니다"
+                                        f"(같은 번호는 '{nm}' 에만 있음) — 근거를 원문에서 확인하세요")
+                            break
                         # AI 가 적은 법령명과 실제 조문이 있는 법령이 다릅니다.
                         mismatch = f"답변은 '{law_name}' 이라고 했으나 실제로는 '{nm}' 조문입니다"
                     law_name, hit = nm, v
@@ -1487,6 +1497,12 @@ RELATED_CASES = os.getenv("RELATED_CASES", "1") != "0"
 CASE_LLM_POOL = int(os.getenv("CASE_LLM_POOL", "10"))
 # v1.37 — 법령과 무관한 질문 거르기(ai_client.scope_check). 0 이면 끔
 SCOPE_CHECK = os.getenv("SCOPE_CHECK", "1") != "0"
+# ★ v1.40 — 주 법령 LLM 선택(법령 추측과 지능형 1위가 엇갈릴 때). .env LAW_PICK=0 이면 예전 규칙.
+LAW_PICK = os.getenv("LAW_PICK", "1") != "0"
+# ★ v1.40 — 참고 해석례를 답변 전에 골라 답변 지시에 넣음(약 5~10초 추가). 0 이면 예전처럼 답변 뒤에 화면에만.
+CASE_IN_ANSWER = os.getenv("CASE_IN_ANSWER", "1") != "0"
+# ★ v1.40 — 답변 검토(오류 찾기 → 한 번 다시 쓰기). LLM 1~2회 추가(약 15~40초). .env ANSWER_REVIEW=0 이면 끕니다.
+ANSWER_REVIEW = os.getenv("ANSWER_REVIEW", "1") != "0"
 _CASE_LABEL = {"expc": "법제처 법령해석", "prec": "판례"}
 _CASE_URL = {"expc": "https://www.law.go.kr/LSW/expcInfoP.do?expcSeq={id}",
              "prec": "https://www.law.go.kr/LSW/precInfoP.do?precSeq={id}"}
@@ -1981,7 +1997,9 @@ def _ask_sync(req: AskRequest, progress: list):
             cands = []
             # v1.38d — 질문 전체의 주 법령 후보(검색어 변환 법령명·질문 원문 지능형 1위)도 넣어, 측면 추측이 엉뚱할 때
             #   (예: 어린이공원 CCTV '녹음' 측면 → 초·중등교육법) 주 법령을 고를 수 있게 합니다.
-            whole = [re.sub(r"\s*(시행령|시행규칙)$", "", n).strip() for n in names[:2]] + ai_laws[:1]
+            # v1.40 — 원문 지능형 상위 3개까지(외부강의 사례금: 청탁금지법이 원문 지능형 3위 — L-1751-3)
+            whole = [re.sub(r"\s*(시행령|시행규칙)$", "", n).strip() for n in names[:2]] + [
+                b for b in ai_laws[:3] if ai_score.get(b, 0) >= 0.15 and not re.search(r"(직제|고시|훈령|예규)$", b)]
             for c in ([guess] if guess else []) + ranked[:3] + whole:
                 if c and not any(_law_key(c) == _law_key(x) for x in cands):
                     cands.append(c)
@@ -2039,8 +2057,49 @@ def _ask_sync(req: AskRequest, progress: list):
         else:
             asp_plan = []
 
+    # ★ v1.40 — 주 법령 고르기: 검색어 변환의 법령 추측과 지능형 검색 1위가 엇갈리면, 두 목록을 합쳐
+    #   LLM 이 '질문의 주체·행위를 직접 규율하는 법'을 고릅니다(후보에 없으면 정식 이름을 직접 제시 → 실제로
+    #   있는 법인지 체계도로 확인). 고르면 지능형 1위 앞세우기·신뢰 낮음·'어느 법?' 되묻기를 건너뜁니다.
+    #   (L-1751-1 지방공무원 육아휴직 → 남녀고용평등법 1위·'어느 법?' / L-1751-3 외부강의 사례금 → 청탁금지법 누락)
+    law_pick = []
+    if (LAW_PICK and not user_laws and not asp_plan and not asp_same and req.target in ("auto", "law")
+            and (names or ai_laws)):
+        _gk = {_law_key(re.sub(r"\s*(시행령|시행규칙)$", "", n)) for n in names}
+        _tot0 = sum(ai_score.values()) or 1.0
+        _sh0 = ai_score.get(ai_laws[0], 0.0) / _tot0 if ai_laws else 0.0
+        # 둘이 같거나, 지능형 1위가 뚜렷하면(비중 LAW_ASK_SHARE 이상) 고르지 않습니다 — 예전 흐름이 맞던 경우.
+        #   (1차 실측: 주유소 누출검사 주기에 지능형 1위 토양환경보전법이 뚜렷한데 LLM 이 석유사업법을 골라 회귀)
+        if not (ai_laws and _law_key(ai_laws[0]) in _gk) and _sh0 < LAW_ASK_SHARE:
+            pool = []
+            for n in [re.sub(r"\s*(시행령|시행규칙)$", "", n).strip() for n in names[:3]]:
+                # AI 추측 법령은 **법제처에 실제로 있는 이름만** 후보로(없는 이름 '지하저장탱크 누출검사 등에 관한 법률' 이 뽑힘)
+                rows = _stmd_rows(n) if n else []
+                row = _pick_stmd(rows, n) if rows else None
+                if row is not None and _law_key(law_client.row_name("lsStmd", row)) == _law_key(n) \
+                        and not any(_law_key(n) == _law_key(x) for x in pool):
+                    pool.append(n)
+            for n in [b for b in ai_laws[:5]
+                      if ai_score.get(b, 0) >= 0.15 and not re.search(r"(직제|고시|훈령|예규|지침)$", b)]:
+                if n and not any(_law_key(n) == _law_key(x) for x in pool):
+                    pool.append(n)
+            if pool:
+                picks, other, subj = ai_client.pick_main_laws(req.question + (f"\n(확인된 조건: {answered})"
+                                                                               if answered else ""), pool)
+                if other and not any(_law_key(other) == _law_key(x) for x in pool + picks):
+                    rows = _stmd_rows(other)
+                    row = _pick_stmd(rows, other) if rows else None
+                    if row is not None and _law_key(law_client.row_name("lsStmd", row)) == _law_key(other):
+                        picks = picks + [law_client.row_name("lsStmd", row)]
+                    else:
+                        steps.append({"name": "주 법령 선택", "detail": f"LLM 이 제시한 '{other}' 은(는) 법제처에 없어 버림"})
+                law_pick = picks[:3]
+                if law_pick:
+                    steps.append({"name": "주 법령 선택(LLM)",
+                                  "detail": f"{subj} → {', '.join(law_pick)} (후보: {', '.join(pool)})"})
+
     weak_ai = False
-    if ai_laws and names and not user_laws and not asp_plan and not asp_same and req.target in ("auto", "law"):
+    if ai_laws and names and not user_laws and not asp_plan and not asp_same and not law_pick \
+            and req.target in ("auto", "law"):
         _tot = sum(ai_score.values()) or 1.0
         _share = ai_score.get(ai_laws[0], 0.0) / _tot
         _ai5 = {_law_key(x) for x in ai_laws[:5]}
@@ -2060,7 +2119,7 @@ def _ask_sync(req: AskRequest, progress: list):
 
     # ★ v1.33 — 법령이 애매하면 첫 라운드에 "어느 법" 인지 묻습니다(조문 수집 전에 — 헛수집을 줄임).
     if (not user_laws and req.round == 0 and not req.skip_clarify and not weak_ai and not asp_plan
-            and not asp_same and req.target in ("auto", "law")):
+            and not asp_same and not law_pick and req.target in ("auto", "law")):
         tot = sum(ai_score.values()) or 1.0
         share = ai_score.get(ai_laws[0], 0.0) / tot if ai_laws else 0.0
         guess_keys = {_law_key(re.sub(r"\s*(시행령|시행규칙)$", "", n)) for n in names}
@@ -2313,16 +2372,17 @@ def _ask_sync(req: AskRequest, progress: list):
 
         # ★ v1.31 — 지능형 검색 1순위 법령을 후보 맨 앞에 둡니다. 로컬 LLM 의 추측은
         #   (체계도에 실제로 있으면) 2순위로 남겨 둡니다 — 둘 다 수집하고 조문 선별이 고릅니다.
-        if (asp_plan or asp_same) and not user_resolved:
+        if (asp_plan or asp_same or law_pick) and not user_resolved:
             # v1.38 — 측면별 법을 앞에(측면 순서대로), 그다음 측면별 예비 법, 그다음 기존 후보
-            #   v1.38e — 측면이 모두 같은 법이면 그 법을 맨 앞에
+            #   v1.38e — 측면이 모두 같은 법이면 그 법을 맨 앞에 / v1.40 — LLM 이 고른 주 법령을 맨 앞에
             prim = []
-            for x in ([asp_same] if asp_same else []) + [p["law"] for p in asp_plan] \
+            for x in list(law_pick) + ([asp_same] if asp_same else []) + [p["law"] for p in asp_plan] \
                     + [p["backup"] for p in asp_plan if p["backup"]] + cand:
                 if x and not any(_law_key(x) == _law_key(y) for y in prim):
                     prim.append(x)
             cand = prim
-        if ai_laws and not (user_resolved and only_mode) and not weak_ai and not asp_plan and not asp_same:
+        if ai_laws and not (user_resolved and only_mode) and not weak_ai and not asp_plan and not asp_same \
+                and not law_pick:
             top = ai_laws[0]
             if not any(_law_key(top) == _law_key(c) for c in cand):
                 steps.append({"name": "법령 후보 보정(지능형 검색)",
@@ -2614,7 +2674,26 @@ def _ask_after_search(req, steps, answered, found, flat, catalog, refs, it=None,
             n_sel = ai_client.count_tokens(ai_client.select_prompt(q_sel, catalog))
             lim = ai_client.server_ctx() - ai_client.MAXTOK_SELECT - 64
             if n_sel > lim:
-                lines = catalog.splitlines()
+                # ★ v1.40 — 넘치면 먼저 **법령명을 묶음 머리에 한 번만** 적는 짧은 목록으로 바꿉니다.
+                #   줄마다 "[남녀고용평등과 일ㆍ가정 양립 지원에 관한 법률 시행규칙]" 을 되풀이해 토큰의 절반 가까이를
+                #   썼고, 목록 뒤를 잘라 마지막 법령과 별표(기준표가 대개 맨 끝)가 통째로 선별에서 빠졌습니다(U-21).
+                #   번호는 그대로라 선별 결과 매핑은 같습니다.
+                out_l, prev_nm = ["(법령명은 묶음 첫 줄 [ ] 에 한 번만 적었다. 그 아래 번호들은 그 법령의 조문이다)"], None
+                for i, (f, a_) in enumerate(flat):
+                    if f["name"] != prev_nm:
+                        out_l.append(f"[{f['name']}]")
+                        prev_nm = f["name"]
+                    out_l.append(f"{i + 1}. {label_of(a_)}")
+                compact = "\n".join(out_l)
+                n_c = ai_client.count_tokens(ai_client.select_prompt(q_sel, compact))
+                steps.append({"name": "조문 목록 압축",
+                              "detail": f"선별 입력 {n_sel:,}토큰 > 한도 {lim:,} — 법령명 묶음 표기로 {n_c:,}토큰"})
+                catalog_for_cut, n_sel = compact, n_c
+                cat_sel = compact
+            else:
+                catalog_for_cut = catalog
+            if n_sel > lim:
+                lines = catalog_for_cut.splitlines()
                 keep_n = max(20, int(len(lines) * lim / n_sel * 0.95))
                 cat_sel = "\n".join(lines[:keep_n])
                 steps.append({"name": "조문 목록 축소",
@@ -3108,6 +3187,35 @@ def _ask_after_search(req, steps, answered, found, flat, catalog, refs, it=None,
         _hint += _history_block(req.question + " " + (answered or ""), use, prio, bp_kw, steps)
     except Exception as e:                                # noqa: BLE001 — 보조 정보. 실패해도 답은 냅니다
         applog.warn(f"개정 이력 비교 실패 — 건너뜁니다: {e}")
+    # ★ v1.40 — 참고 해석례를 답변 **앞에** 골라 답변 지시에 함께 넣습니다(U-24).
+    #   조문에 명시가 없고 부처 해석으로만 결론이 나는 질문(폐업 안 된 음식점 자리 새 영업신고 → 식약처
+    #   '중복 신고 불가')에서 조문만 보고 반대로 답했습니다. 같은 쟁점이라고 LLM 이 고른 것만(대개 0~2건) 넣습니다.
+    _pre_cases = None
+    if RELATED_CASES and CASE_IN_ANSWER:
+        try:
+            _tw0 = next((s_.get("detail", {}).get("용어", []) for s_ in steps
+                         if s_.get("name") == "검색어 변환" and isinstance(s_.get("detail"), dict)), [])
+            _pre_cases = _case_finalize(req.question + (f"\n(확인된 조건: {answered})" if answered else ""),
+                                        _case_candidates(req.question, _tw0, found))
+            _ci = _pre_cases.get("items") or []
+            if _ci:
+                # 본문(질의요지·회답)을 보고 같은 쟁점인 것만 답변에 넣습니다(화면 표시는 그대로)
+                _keep = ai_client.confirm_cases(req.question, _ci)
+                _n0 = len(_ci)
+                _ci = [_ci[k] for k in _keep]
+                # 화면의 참고 사례도 본문 대조를 통과한 것만 보여 줍니다(U-18: 쟁점이 다른 사례가 섞임)
+                _pre_cases = {"items": _ci, "detail": (_pre_cases.get("detail", "") +
+                                                       f" → 본문 대조 {_n0}건 중 {len(_ci)}건")}
+                steps.append({"name": "참고 해석례 확인", "detail": f"본문 대조 — {_n0}건 중 {len(_ci)}건 같은 쟁점"})
+            if _ci:
+                _hint += ("\n\n[참고 해석례 — 서버가 법제처에서 가져온 실제 법령해석·부처 해석·판례다. "
+                          "근거 조문은 [조문 원문]에서 들되, 같은 쟁점에 결론을 낸 해석이 있으면 그 결론과 어긋나게 답하지 말고 "
+                          "\"(참고: 기관 해석 날짜)\" 처럼 밝힌다. 질문과 사실관계가 다르면 쓰지 않는다]\n"
+                          + "\n".join(f"{k + 1}) [{c['kind']}] {c['title'][:90]} ({c.get('org', '')} {c.get('date', '')})\n"
+                                      f"   질의: {c['q'][:220]}\n   회답: {c['a'][:480]}" for k, c in enumerate(_ci[:2])))
+        except Exception as e:                            # noqa: BLE001 — 참고 정보. 실패해도 답은 냅니다
+            applog.warn(f"참고 해석례(답변 전) 실패 — 건너뜁니다: {e}")
+            _pre_cases = None
     q_for_answer = req.question + (f"\n(확인된 조건: {answered})" if answered else "") + _hint
     ctx_n = ai_client.server_ctx()
     overhead = ai_client.count_tokens(
@@ -3124,7 +3232,9 @@ def _ask_after_search(req, steps, answered, found, flat, catalog, refs, it=None,
         shrunk = 0
         for j, u in enumerate(keep):
             if _is_bp(u) and len(u[2]) > 1800:
-                keep[j] = (u[0], u[1], _fit_keep_notes(u[2], 1800))
+                # v1.40 — 앞부분이 아니라 **질문 낱말이 든 줄 주변**을 남깁니다(비고 유지).
+                #   표 앞 1,800자만 남기면 질문에 해당하는 줄(별표 13 성토, 별표 28 정지·취소 수치)이 잘렸습니다.
+                keep[j] = (u[0], u[1], _fit_keep_notes(u[2], 1800, bp_kw or None))
                 shrunk += 1
         if shrunk:
             before_tok = n_tok
@@ -3172,7 +3282,7 @@ def _ask_after_search(req, steps, answered, found, flat, catalog, refs, it=None,
 
     # ★ v1.36 — 참고 사례(해석례·판례)는 답변을 만드는 동안 다른 스레드에서 찾습니다.
     _cases_fut = None
-    if RELATED_CASES:
+    if RELATED_CASES and _pre_cases is None:
         try:
             from concurrent.futures import ThreadPoolExecutor
             _cases_ex = ThreadPoolExecutor(max_workers=1)
@@ -3193,6 +3303,32 @@ def _ask_after_search(req, steps, answered, found, flat, catalog, refs, it=None,
         pre = text[:text.index("【결론】")]
         if pre.strip() and re.search(r"제공된\s*(\[?조문|원문)", pre):
             text = text[text.index("【결론】"):]
+
+    # ★ v1.40 — 답변 검토: 다 쓴 답변을 LLM 이 원문·질문과 대조해 오류(원문불일치·단서누락·전제위반·결론모순)를
+    #   찾고, 근거 글자가 실제로 있는 지적만 남겨 한 번 다시 씁니다. (U-20·22·23, L-2244-1·3 등)
+    if ANSWER_REVIEW and len(text) > 80:
+        try:
+            probs = ai_client.review_answer(q_for_answer, text, context)
+            if probs:
+                text2 = ai_client.answer_revised(q_for_answer, context, probs)
+                if _neg and "【결론】" in text2:
+                    pre2 = text2[:text2.index("【결론】")]
+                    if pre2.strip() and re.search(r"제공된\s*(\[?조문|원문)", pre2):
+                        text2 = text2[text2.index("【결론】"):]
+                # 다시 쓴 답이 근거를 잃으면(1차 실측: 일요일 소음 — 표기 지적 하나로 다시 써 인용 0건) 처음 답을 씁니다
+                _c1 = sum(1 for c in verify_citations(text, found) if c["ok"])
+                _c2 = sum(1 for c in verify_citations(text2, found) if c["ok"])
+                if "【결론】" in text2 and len(text2) > 80 and "【근거】" in text2 and _c2 >= max(1, _c1 // 2):
+                    text = text2
+                else:
+                    probs = [dict(p, kind=p["kind"] + "(다시 쓴 답 버림)") for p in probs]
+                steps.append({"name": "답변 검토",
+                              "detail": f"오류 {len(probs)}건 → 고쳐 다시 씀: "
+                                        + " / ".join(f"[{p['kind']}] {p['fix'][:60]}" for p in probs)})
+            else:
+                steps.append({"name": "답변 검토", "detail": "문제 없음"})
+        except ai_client.AiError as e:
+            applog.warn(f"답변 검토 실패 — 처음 답변을 씁니다: {e}")
 
     cites = verify_citations(text, found)
     steps.append({"name": "인용 검증", "detail": f"{sum(1 for c in cites if c['ok'])}/{len(cites)}건 확인"})
@@ -3233,7 +3369,11 @@ def _ask_after_search(req, steps, answered, found, flat, catalog, refs, it=None,
     hit = sorted({(c["law"], c["jo"], c["gaji"]) for c in cites if c["ok"]})
 
     cases = []
-    if _cases_fut is not None:
+    if _pre_cases is not None:
+        cases = _pre_cases.get("items") or []
+        steps.append({"name": "참고 사례", "detail": _pre_cases.get("detail", "") + " · 답변에 참고로 넣음"
+                      if cases else _pre_cases.get("detail", "")})
+    elif _cases_fut is not None:
         try:
             rc = _case_finalize(req.question, _cases_fut.result(timeout=20))
             cases = rc.get("items") or []
