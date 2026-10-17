@@ -2406,8 +2406,14 @@ def _ask_sync(req: AskRequest, progress: list):
             ai2 = [b for b in ai_laws[1:3]
                    if ai_score.get(b, 0) >= 0.2 and not re.search(r"(직제|고시|훈령|예규|규정)$", b)
                    and not any(_law_key(b) == _law_key(c) for c in [top] + corr)]
-            cand = [top] + corr + ai2[:1] + [c for c in others
-                                              if not any(_law_key(c) == _law_key(x) for x in ai2[:1])]
+            # ★ v1.40 — AI 가 이름을 댄 법(검색어 변환 법령명)은 지능형 2위보다 앞에 둡니다. 지능형 1위가 뚜렷해도
+            #   질문의 주 법령이 따로 있는 경우(소비기한 지난 원재료 → AI 추측 식품위생법, 지능형 1위 위생용품 관리법)
+            #   식품위생법이 후보 3위로 밀려 조문을 못 받았습니다(L-1016-1). 본문검색 복구로 올라온 이름은 해당 없음.
+            _nk = {_law_key(re.sub(r"\s*(시행령|시행규칙)$", "", n)) for n in names}
+            named_o = [c for c in others if _law_key(c) in _nk]
+            others = [c for c in others if c not in named_o]
+            cand = [top] + corr + named_o[:1] + ai2[:1] + [c for c in named_o[1:] + others
+                                                            if not any(_law_key(c) == _law_key(x) for x in ai2[:1])]
 
         # ★ v1.40 — LLM 이 고른 주 법령 중 후보에 없는 것 하나를 **2순위로 더합니다**(순서·되묻기는 예전 그대로).
         #   1차 시험에서 LLM 선택을 맨 앞에 두고 '어느 법?' 되묻기까지 건너뛰게 했더니, 주유소 누출검사에
@@ -2551,13 +2557,18 @@ def _ask_sync(req: AskRequest, progress: list):
     # --- 3단계: 조문 수집 ---------------------------------------
     refs = {}
     # v1.37 — 여러 측면을 묻는 질문은 조문을 받을 법령 수를 늘립니다(다른 질문은 그대로 7개).
-    _fetch = found
+    # ★ v1.40 — 질문 쪼개기가 없어도 **법령(법률·시행령·시행규칙)을 위임 행정규칙보다 먼저** 받습니다.
+    #   첫 후보의 위임 행정규칙 4개가 조문 수집 칸(앞 7개)을 채워 둘째 후보 법률(외부강의 → 청탁금지법)이
+    #   본문을 아예 못 받던 문제(L-1751-3). 안정 정렬이라 후보 순서는 유지됩니다.
+    _fetch = sorted(found, key=lambda f: (0 if f.get("level") in ("법률", "시행령", "시행규칙") else 1))
     if asp_plan:
         # 여러 측면 질문은 후보 법률들의 본문을 먼저 받습니다(위임 행정규칙이 칸을 다 채우지 않게). 안정 정렬이라 주 법령 순서는 유지.
         _fetch = sorted(found, key=lambda f: (0 if f.get("level") == "법률" else
                                               1 if f.get("level") in ("시행령", "시행규칙") else 2))
-    _fetched = {id(x) for x in _fetch[:FETCH_MAX_LAWS + (3 if asp_plan else 0)]}
-    for f in _fetch[:FETCH_MAX_LAWS + (3 if asp_plan else 0)]:
+    # 법령을 앞으로 당긴 만큼 위임 행정규칙(고시 등)이 밀리므로 칸을 2개 더 둡니다.
+    _nfetch = FETCH_MAX_LAWS + 2 + (3 if asp_plan else 0)
+    _fetched = {id(x) for x in _fetch[:_nfetch]}
+    for f in _fetch[:_nfetch]:
         try:
             detail = law_client.get_detail(f["target"], f["id"])
         except law_client.LawApiError:
@@ -2701,6 +2712,12 @@ def _ask_after_search(req, steps, answered, found, flat, catalog, refs, it=None,
                     out_l.append(f"{i + 1}. {label_of(a_)}")
                 compact = "\n".join(out_l)
                 n_c = ai_client.count_tokens(ai_client.select_prompt(q_sel, compact))
+                if n_c > lim:
+                    # 그래도 넘치면 서식(별지)을 뺍니다 — 수백 개라 목록을 다 먹고, 답의 근거가 되는 일이 드뭅니다.
+                    #   (음주운전: 도로교통법 시행규칙 별지 100여 개 때문에 뒤쪽 별표 28 이 잘림 — L-1016-2)
+                    compact = "\n".join(ln for ln in out_l
+                                         if not re.match(r"^\d+\.\s*\[(별지|서식)", ln))
+                    n_c = ai_client.count_tokens(ai_client.select_prompt(q_sel, compact))
                 steps.append({"name": "조문 목록 압축",
                               "detail": f"선별 입력 {n_sel:,}토큰 > 한도 {lim:,} — 법령명 묶음 표기로 {n_c:,}토큰"})
                 catalog_for_cut, n_sel = compact, n_c
