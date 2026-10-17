@@ -1299,7 +1299,8 @@ def _ctx_key(f: dict, a: dict) -> str:
 # "변경되지 않았다" 고 답함. 질문이 개정·변경을 물으면 법제처 연혁에서 그 개정 **직전 버전** 본문을 받아
 # 지금 컨텍스트의 같은 조문·별표와 줄 단위로 비교해 [개정 이력] 블록으로 붙입니다.
 HISTORY_COMPARE = os.getenv("HISTORY_COMPARE", "1") != "0"
-_CHANGE_RE = re.compile(r"(바뀌|바꼈|바뀐|변경|개정|달라졌|달라진|신구|전후|예전에는|이전에는|원래는|몇에서\s*몇|올랐|내렸|완화|강화)")
+# v1.40 (C-20261017-10) — '변경신고·변경허가' 처럼 개정과 무관한 '변경' 은 빼고 봅니다
+_CHANGE_RE = re.compile(r"(바뀌|바꼈|바뀐|변경(?!\s*(신고|허가|등록|승인|사항|계약|하려|하면|할\s))|개정|달라졌|달라진|신구|전후|예전에는|이전에는|원래는|몇에서\s*몇|올랐|내렸|완화|강화)")
 _QDATE_RE = re.compile(r"(\d{4})\s*[년.\-/]\s*(\d{1,2})\s*[월.\-/]\s*(\d{1,2})")
 _HIST_CACHE: dict = {}
 
@@ -1351,16 +1352,19 @@ def _diff_lines(old: str, new: str, keywords, limit: int = 12):
     return _rank(gone), _rank(came)
 
 
-def _history_block(question: str, use: list, prio: dict, keywords, steps: list) -> str:
+def _history_block(question: str, use: list, prio: dict, keywords, steps: list, answered: str = "") -> str:
     """
     질문이 개정·변경을 물으면 [개정 이력] 텍스트를, 아니면 "" 를 돌려줍니다. 실패해도 조회는 계속합니다.
       · 질문에 날짜가 있으면 그날 공포·시행된 개정과 그 직전 버전을 비교합니다.
-      · 날짜가 없으면 현행에서 한 버전씩 거슬러 올라가며(최대 8개) 지금 근거로 쓰는 조문·별표가
+      · 날짜가 없으면 현행에서 한 버전씩 거슬러 올라가며(최대 6개) 지금 근거로 쓰는 조문·별표가
         **처음으로 달라지는 버전**을 찾습니다. 그 바로 다음 개정이 바꾼 것입니다.
     """
+    # v1.40 (C-20261017-10) — 개정을 묻는지는 **질문 원문**으로만 판단합니다(되묻기 질문 문장의 '변경·강화' 에 걸리던 문제).
+    #   날짜는 질문에 없으면 되묻기 **답** 쪽에서만 찾습니다(되묻기 질문 문장·설치일 같은 다른 날짜 제외는 어렵지만, 질문이 개정을 물을 때만 씀).
     if not HISTORY_COMPARE or not _CHANGE_RE.search(question or ""):
         return ""
-    qd = _QDATE_RE.search(question or "")
+    _ans_only = " ".join(re.split(r"[:：]", seg, 1)[1] for seg in (answered or "").split(" / ") if re.search(r"[:：]", seg))
+    qd = _QDATE_RE.search(question or "") or _QDATE_RE.search(_ans_only)
     want_date = f"{qd.group(1)}{int(qd.group(2)):02d}{int(qd.group(3)):02d}" if qd else ""
     ordered = sorted(use, key=lambda u: prio.get(id(u[1]), 999.0))
     laws = []
@@ -1446,6 +1450,13 @@ def _history_block(question: str, use: list, prio: dict, keywords, steps: list) 
                     found_change = (nm, h, hist[i + 1], diffs)
                     break
         else:
+            # v1.40 (C-20261017-11) — 앞쪽 과거 버전 3개는 본문을 동시에 받아 둡니다(순차 호출 대기 줄임, 캐시에 남음)
+            try:
+                from concurrent.futures import ThreadPoolExecutor
+                with ThreadPoolExecutor(max_workers=3) as _ex:
+                    list(_ex.map(_old, hist[1:min(len(hist), 4)]))
+            except Exception:                    # noqa: BLE001 — 미리 받기 실패는 아래 순차 호출이 다시 시도
+                pass
             for j in range(1, min(len(hist), 7)):
                 diffs = _compare(nm, _old(hist[j]))
                 checked.append(f"{nm} 시행 {_d(hist[j]['ef'])}")
@@ -1489,9 +1500,9 @@ _NEG_RE = re.compile(r"([가-힣A-Za-z0-9·ㆍ]{4,30}?)\s*(?:이|가)\s*아(?:�
 
 
 # ── v1.36 — 참고 사례(법령해석례·중앙부처 해석·판례) ─────────────────────────
-# 답변 아래에 "비슷한 질의·판결" 을 참고로 보여 줍니다. **LLM 에는 넣지 않습니다**(답변 품질·토큰 예산 영향 없음).
-# 답변 생성과 동시에 다른 스레드에서 찾으므로 응답 시간도 거의 늘지 않습니다.
-# 제목 검색 → 질문 핵심 낱말이 제목에 몇 개 들어 있는지로 점수 → 2개 이상 겹치는 것만, 최대 3건.
+# 답변 아래에 "비슷한 질의·판결" 을 참고로 보여 줍니다.
+# v1.38 — 제목 검색으로 후보를 넓게 모으고 LLM 이 같은 쟁점만 고름(최대 3건).
+# v1.40 — 답변 **전에** 고르고 본문(질의요지·회답)으로 한 번 더 확인한 것만 답변 지시에 참고로 넣음(CASE_IN_ANSWER).
 RELATED_CASES = os.getenv("RELATED_CASES", "1") != "0"
 # v1.38 — 참고 사례 후보 중 LLM 에 보일 개수
 CASE_LLM_POOL = int(os.getenv("CASE_LLM_POOL", "10"))
@@ -1547,7 +1558,6 @@ def _case_candidates(question: str, terms_words: list, found: list) -> list:
     jobs = [(t, q) for t in targets for q in queries]
     with ThreadPoolExecutor(max_workers=6) as ex:
         res = list(ex.map(lambda tq: (tq[0], _case_search_cached(*tq)), jobs))
-    qset = [q for q in queries]
     qfr = {w[i:i + 2] for w in re.findall(r"[가-힣]{2,}", str(question or "")) for i in range(len(w) - 1)}
     seen, cands = set(), []
     for t, rows in res:
@@ -1559,7 +1569,7 @@ def _case_candidates(question: str, terms_words: list, found: list) -> list:
             seen.add(tk)
             title = re.sub(r"\s+", "", r["title"])
             # 넓게 거른 뒤(용어가 제목에 있거나 질문과 겹치는 조각이 여럿) 상위 몇 건만 LLM 에 보입니다
-            sc = 2 * sum(1 for q in qset if q in title) + 0.2 * sum(1 for fr in qfr if fr in title)
+            sc = 2 * sum(1 for q in queries if q in title) + 0.2 * sum(1 for fr in qfr if fr in title)
             if sc >= 1:
                 cands.append({**r, "score": sc})
     cands.sort(key=lambda c: (-c["score"], -int(re.sub(r"\D", "", c.get("date") or "0")[:8] or 0)))
@@ -1576,8 +1586,14 @@ def _case_finalize(question: str, cands: list) -> dict:
     picked = [cands[i] for i in picks if 0 <= i < len(cands)][:3]
     if not picked:
         return {"items": [], "detail": f"후보 {len(cands)}건 — 같은 쟁점 없음(LLM 판단)"}
+    def _detail(c):
+        # v1.40 (C-20261017-12) — 한 건이 실패해도 나머지 사례는 보여 줍니다
+        try:
+            return law_client.case_detail(c["target"], c["id"])
+        except Exception:                               # noqa: BLE001
+            return {}
     with ThreadPoolExecutor(max_workers=3) as ex:
-        details = list(ex.map(lambda c: law_client.case_detail(c["target"], c["id"]), picked))
+        details = list(ex.map(_detail, picked))
     items = []
     for c, d in zip(picked, details):
         t = c["target"]
@@ -1706,7 +1722,7 @@ def _ask_article(req, steps, it):
     rid = law_client.row_id(LAW_T, row)
     try:
         detail = law_client.get_detail(LAW_T, rid)
-    except law_client.LawApiError as e:
+    except Exception as e:                              # noqa: BLE001 — v1.40 (C-20261017-15) 시간초과 등도 일반 경로로
         steps.append({"name": "조문 조회 실패", "detail": str(e)[:120]})
         return None
 
@@ -1759,7 +1775,7 @@ def _ask_article(req, steps, it):
     steps.append({"name": "인용 검증", "detail": f"{sum(1 for c in cites if c['ok'])}/{len(cites)}건 확인"})
     hitk = sorted({(c["law"], c["jo"], c["gaji"]) for c in cites if c["ok"]})
     return {
-        "steps": steps, "answer": text, "laws": [f], "citations": cites,
+        "steps": steps, "answer": text, "laws": [f], "citations": cites, "cases": [],
         "cited_keys": [f"{n}|{j}|{g}" for n, j, g in hitk],
         "references": [], "warnings": [],
         "intent": it.as_dict(),
@@ -1921,11 +1937,18 @@ def _ask_sync(req: AskRequest, progress: list):
         tries = [(req.question, 0.0), (req.question, 1.0), (req.question, 3.0)]
         if words:
             tries.append((" ".join(words[:3]), 0.0))
+        # v1.40 (C-20261017-16) — 오류 없이 **빈 결과**가 두 번 오면 같은 질문을 또 부르지 않고 용어 검색으로 넘어갑니다
+        #   (범위 밖 질문에서 4번 호출 + 4초 대기). 연결 오류일 때만 3차 재시도.
+        n_empty = 0
         for attempt, (aq, wait) in enumerate(tries, 1):
+            if aq == req.question and n_empty >= 2:
+                continue
             if wait:
                 time.sleep(wait)
             try:
                 ai_rows = law_client.ai_search(aq, display=20)
+                if not ai_rows:
+                    n_empty += 1
             except Exception as e:                          # noqa: BLE001
                 ai_rows = []
                 applog.warn(f"지능형 검색 실패({attempt}차): {e}")
@@ -1988,24 +2011,25 @@ def _ask_sync(req: AskRequest, progress: list):
         # ★ v1.38c (U-19) — 측면마다 후보 법(LLM 추측 + 측면 검색 상위 3)을 모으고, 어느 법이 그 측면에 가장 직접
         #   적용되는지는 LLM 이 한 번에 고릅니다. (추측만: 형사→형법·조문 0개 / 검색 1위만: 아동ㆍ청소년성보호법)
         parsed = []
+        # v1.38d — 질문 전체의 주 법령 후보(검색어 변환 법령명·질문 원문 지능형 상위)도 넣어, 측면 추측이 엉뚱할 때
+        #   (예: 어린이공원 CCTV '녹음' 측면 → 초·중등교육법) 주 법령을 고를 수 있게 합니다.
+        # v1.40 — 원문 지능형 상위 3개까지(외부강의 사례금: 청탁금지법이 원문 지능형 3위 — L-1751-3).
+        #   (C-20261017-14) 측면마다 같은 값이라 루프 밖에서 한 번만 계산합니다.
+        whole = [re.sub(r"\s*(시행령|시행규칙)$", "", n).strip() for n in names[:2]] + [
+            b for b in ai_laws[:3] if ai_score.get(b, 0) >= 0.15 and not re.search(r"(직제|고시|훈령|예규)$", b)]
         for a, rows in zip(aspects, asp_rows):
-            sc, first, hits = {}, {}, []
+            a_sc, a_first, hits = {}, {}, []
             for i, r in enumerate(rows):
                 nm = (r.get("법령명") or "").strip()
                 b = re.sub(r"\s*(시행령|시행규칙)$", "", nm).strip()
                 if b:
-                    sc[b] = sc.get(b, 0.0) + 1.0 / (1 + i)
-                    first.setdefault(b, i)
+                    a_sc[b] = a_sc.get(b, 0.0) + 1.0 / (1 + i)
+                    a_first.setdefault(b, i)
                 if nm and r.get("조문번호"):
                     hits.append((nm, r.get("조문번호", ""), r.get("조문가지번호", "")))
-            ranked = sorted(sc, key=lambda b: (-sc[b], first[b]))
+            ranked = sorted(a_sc, key=lambda b: (-a_sc[b], a_first[b]))
             guess = re.sub(r"\s*(시행령|시행규칙)$", "", a.get("law", "")).strip()
             cands = []
-            # v1.38d — 질문 전체의 주 법령 후보(검색어 변환 법령명·질문 원문 지능형 1위)도 넣어, 측면 추측이 엉뚱할 때
-            #   (예: 어린이공원 CCTV '녹음' 측면 → 초·중등교육법) 주 법령을 고를 수 있게 합니다.
-            # v1.40 — 원문 지능형 상위 3개까지(외부강의 사례금: 청탁금지법이 원문 지능형 3위 — L-1751-3)
-            whole = [re.sub(r"\s*(시행령|시행규칙)$", "", n).strip() for n in names[:2]] + [
-                b for b in ai_laws[:3] if ai_score.get(b, 0) >= 0.15 and not re.search(r"(직제|고시|훈령|예규)$", b)]
             for c in ([guess] if guess else []) + ranked[:3] + whole:
                 if c and not any(_law_key(c) == _law_key(x) for x in cands):
                     cands.append(c)
@@ -2033,7 +2057,9 @@ def _ask_sync(req: AskRequest, progress: list):
                                                                     r.get("법령명", ""))) == _law_key(p["law"])][:3]
         # 측면들이 모두 같은 법이면 쪼갤 필요가 없습니다(한 법 안의 여러 사항 — 기존 흐름이 더 낫다)
         if len({_law_key(p["law"]) for p in asp_plan}) < 2:
-            if asp_plan:
+            # v1.40 (C-20261017-13) — '모두 같은 법' 은 측면 **2개 이상**이 같은 법을 골랐을 때만 강한 신호로 봅니다.
+            #   측면 하나만 법이 정해지고 나머지가 비어 빠진 경우까지 주 법령으로 굳히지 않습니다.
+            if len(asp_plan) >= 2:
                 # ★ v1.38e — 쪼개지는 않지만, LLM 이 측면마다 같은 법을 고른 것은 강한 신호입니다.
                 #   이 법을 주 법령으로 앞에 두고, 측면 검색에서 잡힌 그 법의 조문을 지목 조문 앞에 둡니다.
                 #   (v1.38d 실측: 어린이공원 CCTV → 측면 둘 다 개인정보 보호법인데 쪼개기 생략 뒤 질문 원문
@@ -2060,8 +2086,6 @@ def _ask_sync(req: AskRequest, progress: list):
                     if k < len(p["hits"]) and p["hits"][k] not in inter:
                         inter.append(p["hits"][k])
             ai_hits = inter + [h for h in ai_hits if h not in inter]
-        else:
-            asp_plan = []
 
     # ★ v1.40 — 주 법령 고르기: 검색어 변환의 법령 추측과 지능형 검색 1위가 엇갈리면, 두 목록을 합쳐
     #   LLM 이 '질문의 주체·행위를 직접 규율하는 법'을 고릅니다(후보에 없으면 정식 이름을 직접 제시 → 실제로
@@ -3231,7 +3255,7 @@ def _ask_after_search(req, steps, answered, found, flat, catalog, refs, it=None,
                   + " — 【결론】과 【설명】에서 측면마다 근거 조문을 들어 나눠 답한다. 조문이 없는 측면은 그렇다고 밝힌다)")
     # ★ v1.35 — 개정·변경을 묻는 질문이면 직전 버전과 비교한 [개정 이력] 을 붙입니다.
     try:
-        _hint += _history_block(req.question + " " + (answered or ""), use, prio, bp_kw, steps)
+        _hint += _history_block(req.question, use, prio, bp_kw, steps, answered or "")
     except Exception as e:                                # noqa: BLE001 — 보조 정보. 실패해도 답은 냅니다
         applog.warn(f"개정 이력 비교 실패 — 건너뜁니다: {e}")
     # ★ v1.40 — 참고 해석례를 답변 **앞에** 골라 답변 지시에 함께 넣습니다(U-24).
