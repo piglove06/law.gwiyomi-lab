@@ -3152,6 +3152,21 @@ def _ask_after_search(req, steps, answered, found, flat, catalog, refs, it=None,
             applog.warn(f"되묻기 판단 실패 — 건너뜁니다: {e}")
             asks = []          # 판단 실패는 그냥 통과시킵니다
 
+        # ★ v1.40 — 법정 기한 자체를 묻는 질문("며칠 이내에 선임해야 하나요", "언제까지 청구할 수 있나요")에
+        #   사건 날짜(퇴직일·사무처리일)를 되묻지 않습니다. 날짜는 질문자가 **특정 날짜 계산**을 원할 때만 필요한데,
+        #   그런 질문에는 기준이 되는 날짜·경과 기간이 적혀 있거나 '다음 ○○는 언제' 처럼 묻습니다.
+        #   (되묻기 지시문에 같은 규칙을 넣었지만 로컬 모델이 계속 날짜를 물어 — L-2244-2·L-1751-2 — 코드로 거릅니다)
+        if asks and it.kind == intent_mod.DEADLINE:
+            _has_date = bool(re.search(r"\d{4}\s*[년.\-/]|\d+\s*(년|개월|달)\s*(전|째|됐|되었|지났|경과)|다음\s*\S{0,6}(언제|검사|점검)",
+                                       req.question + " " + (answered or "")))
+            if not _has_date:
+                _dq = [a for a in asks if re.search(r"(날짜|언제입니까|언제였|며칠입니까|일자)", a["question"])
+                       or any("날짜 입력" in str(o) for o in a.get("options", []))]
+                if _dq:
+                    asks = [a for a in asks if a not in _dq]
+                    steps.append({"name": "날짜 되묻기 생략",
+                                  "detail": "법정 기한을 묻는 질문이라 사건 날짜는 묻지 않음: "
+                                            + " / ".join(a["question"][:30] for a in _dq)})
         if asks:
             # 이미 물은 질문(모름으로 답한 것 포함)과 겹치면 버립니다.
             # 프롬프트 지시를 로컬 모델이 무시해도 여기서 최종적으로 막힙니다.
