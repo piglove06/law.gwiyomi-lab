@@ -1223,12 +1223,13 @@ REVIEW_SCHEMA = {
     "required": ["claims", "premise", "premise_fix", "contradiction", "contradiction_fix"],
 }
 MAXTOK_REVIEW = int(os.getenv("MAXTOK_REVIEW", "800"))
+REVIEW_STATS = {"claims": 0, "dropped": 0}      # 마지막 검토의 주장 수·근거 못 찾아 버린 지적 수(처리 과정 표시용)
 
 
 def _qnorm(t: str) -> str:
-    """근거 글자 대조용 — 띄어쓰기·강조 표시·가운뎃점·괄호 차이는 무시합니다."""
-    t = re.sub(r"\*\*|__|!!", "", str(t or ""))
-    return re.sub(r"[\s「」『』\[\]()·ㆍ,.\"'“”‘’…]+", "", t)
+    """근거 글자 대조용 — 한글·영문·숫자만 남깁니다. 띄어쓰기·강조 표시·가운뎃점·괄호, 그리고 별표 표의
+    칸 구분선(│┃━─)·단위 기호(㏈) 차이는 무시합니다(표 줄을 복사한 근거가 칸 구분선 때문에 버려지던 문제)."""
+    return re.sub(r"[^가-힣A-Za-z0-9]+", "", str(t or ""))
 
 
 def review_answer(question: str, answer_text: str, context: str) -> list:
@@ -1242,6 +1243,8 @@ def review_answer(question: str, answer_text: str, context: str) -> list:
         return []
     nq, na, nc = _qnorm(question), _qnorm(answer_text), _qnorm(context)
     out = []
+    REVIEW_STATS["claims"] = len(obj.get("claims") or [])
+    REVIEW_STATS["dropped"] = 0
     for c in obj.get("claims") or []:
         if not isinstance(c, dict):
             continue
@@ -1252,6 +1255,7 @@ def review_answer(question: str, answer_text: str, context: str) -> list:
             if len(q) >= 4 and q in nc and fix:
                 out.append({"kind": "원문불일치", "quote": quote, "fix": f"{claim} → {fix}"})
             else:
+                REVIEW_STATS["dropped"] += 1
                 _dbg(f"[review] 원문 문구를 찾지 못해 버림: {claim[:50]} / {quote[:50]}")
         elif v == "원문없음" and fix and re.search(r"\d", claim):
             # 수치·기한 주장인데 원문에 근거가 없으면 지어낸 것일 가능성이 큼

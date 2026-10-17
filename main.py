@@ -3341,7 +3341,11 @@ def _ask_after_search(req, steps, answered, found, flat, catalog, refs, it=None,
                               "detail": f"오류 {len(probs)}건 → 고쳐 다시 씀: "
                                         + " / ".join(f"[{p['kind']}] {p['fix'][:60]}" for p in probs)})
             else:
-                steps.append({"name": "답변 검토", "detail": "문제 없음"})
+                _rs = ai_client.REVIEW_STATS
+                steps.append({"name": "답변 검토",
+                              "detail": f"문제 없음 (핵심 주장 {_rs.get('claims', 0)}개 대조"
+                                        + (f", 원문 근거를 못 찾은 지적 {_rs['dropped']}건 버림" if _rs.get("dropped") else "")
+                                        + ")"})
         except ai_client.AiError as e:
             applog.warn(f"답변 검토 실패 — 처음 답변을 씁니다: {e}")
 
