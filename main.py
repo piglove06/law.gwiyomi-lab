@@ -172,7 +172,8 @@ def _fit_keep_notes(text: str, limit: int, keywords=None) -> str:
                 win = set(range(max(0, i - 2), min(len(lines), i + 5))) - keep
                 cost = sum(len(lines[j]) + 1 for j in win)
                 if used0 + cost > limit * 0.65:
-                    break
+                    # v1.40 (C-20261016-2) — 큰 창 하나가 넘친다고 멈추지 않고, 뒤의 작은(겹쳐 싼) 창은 계속 봅니다
+                    continue
                 keep |= win
                 used0 += cost
             ni = next((i for i, ln in enumerate(lines) if _NOTES_HEAD.match(ln)), None)
@@ -460,11 +461,10 @@ def _guess_law(prefix: str, laws: list[dict], default: str) -> str:
     p = _norm(prefix)
     if not p:
         return default
-    # 이름이 긴 것부터 맞춰야 "시행령"이 "법률"에 먼저 걸리지 않습니다.
-    for law in sorted(laws, key=lambda x: -len(x.get("name", ""))):
-        nm = _norm(law.get("name", ""))
-        if nm and p.endswith(nm):
-            return law["name"]
+    # 이름이 긴 것부터 맞춰야 "시행령"이 "법률"에 먼저 걸리지 않습니다. (v1.40 C-20261017-3 — _named_law 재사용)
+    n = _named_law(prefix, laws)
+    if n:
+        return n
     # "시행령 제3조" 처럼 법령명 없이 단계만 쓴 경우
     # ★ 2026-08-19 — default(= 직전에 이름이 명시된 법령)가 이미 하위법령이면
     #   여기서 단계 이름을 **덧붙이기만** 해서 "…시행규칙시행령" 이라는 없는
@@ -757,9 +757,15 @@ def verify_calc(answer_text: str, user_text: str) -> list[str]:
         )
 
     # (2) 기준일이 사용자가 준 날짜인지
-    src = re.sub(r"[^\d]", "", user_text or "")
-    stamp = f"{by:04d}{bm:02d}{bd:02d}"
-    loose = f"{by:04d}"
+    # v1.40 (C-20261017-1) — 사용자 글의 숫자를 모두 이어 붙여 찾으면 "30,000리터 … 2020년" → "300002020" 처럼
+    #   서로 다른 숫자의 경계를 넘어 우연히 맞았습니다. 날짜는 날짜끼리, 연도는 낱말 경계가 있는 4자리끼리 비교합니다.
+    _udates = set()
+    for ds in _CALC_DATE_RE.findall(user_text or ""):
+        try:
+            _udates.add(tuple(int(x) for x in ds))
+        except ValueError:
+            pass
+    _uyears = {int(y) for y in re.findall(r"(?<!\d)((?:19|20)\d{2})(?!\d)", user_text or "")}
     # ★ 2026-10-02 — 기준일이 사용자가 준 날짜에서 계산된 날(설치일 + 10년)이면 정상입니다.
     derived = False
     for ds in _CALC_DATE_RE.findall(user_text or ""):
@@ -770,7 +776,7 @@ def verify_calc(answer_text: str, user_text: str) -> list[str]:
         if (by, bm, bd) in _reachable(*u):
             derived = True
             break
-    if stamp not in src and loose not in src and not derived:
+    if (by, bm, bd) not in _udates and by not in _uyears and not derived:
         out.append(
             f"답변이 기준일을 {by}년 {bm}월 {bd}일 로 잡았지만, "
             f"질문·조건 어디에도 그 날짜가 없습니다. AI 가 지어낸 날짜입니다. "
@@ -889,7 +895,6 @@ _CACHE_TTL = 600.0          # 초. 이보다 오래된 것은 버립니다.
 
 
 def _cache_get(key):
-    import time
     hit = _SEARCH_CACHE.get(key)
     if not hit:
         return None
@@ -900,10 +905,11 @@ def _cache_get(key):
 
 
 def _cache_put(key, value):
-    import time
     # 오래된 항목을 정리해 무한정 쌓이지 않게 합니다.
+    # v1.40 (C-20261017-7) — 여러 요청 스레드가 함께 쓰므로 순회 전에 복사합니다
+    #   (다른 스레드가 동시에 넣으면 'dictionary changed size during iteration').
     now = time.time()
-    for k in [k for k, v in _SEARCH_CACHE.items() if now - v[0] > _CACHE_TTL]:
+    for k in [k for k, v in list(_SEARCH_CACHE.items()) if now - v[0] > _CACHE_TTL]:
         _SEARCH_CACHE.pop(k, None)
     _SEARCH_CACHE[key] = (now, value)
 
@@ -923,6 +929,12 @@ def _excluded_terms(answered: str) -> list:
     """
     out = []
     for q, _ in _NO_ANSWER_RE.findall(answered or ""):
+        # v1.40 (C-20261017-6) — '…에 해당하나요/…인가요' 처럼 **대상·종류**를 묻는 질문만 주제 배제로 봅니다.
+        #   "허가를 받았나요?: 아니오", "신고를 했나요?: 아니오" 같은 사실 질문까지 '허가'·'신고' 를
+        #   검색 제외어로 뽑아 핵심어가 검색에서 빠질 수 있었습니다.
+        if not re.search(r"(에\s*해당하나요|에\s*해당합니까|에\s*해당되나요|인가요|입니까|맞나요|인지요)\s*\??\s*$",
+                         q.strip()):
+            continue
         # 질문에서 핵심 명사만 남깁니다.
         t = re.sub(r"(에\s*해당하나요|에\s*해당합니까|인가요|입니까|맞나요|있나요|"
                    r"하나요|받았나요|였나요)\s*\??$", "", q.strip())
@@ -1099,7 +1111,7 @@ def api_search(q: str, target: str = "law"):
                 "enforced": law_client.pick(r, "시행일자"),
                 "promulgated": law_client.pick(r, "공포일자"),
                 "promulgation_no": law_client.pick(r, "공포번호"),
-                "_raw": r,  # 태그 확인용. 확정되면 지우세요.
+                # v1.40 (C-20261017-9) — 태그 확인용 원본 행(_raw) 삭제: 화면에서 안 쓰고 응답만 커짐
             }
         )
     return {"count": len(items), "items": items}
@@ -1128,8 +1140,17 @@ def api_raw(request: Request, target: str, value: str, mode: str = "search"):
       예) /api/raw?target=licbyl&value=토양환경보전법 시행규칙&search=2
           /api/raw?target=licbyl&value=x&MST=281911
     """
+    # ★ v1.40 (C-20261017-8) — 이 PC 에서 직접 부른 요청만 받습니다(자동 테스트 --raw-file 용).
+    #   공개 주소(Cloudflare 터널)로 들어온 요청은 cloudflared 가 같은 PC 에서 넘겨주므로 접속 주소만으로는
+    #   구분이 안 돼, 터널이 붙이는 머리글(Cf-Connecting-Ip / X-Forwarded-For)이 있으면 막습니다.
+    #   누구나 이 서버를 통해 인증키(OC) 사용량으로 법제처를 부를 수 있던 문제. .env RAW_API_PUBLIC=1 이면 예전처럼 엽니다.
+    if os.getenv("RAW_API_PUBLIC", "0") != "1":
+        host = (request.client.host if request.client else "") or ""
+        fwd = request.headers.get("cf-connecting-ip") or request.headers.get("x-forwarded-for")
+        if fwd or host not in ("127.0.0.1", "::1", "localhost"):
+            return PlainTextResponse("이 주소는 서버 PC 에서만 쓸 수 있습니다.", status_code=403)
     extra = {k: v for k, v in request.query_params.items()
-             if k not in ("target", "value", "mode")}
+             if k not in ("target", "value", "mode", "OC", "oc", "type")}
     try:
         return law_client.dump_raw(target, value, mode, extra)
     except law_client.LawApiError as e:
