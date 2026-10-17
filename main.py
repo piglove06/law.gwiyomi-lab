@@ -1930,6 +1930,7 @@ def _ask_sync(req: AskRequest, progress: list):
     #   측면별 하위 질문으로 **지능형 검색을 따로** 돌려 측면마다 법령 1개와 그 법의 지목 조문을 고릅니다.
     #   (v1.37 의 '용어 일치 후보 보강'·'제목 조각 측면 보강' 규칙을 대체 — 낱말 목록·점수 기준 없이 검색 결과로 판단)
     asp_plan = []
+    asp_same = ""      # v1.38e — 측면별 LLM 선택이 모두 같은 법이면 그 법(질문 전체의 주 법령으로 씀)
     aspects = terms.get("측면") or []
     if len(aspects) >= 2 and not user_laws and req.target in ("auto", "law"):
         from concurrent.futures import ThreadPoolExecutor
@@ -1991,8 +1992,20 @@ def _ask_sync(req: AskRequest, progress: list):
         # 측면들이 모두 같은 법이면 쪼갤 필요가 없습니다(한 법 안의 여러 사항 — 기존 흐름이 더 낫다)
         if len({_law_key(p["law"]) for p in asp_plan}) < 2:
             if asp_plan:
+                # ★ v1.38e — 쪼개지는 않지만, LLM 이 측면마다 같은 법을 고른 것은 강한 신호입니다.
+                #   이 법을 주 법령으로 앞에 두고, 측면 검색에서 잡힌 그 법의 조문을 지목 조문 앞에 둡니다.
+                #   (v1.38d 실측: 어린이공원 CCTV → 측면 둘 다 개인정보 보호법인데 쪼개기 생략 뒤 질문 원문
+                #    지능형 1위 의료법이 앞에 오고 "어느 법?" 되묻기까지 나와 답을 못 함)
+                asp_same = asp_plan[0]["law"]
+                sh = []
+                for p in asp_plan:
+                    for h in p["hits"]:
+                        if h not in sh:
+                            sh.append(h)
+                ai_hits = sh + [h for h in ai_hits if h not in sh]
                 steps.append({"name": "질문 쪼개기 생략",
-                              "detail": f"측면 {len(asp_plan)}개가 모두 같은 법({asp_plan[0]['law']})"})
+                              "detail": f"측면 {len(asp_plan)}개가 모두 같은 법({asp_same}) — 이 법을 주 법령으로 봅니다"
+                                        + (f" · 조문 {len(sh)}개 지목" if sh else "")})
             asp_plan = []
         if len(asp_plan) >= 2:
             steps.append({"name": "질문 쪼개기",
@@ -2009,7 +2022,7 @@ def _ask_sync(req: AskRequest, progress: list):
             asp_plan = []
 
     weak_ai = False
-    if ai_laws and names and not user_laws and not asp_plan and req.target in ("auto", "law"):
+    if ai_laws and names and not user_laws and not asp_plan and not asp_same and req.target in ("auto", "law"):
         _tot = sum(ai_score.values()) or 1.0
         _share = ai_score.get(ai_laws[0], 0.0) / _tot
         _ai5 = {_law_key(x) for x in ai_laws[:5]}
@@ -2029,7 +2042,7 @@ def _ask_sync(req: AskRequest, progress: list):
 
     # ★ v1.33 — 법령이 애매하면 첫 라운드에 "어느 법" 인지 묻습니다(조문 수집 전에 — 헛수집을 줄임).
     if (not user_laws and req.round == 0 and not req.skip_clarify and not weak_ai and not asp_plan
-            and req.target in ("auto", "law")):
+            and not asp_same and req.target in ("auto", "law")):
         tot = sum(ai_score.values()) or 1.0
         share = ai_score.get(ai_laws[0], 0.0) / tot if ai_laws else 0.0
         guess_keys = {_law_key(re.sub(r"\s*(시행령|시행규칙)$", "", n)) for n in names}
@@ -2282,14 +2295,16 @@ def _ask_sync(req: AskRequest, progress: list):
 
         # ★ v1.31 — 지능형 검색 1순위 법령을 후보 맨 앞에 둡니다. 로컬 LLM 의 추측은
         #   (체계도에 실제로 있으면) 2순위로 남겨 둡니다 — 둘 다 수집하고 조문 선별이 고릅니다.
-        if asp_plan and not user_resolved:
+        if (asp_plan or asp_same) and not user_resolved:
             # v1.38 — 측면별 법을 앞에(측면 순서대로), 그다음 측면별 예비 법, 그다음 기존 후보
+            #   v1.38e — 측면이 모두 같은 법이면 그 법을 맨 앞에
             prim = []
-            for x in [p["law"] for p in asp_plan] + [p["backup"] for p in asp_plan if p["backup"]] + cand:
+            for x in ([asp_same] if asp_same else []) + [p["law"] for p in asp_plan] \
+                    + [p["backup"] for p in asp_plan if p["backup"]] + cand:
                 if x and not any(_law_key(x) == _law_key(y) for y in prim):
                     prim.append(x)
             cand = prim
-        if ai_laws and not (user_resolved and only_mode) and not weak_ai and not asp_plan:
+        if ai_laws and not (user_resolved and only_mode) and not weak_ai and not asp_plan and not asp_same:
             top = ai_laws[0]
             if not any(_law_key(top) == _law_key(c) for c in cand):
                 steps.append({"name": "법령 후보 보정(지능형 검색)",
