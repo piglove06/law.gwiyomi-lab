@@ -88,9 +88,6 @@ import intent as intent_mod  # noqa: E402
 #   의도별로 아예 안 묻는 질문도 생겨 6번까지 왕복할 일이 없습니다.
 CLARIFY_ROUNDS = int(os.getenv("CLARIFY_ROUNDS", "3"))
 
-# 되묻기 판단에 넘길 조문 목록 줄 수.
-# 로컬 모델은 입력이 길수록 급격히 느려지므로 앞부분만 보여줍니다.
-
 # ★ v1.31 — 되묻기에 넘기는 **선별 조문 본문**의 토큰 상한.
 #   v1.30 까지는 조문 제목 60줄만 넘겼습니다. 본문을 넣어야 기준값(2만L·1년·3회)을
 #   보고 보기를 나눌 수 있습니다. 지시문(약 2.5천) + 이 값 + 출력(800) 이 컨텍스트 안에 듭니다.
@@ -276,7 +273,7 @@ SELECT_ARTICLES = os.getenv("SELECT_ARTICLES", "1") not in ("0", "false", "False
 # 조회 후 지자체기관명으로 한 번 더 걸러냅니다.
 LOCAL_GOV = os.getenv("LOCAL_GOV", "성남시").strip()
 
-VERSION = "1.38"
+VERSION = "1.39"
 
 app = FastAPI(title="법령 조회 도우미", version=VERSION)
 

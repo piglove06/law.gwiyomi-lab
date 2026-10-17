@@ -288,6 +288,9 @@ def grade(case: dict, data: dict) -> dict:
         return {"checks": checks, "score": 0, "total": 1}
 
     answer = data.get("answer", "") or ""
+    # v1.39 (C-20261017-5) — 화면용 강조 표시(**굵게**, __밑줄__, !!강조!!)를 빼고 비교합니다.
+    #   "**85제곱미터 기준**이 아닌" 이 금지어 "85제곱미터 기준이 아닌" 에 안 걸려 통과하던 문제.
+    answer = re.sub(r"\*\*|__|!!", "", answer)
     laws = [l.get("name", "") for l in (data.get("laws") or [])]
     cites = data.get("citations") or []
     cite_str = " ".join(f"{c.get('law','')} {c.get('label','')}" for c in cites)
