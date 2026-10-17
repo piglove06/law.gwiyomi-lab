@@ -1960,7 +1960,10 @@ def _ask_sync(req: AskRequest, progress: list):
             ranked = sorted(sc, key=lambda b: (-sc[b], first[b]))
             guess = re.sub(r"\s*(시행령|시행규칙)$", "", a.get("law", "")).strip()
             cands = []
-            for c in ([guess] if guess else []) + ranked[:3]:
+            # v1.38d — 질문 전체의 주 법령 후보(검색어 변환 법령명·질문 원문 지능형 1위)도 넣어, 측면 추측이 엉뚱할 때
+            #   (예: 어린이공원 CCTV '녹음' 측면 → 초·중등교육법) 주 법령을 고를 수 있게 합니다.
+            whole = [re.sub(r"\s*(시행령|시행규칙)$", "", n).strip() for n in names[:2]] + ai_laws[:1]
+            for c in ([guess] if guess else []) + ranked[:3] + whole:
                 if c and not any(_law_key(c) == _law_key(x) for x in cands):
                     cands.append(c)
             parsed.append({"q": a["q"], "guess": guess, "cands": cands, "hits": hits})
