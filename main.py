@@ -1935,15 +1935,18 @@ def _ask_sync(req: AskRequest, progress: list):
         from concurrent.futures import ThreadPoolExecutor
 
         def _asp_search(a):
-            # v1.38b — 측면의 법 이름을 검색어 앞에 붙여 그 법의 조문이 잡히게 합니다
+            # v1.38b — (재검색 때) 측면의 법 이름을 검색어 앞에 붙여 그 법의 조문이 잡히게 합니다
             g = re.sub(r"\s*(시행령|시행규칙)$", "", a.get("law", "")).strip()
             try:
                 return law_client.ai_search((g + " " + a["q"]).strip(), display=10)
             except Exception as e:                      # noqa: BLE001
                 applog.warn(f"측면 지능형 검색 실패: {e}")
                 return []
-        with ThreadPoolExecutor(max_workers=3) as ex:
-            asp_rows = list(ex.map(_asp_search, aspects))
+        with ThreadPoolExecutor(max_workers=3) as ex:       # 1차: 하위 질문만으로(후보 법을 넓게 보려고 법 이름은 안 붙임)
+            asp_rows = list(ex.map(lambda a: _asp_search({"q": a["q"], "law": ""}), aspects))
+        # ★ v1.38c (U-19) — 측면마다 후보 법(LLM 추측 + 측면 검색 상위 3)을 모으고, 어느 법이 그 측면에 가장 직접
+        #   적용되는지는 LLM 이 한 번에 고릅니다. (추측만: 형사→형법·조문 0개 / 검색 1위만: 아동ㆍ청소년성보호법)
+        parsed = []
         for a, rows in zip(aspects, asp_rows):
             sc, first, hits = {}, {}, []
             for i, r in enumerate(rows):
@@ -1955,27 +1958,33 @@ def _ask_sync(req: AskRequest, progress: list):
                 if nm and r.get("조문번호"):
                     hits.append((nm, r.get("조문번호", ""), r.get("조문가지번호", "")))
             ranked = sorted(sc, key=lambda b: (-sc[b], first[b]))
-            top = ranked[0] if ranked else ""
-            share = sc.get(top, 0.0) / (sum(sc.values()) or 1.0) if top else 0.0
             guess = re.sub(r"\s*(시행령|시행규칙)$", "", a.get("law", "")).strip()
-            # ★ v1.38b (U-19) — 측면의 법은 **LLM 이 정한다**(그 법이 법제처에 실제로 있으면). 검색은 그 법의 조문을 대 주는 역할.
-            #   검색 1위로 바꾸던 규칙(상위 5개에 없고 1위 비중 ≥ 0.4)은 '불법촬영 민형사' 측면에 아동ㆍ청소년성보호법을 붙였음
-            #   (질문에 미성년자 언급 없음). 법이 없는 이름(지어낸 법)일 때만 검색 1위를 씁니다.
-            real = False
-            if guess:
-                _rows = _stmd_rows(guess)
-                _row = _pick_stmd(_rows, guess) if _rows else None
-                real = _row is not None and _law_key(law_client.row_name("lsStmd", _row)) == _law_key(guess)
-            if real:
-                law, backup = guess, ""
-            else:
-                law, backup = top, ""
+            cands = []
+            for c in ([guess] if guess else []) + ranked[:3]:
+                if c and not any(_law_key(c) == _law_key(x) for x in cands):
+                    cands.append(c)
+            parsed.append({"q": a["q"], "guess": guess, "cands": cands, "hits": hits})
+        chosen = ai_client.pick_aspect_laws(req.question, [{"q": p["q"], "cands": p["cands"]} for p in parsed]) \
+            if any(len(p["cands"]) > 1 for p in parsed) else [p["cands"][0] if p["cands"] else "" for p in parsed]
+        redo = []
+        for p, law in zip(parsed, chosen):
+            law = law or p["guess"] or (p["cands"][0] if p["cands"] else "")
             if not law:
                 continue
-            ph = [h for h in hits
+            ph = [h for h in p["hits"]
                   if _law_key(re.sub(r"\s*(시행령|시행규칙)$", "", h[0])) == _law_key(law)][:3]
-            asp_plan.append({"q": a["q"], "law": law, "backup": backup, "hits": ph,
-                             "note": ("" if real else f"(추측 '{guess}' 없음 → 검색 1위)") if guess else "(검색 1위)"})
+            note = "" if _law_key(law) == _law_key(p["guess"] or "") else f"(추측 '{p['guess']}' → LLM 선택)"
+            asp_plan.append({"q": p["q"], "law": law, "backup": "", "hits": ph, "note": note})
+            if not ph:
+                redo.append(asp_plan[-1])
+        # 고른 법의 조문이 측면 검색에 없으면 법 이름을 붙여 한 번 더 찾습니다
+        if redo:
+            with ThreadPoolExecutor(max_workers=3) as ex:
+                more = list(ex.map(lambda p: _asp_search({"q": p["q"], "law": p["law"]}), redo))
+            for p, rows in zip(redo, more):
+                p["hits"] = [(r.get("법령명", ""), r.get("조문번호", ""), r.get("조문가지번호", "")) for r in rows
+                             if r.get("조문번호") and _law_key(re.sub(r"\s*(시행령|시행규칙)$", "",
+                                                                    r.get("법령명", ""))) == _law_key(p["law"])][:3]
         # 측면들이 모두 같은 법이면 쪼갤 필요가 없습니다(한 법 안의 여러 사항 — 기존 흐름이 더 낫다)
         if len({_law_key(p["law"]) for p in asp_plan}) < 2:
             if asp_plan:

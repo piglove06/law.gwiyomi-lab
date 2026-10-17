@@ -911,6 +911,49 @@ def pick_cases(question: str, titles: list) -> list:
     return out[:3]
 
 
+# ── v1.38c — 측면별 법 고르기 (U-19) ──────────────────────────────
+# 측면마다 후보 법(LLM 추측 + 그 측면 지능형 검색 상위)을 보여 주고 가장 직접 적용되는 법 하나를 고르게 합니다.
+# (추측만 믿으면 '형사 → 형법'(조문 0개), 검색 1위만 믿으면 '형사 → 아동ㆍ청소년성보호법'(미성년자 없음)이 붙었음)
+ASPECT_LAW_PROMPT = """질문과, 질문을 측면별로 나눈 하위 질문, 그리고 측면마다 후보 법령 목록이 있다.
+측면마다 그 하위 질문에 **가장 직접 적용되는 법 하나**를 후보 중에서 고른다.
+- 그 행위를 직접 규정·처벌하는 특별법이 후보에 있으면 일반법(형법·민법 등)보다 특별법을 고른다.
+- 질문에 없는 조건(미성년자·직무 수행 중·특정 업종 등)을 전제로 한 법은 고르지 않는다.
+- 맞는 후보가 없으면 0 을 쓴다.
+JSON 하나만 출력한다: {{"picks": [측면1의 후보 번호, 측면2의 후보 번호, ...]}}
+
+질문: {question}
+
+{aspects}
+"""
+ASPECT_LAW_SCHEMA = {
+    "type": "object",
+    "properties": {"picks": {"type": "array", "items": {"type": "integer"}, "maxItems": 3}},
+    "required": ["picks"],
+}
+
+
+def pick_aspect_laws(question: str, aspects: list) -> list:
+    """aspects: [{"q": 하위 질문, "cands": [법령명, ...]}] → 고른 법령명 목록(못 고르면 "")."""
+    blocks = []
+    for i, a in enumerate(aspects, 1):
+        cs = "\n".join(f"   {k}. {c}" for k, c in enumerate(a["cands"], 1))
+        blocks.append(f"측면 {i}: {a['q']}\n   후보:\n{cs}")
+    try:
+        obj, _ = call_json(ASPECT_LAW_PROMPT.format(question=str(question or "")[:500], aspects="\n\n".join(blocks)),
+                           ASPECT_LAW_SCHEMA, temperature=0, max_tokens=40, stage="aspect_laws")
+    except AiError:
+        return ["" for _ in aspects]
+    picks = (obj or {}).get("picks") if isinstance(obj, dict) else None
+    out = []
+    for i, a in enumerate(aspects):
+        try:
+            k = int((picks or [])[i]) - 1
+        except (IndexError, TypeError, ValueError):
+            k = -1
+        out.append(a["cands"][k] if 0 <= k < len(a["cands"]) else "")
+    return out
+
+
 def extract_terms(question: str) -> dict:
     """
     질문 -> 검색어 후보. 반환: {"법령명": [...], "용어": [...]}
