@@ -274,7 +274,7 @@ SELECT_ARTICLES = os.getenv("SELECT_ARTICLES", "1") not in ("0", "false", "False
 # 조회 후 지자체기관명으로 한 번 더 걸러냅니다.
 LOCAL_GOV = os.getenv("LOCAL_GOV", "성남시").strip()
 
-VERSION = "1.39"
+VERSION = "1.40"
 
 app = FastAPI(title="법령 조회 도우미", version=VERSION)
 
