@@ -537,6 +537,10 @@ def main():
     ap.add_argument("--probe-file", default="",
                     help="(진단용) 한 줄에 질문 하나. 서버 /api/raw 로 법제처 지능형 검색 원본 XML 을 "
                          "_eval/probe_ai_N.xml 로 저장하고 끝냅니다.")
+    # ★ v1.41b (2026-10-22) — 시나리오 동시 실행 개수. 기본 1 = 예전과 똑같이 하나씩.
+    #   되돌리기: 이 줄과 아래 "★ v1.41b" 블록을 지우고 "원래 반복문" 주석을 풀면 됩니다.
+    ap.add_argument("--jobs", type=int, default=1,
+                    help="v1.41b — 시나리오 N개를 동시에 돌립니다(최대 6). llama 슬롯이 1개면 3 정도가 적당")
     # ★ v1.32 — `_eval\\ARGS` 파일이 있으면 그 내용을 인자로 한 번만 덧붙입니다(읽고 지움).
     #   감시 프로그램을 다시 켜지 않아도 "다음 실행은 eval_extra.json 으로" 를 지정할 수 있습니다.
     #   예) ARGS 내용: --cases eval_extra.json
@@ -625,19 +629,61 @@ def main():
         print("실행할 시나리오가 없습니다.")
         return 2
 
-    results = []
-    for i, case in enumerate(cases, 1):
+    # ── 원래 반복문(v1.41 까지) — 되돌릴 때 아래 ★ v1.41b 블록 대신 이 주석을 푸세요 ──
+    # results = []
+    # for i, case in enumerate(cases, 1):
+    #     name = case.get("name") or case["question"][:20]
+    #     print(f"[{i}/{len(cases)}] {name}")
+    #     data = run_case(args.base, case)
+    #     g = grade(case, data)
+    #     mark = "OK " if g["score"] == g["total"] else "FAIL"
+    #     print(f"    {mark}  {g['score']}/{g['total']}  ({data.get('_elapsed','?')}초)")
+    #     for c in g["checks"]:
+    #         if not c["ok"]:
+    #             print(f"      ✗ {c['name']}"
+    #                   + (f" — {c['detail'][:120]}" if c.get("detail") else ""))
+    #     results.append({"name": name, "case": case, "data": data, "grade": g})
+
+    # ★ v1.41b (2026-10-22) — --jobs N 이면 시나리오 N개를 동시에 돌립니다.
+    #   한 질문이 법제처 API 를 기다리는 동안 다른 질문이 LLM 을 쓰게 해서 전체 시간을 줄입니다.
+    #   (llama-server 슬롯이 1개면 LLM 호출은 서버에서 줄을 섭니다 — 너무 크면 LLM 시간 초과)
+    #   · jobs=1 이면 출력·순서·결과가 예전과 똑같습니다.
+    #   · 동시 실행 때는 되묻기 진행 줄을 찍지 않고(섞임 방지), 결과는 시나리오 **원래 순서대로** 찍습니다.
+    #   · 동시 실행 때 각 시나리오 시간(초)에는 줄 선 시간이 들어가 이전 기록과 비교할 수 없습니다.
+    jobs = max(1, min(int(args.jobs or 1), 6))
+
+    def _one(case: dict):
         name = case.get("name") or case["question"][:20]
-        print(f"[{i}/{len(cases)}] {name}")
-        data = run_case(args.base, case)
-        g = grade(case, data)
+        data = run_case(args.base, case, verbose=(jobs == 1))
+        return name, data, grade(case, data)
+
+    def _show(name: str, data: dict, g: dict):
         mark = "OK " if g["score"] == g["total"] else "FAIL"
         print(f"    {mark}  {g['score']}/{g['total']}  ({data.get('_elapsed','?')}초)")
         for c in g["checks"]:
             if not c["ok"]:
                 print(f"      ✗ {c['name']}"
                       + (f" — {c['detail'][:120]}" if c.get("detail") else ""))
-        results.append({"name": name, "case": case, "data": data, "grade": g})
+
+    results = []
+    t_all = time.time()
+    if jobs == 1:
+        for i, case in enumerate(cases, 1):
+            print(f"[{i}/{len(cases)}] {case.get('name') or case['question'][:20]}")
+            name, data, g = _one(case)
+            _show(name, data, g)
+            results.append({"name": name, "case": case, "data": data, "grade": g})
+    else:
+        from concurrent.futures import ThreadPoolExecutor
+        print(f"동시 실행 {jobs}개 (시나리오 {len(cases)}개) — 시나리오별 시간은 줄 선 시간 포함")
+        with ThreadPoolExecutor(max_workers=jobs) as ex:
+            futs = [ex.submit(_one, case) for case in cases]
+            for i, (case, fu) in enumerate(zip(cases, futs), 1):
+                name, data, g = fu.result()
+                print(f"[{i}/{len(cases)}] {name}")
+                _show(name, data, g)
+                results.append({"name": name, "case": case, "data": data, "grade": g})
+    print(f"전체 걸린 시간: {time.time() - t_all:.0f}초 (동시 실행 {jobs}개)")
 
     path = write_report(results, args.base)
     ok = sum(1 for r in results if r["grade"]["score"] == r["grade"]["total"])
