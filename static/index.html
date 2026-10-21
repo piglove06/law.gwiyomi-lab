@@ -284,7 +284,7 @@
   .clarify{background:var(--card);border:1px solid var(--rule);border-left:3px solid var(--accent);
            border-radius:3px;padding:16px 17px;margin-bottom:12px}
   .clarify h4{margin:0 0 3px;font-size:14px}
-  .clarify .why{font-size:12px;color:var(--note);margin:-4px 0 6px}  /* v1.41 왜 묻는지 */
+  .clarify .why{font-size:13px;color:var(--accent);font-weight:600;margin:-4px 0 6px}  /* v1.43 더 진하게 */  /* v1.41 왜 묻는지 */
   .clarify .sub{font-size:12.5px;color:var(--note);margin-bottom:14px}
   .cq{margin-bottom:13px}
   .cq p{margin:0 0 7px;font-size:13.5px;font-weight:600}
@@ -1407,7 +1407,7 @@ $("clearhist").onclick = () => {
 })();
 
 // 서버 버전 확인 — 화면과 서버가 다른 버전이면 경고
-const UI_VERSION = "1.42";
+const UI_VERSION = "1.43";
 fetch("/api/version").then(r => r.json()).then(d => {
   if(d.version !== UI_VERSION){
     $("vbadge").innerHTML =

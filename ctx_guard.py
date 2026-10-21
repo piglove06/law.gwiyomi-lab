@@ -158,7 +158,12 @@ def refill(keep: list, dropped: list, prio: dict, pos: dict, assemble, count, bu
     keep = list(keep)
     dropped = list(dropped)
     back = []
-    cands = sorted(dropped, key=lambda u: (prio.get(id(u[1]), 999.0), pos.get(id(u[1]), 9999)))
+    # ★ v1.43 — 신청서·서식(별지)은 되돌려 넣지 않습니다(로그: 남는 예산이 서식으로 채워짐). 조문·별표만.
+    def _is_form(u):
+        a = u[1]
+        return a.get("구분") in ("별지", "서식") or str(a.get("조문제목", "")).startswith(("[별지", "[서식"))
+    cands = sorted((u for u in dropped if not _is_form(u)),
+                   key=lambda u: (prio.get(id(u[1]), 999.0), pos.get(id(u[1]), 9999)))
     tries = 0
     for u in cands:
         if tries >= max_tries:

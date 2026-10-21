@@ -280,7 +280,7 @@ SELECT_ARTICLES = os.getenv("SELECT_ARTICLES", "1") not in ("0", "false", "False
 # 조회 후 지자체기관명으로 한 번 더 걸러냅니다.
 LOCAL_GOV = os.getenv("LOCAL_GOV", "성남시").strip()
 
-VERSION = "1.42"
+VERSION = "1.43"
 
 app = FastAPI(title="법령 조회 도우미", version=VERSION)
 
@@ -2187,9 +2187,17 @@ def _ask_sync(req: AskRequest, progress: list):
             ambiguous = not real
         if ambiguous:
             opts = []
+            # ★ v1.43 (C-20261018-2, L-1751-1) — 바로 앞 '주 법령 고르기(LLM)' 결과를 버리지 않고 보기 맨 앞에 둡니다
+            #   (자동 확정은 하지 않음 — 처음 시험에서 맨 앞 확정이 누출검사를 회귀시켰음). 되돌리기: 아래 for 삭제.
+            for b in law_pick[:1]:
+                b = re.sub(r"\s*(시행령|시행규칙)$", "", b).strip()
+                if b and not any(_law_key(b) == _law_key(o) for o in opts):
+                    opts.append(b)
             for b in ai_laws:
                 if len(opts) >= 3:
                     break
+                if any(_law_key(b) == _law_key(o) for o in opts):
+                    continue
                 if ai_score.get(b, 0) < 0.15 or re.search(r"(직제|고시|훈령|예규|규정|지침)$", b):
                     continue
                 opts.append(b)
