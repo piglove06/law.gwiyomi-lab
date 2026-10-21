@@ -385,6 +385,10 @@ def server_ctx() -> int:
     now = time.time()
     if _ctx_cache["n"] and now - _ctx_cache["t"] < 300:
         return _ctx_cache["n"]
+    # ★ v1.42 (C-20261021-1) — 실패도 30초 기억합니다. LLM 이 꺼져 있으면 부를 때마다 5초씩 기다렸습니다.
+    #   되돌리기: 아래 두 줄과 except 의 fail_t 기록 삭제.
+    if now - _ctx_cache.get("fail_t", 0.0) < 30:
+        return _ctx_cache["n"] or LOCAL_CTX_FALLBACK
     n = 0
     try:
         d = httpx.get(f"{_server_root()}/props", timeout=5).json()
@@ -395,6 +399,7 @@ def server_ctx() -> int:
     if n > 0:
         _ctx_cache.update(n=n, t=now)
         return n
+    _ctx_cache["fail_t"] = now                           # ★ v1.42 (C-20261021-1)
     return LOCAL_CTX_FALLBACK
 
 
@@ -635,9 +640,17 @@ def _call_local(prompt: str, temperature: float, model: str,
                 "llama-server 실행 옵션의 -c 값을 늘리세요(예: -c 24576).") from e
         if code in (400, 422) and schema and json_enabled():
             # 서버가 JSON 형식 강제를 못 받는 경우 — 끄고 같은 요청을 한 번 다시 보냅니다.
-            _JSON_MODE["ok"] = False
-            applog.warn(f"LLM 서버가 JSON 형식 강제를 받지 않아 끕니다 (HTTP {code}). "
-                        f"이후 텍스트 방식으로 동작합니다.")
+            # ★ v1.42 (C-20261021-5) — 400/422 한 번에 **프로세스 전체**에서 영구히 꺼졌습니다.
+            #   오류 본문이 형식 강제(response_format·json_schema·grammar) 문제일 때만 영구히 끄고,
+            #   그 밖의 400/422 는 이번 요청만 텍스트 방식으로 다시 보냅니다.
+            #   원래: 무조건 _JSON_MODE["ok"] = False
+            _bl = body.lower()
+            if any(k in _bl for k in ("response_format", "json_schema", "grammar", "schema")):
+                _JSON_MODE["ok"] = False
+                applog.warn(f"LLM 서버가 JSON 형식 강제를 받지 않아 끕니다 (HTTP {code}). "
+                            f"이후 텍스트 방식으로 동작합니다.")
+            else:
+                applog.warn(f"LLM HTTP {code} — 이번 요청만 JSON 형식 강제 없이 다시 보냅니다.")
             return _call_local(prompt, temperature, model, max_tokens, stage, None)
         if code == 400 and native:
             raise AiError("이 서버가 think 옵션을 받지 않습니다. "

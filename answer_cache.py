@@ -72,7 +72,10 @@ def _split_mark(answered: str):
     choice, rest = None, []
     for p in parts:
         if p.startswith(MARK):
-            choice = "yes" if p.split(":", 1)[-1].strip().startswith("예") else "no"
+            # ★ v1.42 (2026-10-22 크롬 확인) — 되묻기 질문 자체에 ':' 가 있어("…불러오기: 10/22 02:36에 …")
+            #   split(":", 1) 로는 답이 아니라 질문 뒷부분을 읽어 '예' 를 골라도 항상 '아니오' 로 처리됐습니다.
+            #   답은 **마지막** ':' 뒤에 있습니다. 원래: p.split(":", 1)[-1].strip().startswith("예")
+            choice = "yes" if (OPT_YES in p or p.rsplit(":", 1)[-1].strip().startswith("예")) else "no"
         else:
             rest.append(p)
     return " / ".join(rest), choice

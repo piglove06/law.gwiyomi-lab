@@ -85,6 +85,8 @@ import intent as intent_mod  # noqa: E402
 import law_cache  # noqa: E402  — 법령 본문 로컬 캐시(MST 버전 기준)
 import rag_select  # noqa: E402  — 조문 본문 유사도(BM25 2-gram [+임베딩]) 선별 보강
 import answer_cache  # noqa: E402  — 같은 질문 결과 불러오기(되묻기로 묻고, 답이 같을 때만 저장본)
+import ai_ext  # noqa: E402  — ★ v1.42 ① 지능형 검색 더 쓰기(되묻기 답 재검색·행정규칙·별표) [기본 꺼짐]
+import ctx_guard  # noqa: E402  — ★ v1.42 질문에 적힌 조문 보호·분량 조절 후 되돌려 넣기(해석35)
 
 # 되묻기 최대 라운드. .env 의 CLARIFY_ROUNDS 로 조절합니다.
 # 라운드마다 LLM 호출이 1회 늘어납니다.
@@ -278,7 +280,7 @@ SELECT_ARTICLES = os.getenv("SELECT_ARTICLES", "1") not in ("0", "false", "False
 # 조회 후 지자체기관명으로 한 번 더 걸러냅니다.
 LOCAL_GOV = os.getenv("LOCAL_GOV", "성남시").strip()
 
-VERSION = "1.41"
+VERSION = "1.42"
 
 app = FastAPI(title="법령 조회 도우미", version=VERSION)
 
@@ -453,7 +455,12 @@ def _named_law(prefix: str, laws: list[dict]) -> str:
         nm = _norm(law.get("name", ""))
         if nm and p.endswith(nm):
             return law["name"]
-    return ""
+    # ★ v1.42 ctx_guard (해석35) — 공식 약칭("지방계약법 시행령")도 법령 이름으로 봅니다.
+    #   되돌리기: 아래 try 블록 삭제(.env CTX_GUARD_ABBR=0 이면 끔).
+    try:
+        return ctx_guard.named_by_abbr(prefix, laws)
+    except Exception:                                    # noqa: BLE001
+        return ""
 
 
 def _guess_law(prefix: str, laws: list[dict], default: str) -> str:
@@ -833,7 +840,9 @@ def verify_citations(answer_text: str, laws: list[dict]) -> list[dict]:
     for prefix, jo, gaji, hang, ho in CITE_RE.findall(answer_text):
         gaji = gaji or ""
         named = _named_law(prefix, laws)
-        if named:
+        # ★ v1.42 — 약칭으로 찾은 이름이 수집한 법령이 아니면 기준 법령(ctx_law)으로 삼지 않습니다
+        #   (뒤따르는 '(제N조)' 인용이 수집 안 된 법령으로 끌려가 엉뚱한 불일치 경고가 붙지 않게). 원래: if named:
+        if named and any(_norm(l.get("name", "")) == _norm(named) for l in laws):
             ctx_law = named
         law_name = _guess_law(prefix, laws, ctx_law or base_law)
 
@@ -2609,7 +2618,11 @@ def _ask_sync(req: AskRequest, progress: list):
             #   원복: detail = law_client.get_detail(f["target"], f["id"])
             detail = law_cache.get_detail(f["target"], f["id"], f.get("mst", ""), f.get("enforced", ""),
                                           lambda: law_client.get_detail(f["target"], f["id"]))
-        except law_client.LawApiError:
+        # ★ v1.42 (C-20261018-7) — LawApiError 만 잡아서 시간초과·연결 오류면 질문 전체가 오류였습니다.
+        #   그 법령만 건너뜁니다. 원래: except law_client.LawApiError: continue
+        except Exception as e:                            # noqa: BLE001
+            if not isinstance(e, law_client.LawApiError):
+                applog.warn(f"조문 수집 실패({f.get('name', '')}) — 그 법령만 건너뜁니다: {type(e).__name__}: {e}")
             continue
         f["meta"] = detail["meta"]
         f["articles"] = detail["articles"]
@@ -2771,6 +2784,10 @@ def _ask_after_search(req, steps, answered, found, flat, catalog, refs, it=None,
                                         f"목록 {len(lines)}줄 중 앞 {keep_n}줄만 보냄"})
             nums = ai_client.select_articles(q_sel, cat_sel)
             picked = [flat[n - 1] for n in nums if 1 <= n <= len(flat)]
+            # ★ v1.42 (C-20261018-10) — LLM 이 같은 번호를 두 번 내면 같은 조문이 두 번 들어가 예산을 낭비합니다.
+            #   순서를 지키며 중복 제거. 되돌리기: 아래 두 줄 삭제.
+            _seen_n: set = set()
+            picked = [x for x in picked if not (id(x[1]) in _seen_n or _seen_n.add(id(x[1])))]
         except ai_client.AiError as e:
             applog.warn(f"조문 선별 실패 — 전체 조문을 씁니다: {e}")
             picked = None                      # 실패하면 전체를 씁니다
@@ -2826,6 +2843,27 @@ def _ask_after_search(req, steps, answered, found, flat, catalog, refs, it=None,
                                                label_fn=lambda f_, a_: _ctx_key(f_, a_), terms=_tw_rag)
         if _rag_info:
             steps.append(_rag_info)
+    # ★ v1.42 ai_ext (기본 꺼짐 — _cache/flags/rag_ai_ext) — 법제처 지능형 검색을 더 씁니다(받아 둔 조문 안에서만).
+    #   ① 되묻기 답이 생기면 '질문+답' 으로 다시 찾아 맞는 조문을 맨 앞에(처음 질문만으로 찾은 순위 보정)
+    #   ② 행정규칙 조문(search=2)·③ 별표(search=1) 중 받아 둔 것을 뒤에 덧붙임. 실패하면 그대로.
+    #   되돌리기: 이 if 블록 삭제(또는 플래그 파일 삭제).
+    if picked and ai_ext.enabled():
+        try:
+            _x_notes = []
+            if req.round > 0 and answered:
+                picked, _xa = ai_ext.merge(picked, ai_ext.answer_hits(req.question, answered, flat), _akey, front=True)
+                if _xa:
+                    _x_notes.append("답 반영 재검색 " + ", ".join(_ctx_key(f, a) for f, a in _xa))
+            picked, _xb = ai_ext.merge(picked, ai_ext.admrul_hits(req.question, flat), _akey, front=False)
+            if _xb:
+                _x_notes.append("행정규칙 " + ", ".join(_ctx_key(f, a) for f, a in _xb))
+            picked, _xc = ai_ext.merge(picked, ai_ext.byl_hits(req.question, flat), _akey, front=False)
+            if _xc:
+                _x_notes.append("별표 " + ", ".join(_ctx_key(f, a) for f, a in _xc))
+            if _x_notes:
+                steps.append({"name": "지능형 검색 보강", "detail": " / ".join(_x_notes)})
+        except Exception as e:                            # noqa: BLE001 — 보조 기능
+            applog.warn(f"지능형 검색 보강 실패 — 건너뜁니다: {e}")
     use = list(picked or flat)
 
 
@@ -2847,6 +2885,25 @@ def _ask_after_search(req, steps, answered, found, flat, catalog, refs, it=None,
             steps.append({"name": "질문에 이름이 나온 조문 보호",
                           "detail": ", ".join(_ctx_key(f, a) for f, a in named)
                                     + (f" (추가 {len(add_n)}개)" if add_n else "")})
+    # ★ v1.42 ctx_guard (해석35) — 질문에 "법령명(약칭 포함) 제N조" 로 직접 적힌 조문도 같은 방식으로 보호합니다.
+    #   (위 보호는 '…기준' 제목이 질문에 그대로 나올 때만이라, "지방계약법 시행령 제25조" 는 분량 조절에서 빠졌음)
+    #   되돌리기: 이 블록 삭제(.env CTX_GUARD_CITED=0 이면 끔).
+    _cited_ids: set = set()
+    if picked is not None and ctx_guard.enabled("cited"):
+        try:
+            _cited = ctx_guard.cited_in_question(req.question, flat)
+        except Exception as e:                            # noqa: BLE001 — 보조 기능. 실패해도 계속
+            applog.warn(f"질문에 적힌 조문 찾기 실패 — 건너뜁니다: {e}")
+            _cited = []
+        if _cited:
+            have_c = {_akey(f, a) for f, a in use}
+            add_c = [p for p in _cited if _akey(*p) not in have_c]
+            use = use + add_c
+            # named_ids 에 넣으면 그 조문이 인용한 별표까지 짧게(1,600자) 줄어들어 따로 둡니다(우선순위만 올림).
+            _cited_ids = {id(a) for _, a in _cited}
+            steps.append({"name": "질문에 적힌 조문 보호",
+                          "detail": ", ".join(_ctx_key(f, a) for f, a in _cited)
+                                    + (f" (추가 {len(add_c)}개)" if add_c else "")})
 
     # ── v1.32 — 상위 조문 자동 포함 ─────────────────────────────────
     # 시행령·시행규칙 조문은 "법 제12조제1항에 따른 …", "영 제8조에 따라 …" 처럼 근거 조문을
@@ -2989,6 +3046,10 @@ def _ask_after_search(req, steps, answered, found, flat, catalog, refs, it=None,
                 named_bp.add(k3)
                 if k3 in cite_rank:
                     cite_rank[k3] = min(cite_rank[k3], 0.6)
+    # ★ v1.42 ctx_guard — 질문에 적힌 조문도 예산 조절에서 마지막까지 남도록 우선순위를 올립니다.
+    for f, a in use:
+        if id(a) in _cited_ids:
+            prio[id(a)] = min(prio.get(id(a), 0.0), 0.2)
     # 선별이 직접 고른 별표도, 그 별표를 인용한 조문이 더 앞에 있으면 그 순위를 따릅니다.
     for f, a in use:
         k = _bp_no(a)
@@ -3373,6 +3434,21 @@ def _ask_after_search(req, steps, answered, found, flat, catalog, refs, it=None,
             n_tok = ai_client.count_tokens(context)
             if n_tok <= budget or len(keep) <= 3 or not order:
                 break
+        # ★ v1.42 ctx_guard (해석35) — 글자 수 추정으로 큰 조문을 한꺼번에 빼 예산이 많이 남으면
+        #   (8,523 예산에 6,162), 뺀 것 중 우선순위가 높은 것부터 예산 안에 들어가는 만큼 되돌려 넣습니다.
+        #   되돌리기: 이 블록 삭제(.env CTX_GUARD_REFILL=0 이면 끔).
+        if dropped and n_tok <= budget and ctx_guard.enabled("refill"):
+            try:
+                # 뒤에 붙는 '※ 분량 제한' 안내문 몫(약 400토큰)은 남겨 둡니다(v1.42 검토 ③).
+                keep, dropped, context, n_laws, n_tok, _back = ctx_guard.refill(
+                    keep, dropped, prio, pos, _assemble, ai_client.count_tokens, budget - 400)
+                if _back:
+                    steps.append({"name": "조문 되돌려 넣기",
+                                  "detail": f"남는 예산으로 {len(_back)}개 다시 넣음: "
+                                            + ", ".join(f"「{f['name']}」 {label_of(a)}" for f, a, _ in _back[:5])
+                                            + f" → {n_tok:,}토큰"})
+            except Exception as e:                        # noqa: BLE001 — 보조 기능. 실패하면 뺀 그대로
+                applog.warn(f"조문 되돌려 넣기 실패 — 건너뜁니다: {e}")
         if n_tok > budget:                                # 최후 수단: 글자 단위로 자름
             cut = int(len(context) * budget / n_tok * 0.95)
             context = context[:cut] + "\n…(분량 제한으로 이하 생략)"
@@ -3445,8 +3521,10 @@ def _ask_after_search(req, steps, answered, found, flat, catalog, refs, it=None,
                               "detail": f"문제 없음 (핵심 주장 {_rs.get('claims', 0)}개 대조"
                                         + (f", 원문 근거를 못 찾은 지적 {_rs['dropped']}건 버림" if _rs.get("dropped") else "")
                                         + ")"})
-        except ai_client.AiError as e:
-            applog.warn(f"답변 검토 실패 — 처음 답변을 씁니다: {e}")
+        # ★ v1.42 (C-20261018-18) — AiError 만 잡아서 검토 결과 형식 오류(KeyError 등)면 질문 전체가 실패했습니다.
+        #   원래: except ai_client.AiError as e:
+        except Exception as e:                            # noqa: BLE001
+            applog.warn(f"답변 검토 실패 — 처음 답변을 씁니다: {type(e).__name__}: {e}")
 
     cites = verify_citations(text, found)
     steps.append({"name": "인용 검증", "detail": f"{sum(1 for c in cites if c['ok'])}/{len(cites)}건 확인"})
