@@ -2045,6 +2045,7 @@ def _finalize_clarify(items: list, question: str = "") -> list:
     cleaned = []
     seen_q = set()
     for item in items:
+        _why = str(item.get("why") or "")       # ★ v1.41 — 아래에서 item 을 새로 만들므로 미리 보관
         # v1.34 — 한 라운드에 같은 질문이 두 번 나오는 경우(실측)
         qk = re.sub(r"[\s?？.]+", "", str(item.get("question", "")))
         if qk in seen_q:
@@ -2114,8 +2115,16 @@ def _finalize_clarify(items: list, question: str = "") -> list:
             _dbg(f"[clarify] 이미 질문에 있는 사실 → 제거 ({why}): {item['question'][:40]}")
             continue
         if len(left) >= 2 and re.search(r"[가-힣]", item["question"]):
-            cleaned.append({"question": item["question"], "options": left})
+            cleaned.append({"question": item["question"], "options": left, **({"why": _why} if _why else {})})
     return cleaned
+
+
+def _clarify_why_on() -> bool:
+    """v1.41 — 되묻기 '왜 묻는지' 표시 스위치(기본 꺼짐)."""
+    env = os.getenv("CLARIFY_WHY")
+    if env is not None and env.strip() != "":
+        return env.strip() == "1"
+    return os.path.exists(os.path.join(os.path.dirname(os.path.abspath(__file__)), "_cache", "flags", "clarify_why"))
 
 
 def clarify(question: str, answered: str = "", catalog: str = "") -> list[dict]:
@@ -2157,6 +2166,10 @@ def clarify(question: str, answered: str = "", catalog: str = "") -> list[dict]:
                 opts = _fix_yesno(q, opts)
                 if len(q) >= 4 and len(opts) >= 2:
                     items.append({"question": q, "options": opts})
+                    # ★ v1.41 — 되묻기마다 '왜 묻는지'(changes: 답에 따라 결론이 어떻게 달라지는지)를 화면에 보여 줍니다.
+                    #   기본 꺼짐(_cache/flags/clarify_why 파일 또는 CLARIFY_WHY=1). 원복: 아래 2줄 삭제.
+                    if _clarify_why_on() and str(it.get("changes") or "").strip():
+                        items[-1]["why"] = str(it.get("changes")).strip()[:100]
         out = _finalize_clarify(items, question)
         if LLM_DEBUG:
             _dbg(f"[clarify] JSON {len(items)}개 → 최종 {len(out)}개")

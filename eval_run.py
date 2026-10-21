@@ -216,7 +216,8 @@ def run_case(base: str, case: dict, verbose: bool = True) -> dict:
             "prev_laws": list(case.get("prev_laws") or []),
             "prev_conclusion": case.get("prev_conclusion", "")}
     data = ask(base, {"question": q, "target": case.get("target", "auto"),
-                      "answered": "", "round": 0, "laws": laws, "laws_mode": laws_mode, **prev})
+                      "answered": "", "round": 0, "laws": laws, "laws_mode": laws_mode,
+                      "use_cache": False, **prev})   # v1.41 — 평가는 항상 새로 검색(저장본으로 통과하지 않게)
 
     r = 0
     while data.get("clarify") and r < max_rounds:
@@ -234,7 +235,8 @@ def run_case(base: str, case: dict, verbose: bool = True) -> dict:
             merged.append(f"추가 설명: {note}")
         answered = " / ".join(merged)
         data = ask(base, {"question": q, "target": case.get("target", "auto"),
-                          "answered": answered, "round": r, "laws": laws, "laws_mode": laws_mode, **prev})
+                          "answered": answered, "round": r, "laws": laws, "laws_mode": laws_mode,
+                          "use_cache": False, **prev})
 
     data["_elapsed"] = round(time.time() - t0, 1)
     data["_rounds"] = rounds

@@ -81,6 +81,10 @@ import applog  # noqa: E402
 import law_client  # noqa: E402
 import pdf_maker  # noqa: E402
 import intent as intent_mod  # noqa: E402
+# ★ v1.41 RAG — 새 모듈 3개(기본 꺼짐: _cache/flags/ 파일 또는 환경변수로 켬). 원복: 이 세 줄과 아래 '★ v1.41' 블록 삭제
+import law_cache  # noqa: E402  — 법령 본문 로컬 캐시(MST 버전 기준)
+import rag_select  # noqa: E402  — 조문 본문 유사도(BM25 2-gram [+임베딩]) 선별 보강
+import answer_cache  # noqa: E402  — 같은 질문 결과 불러오기(되묻기로 묻고, 답이 같을 때만 저장본)
 
 # 되묻기 최대 라운드. .env 의 CLARIFY_ROUNDS 로 조절합니다.
 # 라운드마다 LLM 호출이 1회 늘어납니다.
@@ -274,7 +278,7 @@ SELECT_ARTICLES = os.getenv("SELECT_ARTICLES", "1") not in ("0", "false", "False
 # 조회 후 지자체기관명으로 한 번 더 걸러냅니다.
 LOCAL_GOV = os.getenv("LOCAL_GOV", "성남시").strip()
 
-VERSION = "1.40"
+VERSION = "1.41"
 
 app = FastAPI(title="법령 조회 도우미", version=VERSION)
 
@@ -410,6 +414,7 @@ class AskRequest(BaseModel):
     prev_question: str = ""
     prev_laws: list[str] = []
     prev_conclusion: str = ""
+    use_cache: bool = True      # v1.41 — false 면 '같은 질문 결과 불러오기'를 묻지 않음(eval_run 이 씀)
 
 
 # =====================================================================
@@ -1808,7 +1813,13 @@ def _ask_logged(req: AskRequest, progress: list):
     sess = applog.begin((req.question.strip(), req.target), req.question.strip(),
                         req.round, req.answered or "", req.note or "")
     try:
-        result = _ask_sync(req, progress)
+        # ★ v1.41 답변 캐시 — 같은 질문 기록이 있으면 검색 전에 "불러올까요?"를 묻고, 되묻기 답이 그때와 같으면
+        #   저장본(최종 답은 근거 법령 MST 재확인 후), 다르면 그 단계부터 새로 검색. 기본 꺼짐(_cache/flags/answer_cache).
+        #   원복: 아래 4줄을 'result = _ask_sync(req, progress)' 한 줄로 되돌림
+        _ac_res, _ac_state = answer_cache.before(req, progress, VERSION, CLARIFY_ROUNDS)
+        result = _ac_res if _ac_res is not None else _ask_sync(req, progress)
+        if _ac_res is None:
+            answer_cache.after(req, result, _ac_state, VERSION)
     except Exception as e:
         applog.end(sess, error=f"{type(e).__name__}: {e}")
         raise
@@ -2594,7 +2605,10 @@ def _ask_sync(req: AskRequest, progress: list):
     _fetched = {id(x) for x in _fetch[:_nfetch]}
     for f in _fetch[:_nfetch]:
         try:
-            detail = law_client.get_detail(f["target"], f["id"])
+            # ★ v1.41 캐시 — 같은 버전(MST)이면 저장본 사용. 꺼져 있으면 아래 lambda 그대로 호출(=v1.40 동작).
+            #   원복: detail = law_client.get_detail(f["target"], f["id"])
+            detail = law_cache.get_detail(f["target"], f["id"], f.get("mst", ""), f.get("enforced", ""),
+                                          lambda: law_client.get_detail(f["target"], f["id"]))
         except law_client.LawApiError:
             continue
         f["meta"] = detail["meta"]
@@ -2799,6 +2813,19 @@ def _ask_after_search(req, steps, answered, found, flat, catalog, refs, it=None,
 
     # ★ 아래에서 별표를 덧붙이므로 반드시 복사본으로 씁니다.
     #   picked/flat 을 그대로 쓰면 append 가 원본 목록을 오염시킵니다.
+    # ★ v1.41 RAG — 조문 '본문' 유사도 상위 조문 중 LLM 선별이 놓친 것을 **뒤에** 덧붙입니다(최대 RAG_MAX_ADD=6).
+    #   제목만 보는 선별이 놓치던 본문·별표 속 조문, 목록이 길어 잘린 뒤쪽 조문을 보완합니다.
+    #   되묻기 답(answered)도 질의에 넣으므로 2라운드부터는 답에 맞는 조문이 새로 붙습니다(선별 재사용 보완).
+    #   토큰 예산은 뒤에서부터 빼므로 기존 선별 조문을 밀어내지 않습니다. 오류 시 기존 선별 그대로.
+    #   원복: 이 if 블록 삭제 (또는 _cache/flags/rag_select 파일 삭제 / RAG_SELECT=0)
+    #   (picked 가 빈 목록이면 v1.40 처럼 '선별 실패 → 전체 조문 사용' 이므로 건드리지 않습니다)
+    if picked and rag_select.enabled("select"):
+        _tw_rag = next((s_.get("detail", {}).get("용어", []) for s_ in steps
+                        if s_.get("name") == "검색어 변환" and isinstance(s_.get("detail"), dict)), [])
+        picked, _rag_info = rag_select.augment(req.question, answered or "", flat, picked, _akey,
+                                               label_fn=lambda f_, a_: _ctx_key(f_, a_), terms=_tw_rag)
+        if _rag_info:
+            steps.append(_rag_info)
     use = list(picked or flat)
 
 
@@ -2885,6 +2912,16 @@ def _ask_after_search(req, steps, answered, found, flat, catalog, refs, it=None,
             use = use + children
             steps.append({"name": "위임 조문 자동 포함",
                           "detail": ", ".join(_ctx_key(f, a) for f, a in children)})
+
+        # ★ v1.41 — 참조 조문 확장: 같은 법령 안 "제N조에 따른" 참조와, 위임 데이터에 없는 하위 조문("법 제N조")을
+        #   이미 받은 조문 안에서 찾아 최대 3개 덧붙임(맨 뒤 = 예산 초과 시 먼저 빠짐). 기본 꺼짐(_cache/flags/rag_refs).
+        #   원복: 아래 if 블록 삭제
+        if rag_select.enabled("refs"):
+            _refs = rag_select.ref_expand(use, flat, have_k)
+            if _refs:
+                use = use + _refs
+                steps.append({"name": "참조 조문 자동 포함(v1.41)",
+                              "detail": ", ".join(_ctx_key(f, a) for f, a in _refs)})
 
     # ── 인용된 별표를 자동으로 끌어옵니다 ─────────────────────────
     # "누출검사주기는 별표 4와 같다" 처럼 조문이 별표에 넘기는 경우,
@@ -3156,6 +3193,12 @@ def _ask_after_search(req, steps, answered, found, flat, catalog, refs, it=None,
         prim = [u for u in units if not _is_bp(u)]
         bps = [u for u in units if _is_bp(u)]
         order = prim[:8] + bps[:4] + prim[8:] + bps[4:]
+        # ★ v1.41 RAG — 되묻기 근거를 질문(+이전 답)과 본문 유사도가 높은 조문·별표부터 넣습니다
+        #   (RAC 2026: 검색 근거 기반 되묻기, 근거 4개 안팎에서 효과 포화). 오류 시 위 순서 그대로.
+        #   원복: 아래 3줄 삭제 (또는 _cache/flags/rag_clarify 파일 삭제 / RAG_CLARIFY=0)
+        if rag_select.enabled("clarify"):
+            order = rag_select.order_for_clarify(req.question, answered or "", prim, bps) or order
+            steps.append({"name": "되묻기 근거 유사도 정렬(v1.41)", "detail": " / ".join(_ctx_key(f_, a_) for f_, a_, _ in order[:4])})
         parts, used = [], 0
         for f, a, txt in order:
             # 별표는 비고(보정·예외)가 보기를 가르므로 조금 더 길게, 비고를 남겨 자릅니다.

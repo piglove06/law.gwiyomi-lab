@@ -53,5 +53,17 @@
     "hash": "size=199959;mtime=2026-10-18T01:50:14+09:00",
     "last": "2026-10-18 23:58",
     "last_findings": 4
+  },
+  "ai_client.py#1 L1~419(머리·설정값·TERM_PROMPT·ANSWER_PROMPT·server_ctx·count_tokens, def _call 직전)": {
+    "reviews": 1,
+    "hash": "size=134980;mtime=2026-10-21T23:32:52+09:00(LOCK v1.41 작업 중 판 — 작업 끝나면 바뀔 수 있음)",
+    "last": "2026-10-21 23:52",
+    "last_findings": 3
+  },
+  "ai_client.py#2 L420~810(_call·_parse_json·call_json·워치독·_call_local·_clean_output·_is_junk·_looks_like_law, SCOPE_PROMPT 직전)": {
+    "reviews": 1,
+    "hash": "size=134980;mtime=2026-10-21T23:32:52+09:00(LOCK v1.41 작업 중 판)",
+    "last": "2026-10-21 23:56",
+    "last_findings": 4
   }
 }
