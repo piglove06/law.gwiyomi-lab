@@ -36,10 +36,22 @@
     "last": "2026-10-18 06:20",
     "last_findings": 4
   },
-  "main.py#7 L2501~(체계도 수집 루프 _score 부터 약 400줄, _ask_sync 끝 L2652 · _ask_after_search L2653~)": {
-    "reviews": 0,
-    "hash": "",
-    "last": "",
-    "last_findings": 0
+  "main.py#7 L2501~2890(체계도 축소·조문 수집 ~ _ask_after_search 조문 선별·상위/위임 조문 자동 포함 끝)": {
+    "reviews": 1,
+    "hash": "size=199959;mtime=2026-10-18T01:50:14+09:00;seg_md5(L2501~2900)=09c51fe964327ec151a129d28160835b",
+    "last": "2026-10-18 14:05",
+    "last_findings": 5
+  },
+  "main.py#8 L2891~3260(_bp_no 인용 별표 자동 포함·별표 API 조회·조문 렌더링·위임 힌트 ~ 3-2단계 되묻기 끝, def _assemble 직전)": {
+    "reviews": 1,
+    "hash": "size=199959;mtime=2026-10-18T01:50:14+09:00",
+    "last": "2026-10-18 23:40",
+    "last_findings": 4
+  },
+  "main.py#9 L3261~3478(_assemble·토큰 예산·참고 해석례·답변·답변 검토·검증 ~ 파일 끝)": {
+    "reviews": 1,
+    "hash": "size=199959;mtime=2026-10-18T01:50:14+09:00",
+    "last": "2026-10-18 23:58",
+    "last_findings": 4
   }
 }
