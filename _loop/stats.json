@@ -2,14 +2,14 @@
  "L-20261016-2244-1": {"runs": 3, "pass_streak": 0, "last_run": "2026-10-18 06:08", "last_verdict": "부분일치", "status": "대기"},
  "L-20261016-2244-2": {"runs": 3, "pass_streak": 1, "last_run": "2026-10-18 06:08", "last_verdict": "일치", "status": "완료"},
  "L-20261016-2244-3": {"runs": 3, "pass_streak": 0, "last_run": "2026-10-30 00:24", "last_verdict": "불일치", "status": "대기"},
- "L-20261016-2244-H": {"runs": 6, "pass_streak": 4, "last_run": "2026-10-30 00:04", "last_verdict": "일치", "status": "완료"},
+ "L-20261016-2244-H": {"runs": 7, "pass_streak": 5, "last_run": "2026-10-30 05:59", "last_verdict": "일치", "status": "완료"},
  "L-20261017-1016-1": {"runs": 2, "pass_streak": 0, "last_run": "2026-10-30 00:24", "last_verdict": "부분일치", "status": "대기"},
  "L-20261017-1016-2": {"runs": 2, "pass_streak": 0, "last_run": "2026-10-29 23:00", "last_verdict": "불일치", "status": "대기"},
  "L-20261017-1016-3": {"runs": 1, "pass_streak": 0, "last_run": "2026-10-17 10:32", "last_verdict": "부분일치", "status": "대기"},
  "L-20261017-1751-1": {"runs": 1, "pass_streak": 0, "last_run": "2026-10-17 18:05", "last_verdict": "부분일치", "status": "대기"},
  "L-20261017-1751-2": {"runs": 2, "pass_streak": 0, "last_run": "2026-10-29 22:56", "last_verdict": "불일치", "status": "대기"},
- "L-20261017-1751-3": {"runs": 1, "pass_streak": 0, "last_run": "2026-10-17 18:05", "last_verdict": "불일치", "status": "대기"},
- "L-20261018-0552-1": {"runs": 1, "pass_streak": 0, "last_run": "2026-10-18 06:08", "last_verdict": "불일치", "status": "대기"},
+ "L-20261017-1751-3": {"runs": 2, "pass_streak": 1, "last_run": "2026-10-30 06:07", "last_verdict": "일치", "status": "대기"},
+ "L-20261018-0552-1": {"runs": 2, "pass_streak": 0, "last_run": "2026-10-30 06:10", "last_verdict": "불일치", "status": "대기"},
  "L-20261018-0552-2": {"runs": 1, "pass_streak": 0, "last_run": "2026-10-18 06:08", "last_verdict": "부분일치", "status": "대기"},
  "L-20261018-0552-3": {"runs": 1, "pass_streak": 0, "last_run": "2026-10-18 06:08", "last_verdict": "부분일치", "status": "대기"},
  "L-20261029-2205-1": {"runs": 1, "pass_streak": 1, "last_run": "2026-10-29 22:46", "last_verdict": "일치", "status": "문제없음"},
@@ -17,5 +17,8 @@
  "L-20261029-2205-3": {"runs": 1, "pass_streak": 1, "last_run": "2026-10-29 22:52", "last_verdict": "일치", "status": "문제없음"},
  "L-20261030-0001-1": {"runs": 1, "pass_streak": 0, "last_run": "2026-10-30 00:09", "last_verdict": "부분일치", "status": "대기"},
  "L-20261030-0001-2": {"runs": 1, "pass_streak": 0, "last_run": "2026-10-30 00:13", "last_verdict": "불일치", "status": "대기"},
- "L-20261030-0001-3": {"runs": 1, "pass_streak": 0, "last_run": "2026-10-30 00:18", "last_verdict": "부분일치", "status": "대기"}
+ "L-20261030-0001-3": {"runs": 1, "pass_streak": 0, "last_run": "2026-10-30 00:18", "last_verdict": "부분일치", "status": "대기"},
+ "L-20261030-0600-1": {"runs": 1, "pass_streak": 0, "last_run": "2026-10-30 06:01", "last_verdict": "부분일치", "status": "대기"},
+ "L-20261030-0600-2": {"runs": 1, "pass_streak": 0, "last_run": "2026-10-30 06:01", "last_verdict": "부분일치", "status": "대기"},
+ "L-20261030-0600-3": {"runs": 1, "pass_streak": 0, "last_run": "2026-10-30 06:04", "last_verdict": "부분일치", "status": "대기"}
 }
