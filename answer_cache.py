@@ -204,7 +204,9 @@ def after(req, result, state: dict, version: str) -> None:
         for f in result.get("laws") or []:
             if isinstance(f, dict) and f.get("mst") and f.get("name") and f.get("target"):
                 msts.append((f["target"], f["name"], str(f["mst"])))
-        cited = {str(k).split(" 제")[0] for k in (result.get("cited_keys") or [])}
+        # ★ v1.45 (C-20261028-16) — cited_keys 는 "법령명|조|가지" 꼴인데 " 제" 로 나눠 법령명 대조가 안 맞았습니다.
+        #   원래: str(k).split(" 제")[0]
+        cited = {str(k).split("|")[0] for k in (result.get("cited_keys") or [])}
         if cited:                           # 실제 인용한 법령을 먼저(확인 호출 수를 줄임)
             msts.sort(key=lambda x: 0 if x[1] in cited else 1)
         entry = {"t": time.time(), "version": version, "result": result, "msts": msts[:8]}

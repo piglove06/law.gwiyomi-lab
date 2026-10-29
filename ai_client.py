@@ -942,8 +942,9 @@ CASE_CONFIRM_SCHEMA = {
 }
 
 
-def confirm_cases(question: str, items: list) -> list:
-    """items: [{"title","q","a"}] → 남길 번호(0부터). 실패하면 []."""
+def confirm_cases(question: str, items: list):
+    """items: [{"title","q","a"}] → 남길 번호(0부터).
+    ★ v1.45 (C-20261028-27) — 호출·형식 실패면 None (예전: [] — '0건' 과 구분이 안 돼 화면 참고사례까지 사라짐)."""
     if not items:
         return []
     cands = "\n\n".join(f"{i + 1}. {c.get('title', '')[:90]}\n   질의: {str(c.get('q', ''))[:300]}\n"
@@ -952,7 +953,9 @@ def confirm_cases(question: str, items: list) -> list:
         obj, _ = call_json(CASE_CONFIRM_PROMPT.format(question=str(question or "")[:500], cands=cands),
                            CASE_CONFIRM_SCHEMA, temperature=0, max_tokens=30, stage="case_confirm")
     except AiError:
-        return []
+        return None                 # ★ v1.45 (C-27) 원래: return []
+    if not isinstance(obj, dict):
+        return None
     out = []
     for n in (obj or {}).get("keep") or [] if isinstance(obj, dict) else []:
         try:
@@ -1249,6 +1252,7 @@ def _qnorm(t: str) -> str:
 
 def review_answer(question: str, answer_text: str, context: str) -> list:
     """다 쓴 답변의 핵심 주장을 원문과 대조합니다. 근거 글자가 실제로 있는 지적만 돌려줍니다. 실패하면 []."""
+    REVIEW_STATS["ok"] = False      # ★ v1.45 (C-20261028-14) 검토 호출 성공 여부(실패를 '문제 없음' 으로 보이지 않게)
     try:
         obj, _ = call_json(REVIEW_PROMPT.format(question=question, answer=answer_text, context=context),
                            REVIEW_SCHEMA, temperature=0, max_tokens=MAXTOK_REVIEW, stage="review")
@@ -1256,6 +1260,7 @@ def review_answer(question: str, answer_text: str, context: str) -> list:
         return []
     if not isinstance(obj, dict):
         return []
+    REVIEW_STATS["ok"] = True
     nq, na, nc = _qnorm(question), _qnorm(answer_text), _qnorm(context)
     out = []
     REVIEW_STATS["claims"] = len(obj.get("claims") or [])
