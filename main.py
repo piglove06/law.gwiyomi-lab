@@ -218,6 +218,11 @@ def _fit_keep_notes(text: str, limit: int, keywords=None) -> str:
         return head + "\n…(표 일부 생략)…\n" + notes + tail
     return t[:limit] + "\n…(이하 생략)"
 
+# ★ v1.46 — 답변 속 '고친 흔적'(지시문 원칙 9 위반). 이게 있으면 【결론】과 뒤쪽 판정이 다를 수 있습니다.
+_SELF_CORR_RE = re.compile(r"(?m)(수정된|정정된|바로잡은|다시\s*정리한)\s*결론|^\s*\**\s*(수정|정정)\s*\**\s*[:：]|정정하면")
+_SELF_CORR_FIX = ("【결론】과 뒤쪽(【설명】 끝의 '수정된 결론' 등)의 판정이 다르다. 조문 원문으로 다시 따져 하나의 판정으로 정하고, "
+                  "고친 흔적 없이 【결론】부터 처음부터 다시 쓴다")
+
 # 답변 생성 때 출력(답변)용으로 남겨 둘 토큰 수.
 # ★ 2026-09-29 — 예전에는 조문을 "6만 자" 로 잘랐습니다(CONTEXT_LIMIT, 클라우드 모델 시절 값).
 #   로컬 LLM 컨텍스트(16,384토큰)에는 처음부터 안 맞아 답변 단계가 400 으로 실패했습니다.
@@ -312,7 +317,7 @@ SELECT_ARTICLES = os.getenv("SELECT_ARTICLES", "1") not in ("0", "false", "False
 # 조회 후 지자체기관명으로 한 번 더 걸러냅니다.
 LOCAL_GOV = os.getenv("LOCAL_GOV", "성남시").strip()
 
-VERSION = "1.45"
+VERSION = "1.46"
 
 app = FastAPI(title="법령 조회 도우미", version=VERSION)
 
@@ -3739,6 +3744,13 @@ def _ask_after_search(req, steps, answered, found, flat, catalog, refs, it=None,
     if ANSWER_REVIEW and len(text) > 80:
         try:
             probs = ai_client.review_answer(q_for_answer, text, context)
+            # ★ v1.46 — 답이 스스로 고친 흔적("수정된 결론:", "정정하면")을 남기면 【결론】과 【설명】 끝의 판정이
+            #   엇갈립니다(10-29 평가: 소음 5시간 — 【결론】 "초과했습니다", 끝의 '수정된 결론' "초과하지 않았습니다").
+            #   검토가 '문제 없음' 이어도 결론모순으로 보고 한 번 다시 쓰게 합니다. 되돌리기: 아래 4줄 삭제.
+            _sc = _SELF_CORR_RE.search(text)
+            if _sc and not any(p.get("kind") == "결론모순" for p in probs):
+                probs = list(probs) + [{"kind": "결론모순", "quote": text[_sc.start():_sc.start() + 80].strip(),
+                                        "fix": _SELF_CORR_FIX}]
             if probs:
                 text2 = ai_client.answer_revised(q_for_answer, context, probs)
                 if _neg and "【결론】" in text2:
