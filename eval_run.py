@@ -181,15 +181,29 @@ def pick_option(question: str, options: list, answers: dict, default: str) -> st
       "모름"  — 모름 계열 보기를 고릅니다 (없으면 마지막)
       "first" — 첫 보기
     """
-    for key, want in (answers or {}).items():
-        if key and key in question:
-            for o in options:
-                if o == want:
-                    return o
-            for o in options:
-                if want in o or o in want:
-                    return o
-            return want                      # 보기에 없으면 자유 입력값으로
+    # ★ 2026-10-29 (RAG 진단 해석30·34·37) — 자동 응답이 엉뚱한 값을 넣었습니다.
+    #   · "지역" 키가 "재해취약지역에 포함됩니까?(예/아니오)" 에 걸려 '관리지역' 을 자유 입력으로 넣음(해석30)
+    #   · "시설" 키가 "등록대상동물입니까?" 에 걸려 '반려견 운동·휴식시설' 을 넣음(해석37)
+    #   → ① 질문에 든 키 중 **긴(구체적인) 키부터** 봅니다.
+    #     ② 보기가 예/아니오 꼴인데 원하는 값이 보기와 안 맞으면: 그 값이 질문 문장에 들어 있으면 '예'
+    #        ("3년 이상입니까?" ← "3년 이상"), 아니면 그 키는 건너뜁니다(자유 입력으로 넣지 않음).
+    #   되돌리기: 아래를 예전 반복문(dict 순서, 무조건 자유 입력)으로.
+    _ns = lambda t: re.sub(r"\s+", "", str(t or ""))
+    yn = [o for o in options if re.match(r"^(예|아니|네)", str(o))]
+    keys = sorted((k for k in (answers or {}) if k and k in question), key=len, reverse=True)
+    for key in keys:
+        want = answers[key]
+        for o in options:
+            if o == want:
+                return o
+        for o in options:
+            if want in o or o in want:
+                return o
+        if yn:
+            if _ns(want) and _ns(want) in _ns(question):
+                return next((o for o in yn if re.match(r"^(예|네)", str(o))), yn[0])
+            continue
+        return want                          # 보기에 없으면 자유 입력값으로
     if default == "first" and options:
         return options[0]
     for o in options:
@@ -248,6 +262,17 @@ def run_case(base: str, case: dict, verbose: bool = True) -> dict:
 # =====================================================================
 # 채점
 # =====================================================================
+# ★ 2026-10-29 결론 중심 채점용
+_CONCL_RE = re.compile(r"【결론】(.*?)(?=【|\Z)", re.S)
+_COND_RE = re.compile(r"(경우|다면|라면|이면|으면|하면|되면|면\s*,|때에는|때는)")
+
+
+def _conclusion_block(answer: str) -> str:
+    """【결론】 블록(없으면 앞 400자)."""
+    m = _CONCL_RE.search(answer or "")
+    return (m.group(1) if m else (answer or "")[:400]).strip()
+
+
 def grade(case: dict, data: dict) -> dict:
     """
     기대값과 대조합니다. 항목별로 통과/실패와 이유를 남깁니다.
@@ -274,6 +299,8 @@ def grade(case: dict, data: dict) -> dict:
       no_clarify        : true 면 되묻기가 한 번도 없어야 함 (조문 조회·정의·일반 기준 질문)
       expect_context    : 답변 컨텍스트에 **실제로 들어가야 하는** 조문 ["법령명 제N조", "법령명 [별표 N]"]
                           — 검색·선별 단계 Recall. 답변이 틀렸을 때 원인이 검색인지 판단인지 가름
+      expect_conclusion : [[대안…], …] — 【결론】 블록에 묶음마다 대안 하나 (2026-10-29 결론 중심 채점)
+      forbid_conclusion : 【결론】 블록에 있으면 안 되는 말
       no_conclusion_in_clarify : true 면 되묻기가 결론(의무·기한)을 사용자에게 물으면 실패
                           (2026-09-29 — "다음 정기 누출검사를 언제까지 받아야 합니까?" 사고)
     """
@@ -311,8 +338,32 @@ def grade(case: dict, data: dict) -> dict:
         alts = group if isinstance(group, list) else [group]
         ck(f"본문 포함(택1): {' | '.join(alts)}",
            any(re.sub(r"\s+", "", a) in flat for a in alts))
+    # ★ 2026-10-29 결론 중심 채점 — 판정은 【결론】 블록에서 봅니다.
+    #   expect_conclusion : [[대안…], …] 묶음마다 대안 하나가 【결론】에 있어야 함(공백 무시)
+    #   forbid_conclusion : 【결론】에 있으면 안 되는 말
+    #   그리고 expect_conclusion 이 모두 맞은 경우, forbid_text 가 **조건 문장**("~경우에는/~이면/~다면 …")에만
+    #   나오면 실패로 보지 않습니다 — '모름' 조건으로 경우를 나눈 답(해석30: "지구단위계획구역이면 허가")을
+    #   틀린 답으로 세던 문제. 판정이 결론과 다르면 expect_conclusion 에서 걸립니다.
+    concl = _conclusion_block(answer)
+    flat_c = re.sub(r"\s+", "", concl)
+    ec_ok = None
+    if case.get("expect_conclusion"):
+        ec_ok = True
+        for group in case["expect_conclusion"]:
+            alts = group if isinstance(group, list) else [group]
+            ok = any(re.sub(r"\s+", "", a) in flat_c for a in alts)
+            ec_ok = ec_ok and ok
+            ck(f"결론 포함(택1): {' | '.join(alts)}", ok, "" if ok else concl[:160])
+    for bad in case.get("forbid_conclusion", []):
+        ck(f"결론에 없어야: {bad}", bad not in concl, concl[:160] if bad in concl else "")
     for bad in case.get("forbid_text", []):
-        ck(f"본문 없어야: {bad}", bad not in answer)
+        if bad not in answer:
+            ck(f"본문 없어야: {bad}", True)
+            continue
+        sents = [x for x in re.split(r"(?<=[.。!?])\s+|\n", answer) if bad in x]
+        cond_only = bool(ec_ok) and bool(sents) and all(_COND_RE.search(x.split(bad)[0]) for x in sents)
+        ck(f"본문 없어야: {bad}", cond_only,
+           "조건 문장에만 있음 — 결론 판정이 맞아 통과" if cond_only else (sents[0][:160] if sents else ""))
     for want in case.get("expect_laws", []):
         ck(f"법령 수집: {want}", any(want in l for l in laws), ", ".join(laws))
     if case.get("expect_primary_law"):
