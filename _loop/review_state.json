@@ -1,33 +1,33 @@
 {
-  "_note": "구간 키 → 검토 기록. hash 는 PC 셸이 없어 내용 해시 대신 '파일크기:수정시각' 지문을 씀(파일 단위 — 파일이 바뀌면 그 파일 전 구간이 '변경됨'). 구간 경계는 함수 이름으로 표시. 2026-10-16: main.py#1 은 L1~470(def _guess_law 시작 직후, 약 470줄)로 확인. 다음부터는 이미 검토한 구간이 파일 단위 지문 때문에 계속 '변경됨'으로 잡히지 않도록, 아직 검토하지 않은 구간(reviews 0)을 같은 파일의 재검토보다 먼저 봄(재검토는 그 구간에 실제 수정 이력이 있을 때만). 2026-10-17: main.py#2 는 _named_law/_guess_law ~ verify_citations 앞부분(파일 앞 880줄 끝, out.append 딕셔너리 중간)까지. #3 은 verify_citations 나머지 ~ _ctx_key 끝(약 L880~1268, '개정 전후 비교' 머리 직전). #4 는 v1.35 개정 전후 비교(HISTORY_COMPARE·_art_id)부터 약 400줄. 2026-10-17 18:10: main.py 전체 3,242줄 확인(파일 도구 읽기 결과를 클라우드 쪽에서 줄 번호로 자름 — 이제 md5 도 기록). #4 = L1268~1656(_resolve_law_exact 끝), #5 = L1657 _ask_article 부터. 남은 구간 #5~#9 (약 L1657~3242, 400줄씩). 2026-10-17 23:55: v1.40 수정(23:20)으로 main.py 196,187바이트로 늘어 _resolve_law_exact 가 L1657~1693 으로 밀림 → #5 = L1694 _ask_article ~ L2065(_ask_sync 의 '질문 쪼개기' 끝), #6 = L2066 v1.40 '주 법령 고르기'(LAW_PICK) 부터. seg_md5 는 그 구간 줄만의 md5. 2026-10-18 06:20: v1.40 최종판(01:50, 199,959바이트, 3,478줄) 기준 #6 = L2090~2500, #7 = L2501 부터(#8·#9 는 L2900~3478). 앞 구간 #1~#5 는 줄 번호가 밀렸지만 reviews 0 구간을 먼저 봄.",
-  "main.py#1 L1~470(머리~def _guess_law 직전)": {
-    "reviews": 2,
-    "hash": "size=175998;mtime=2026-10-16T10:41:46+09:00",
-    "last": "2026-10-16 22:58",
-    "last_findings": 2
+  "_note": "구간 키 → 검토 기록. hash 는 PC 셸이 없어 내용 해시 대신 '파일크기:수정시각' 지문을 씀(파일 단위 — 파일이 바뀌면 그 파일 전 구간이 '변경됨'). 구간 경계는 함수 이름으로 표시. 2026-10-16: main.py#1 은 L1~470(def _guess_law 시작 직후, 약 470줄)로 확인. 다음부터는 이미 검토한 구간이 파일 단위 지문 때문에 계속 '변경됨'으로 잡히지 않도록, 아직 검토하지 않은 구간(reviews 0)을 같은 파일의 재검토보다 먼저 봄(재검토는 그 구간에 실제 수정 이력이 있을 때만). 2026-10-17: main.py#2 는 _named_law/_guess_law ~ verify_citations 앞부분(파일 앞 880줄 끝, out.append 딕셔너리 중간)까지. #3 은 verify_citations 나머지 ~ _ctx_key 끝(약 L880~1268, '개정 전후 비교' 머리 직전). #4 는 v1.35 개정 전후 비교(HISTORY_COMPARE·_art_id)부터 약 400줄. 2026-10-17 18:10: main.py 전체 3,242줄 확인(파일 도구 읽기 결과를 클라우드 쪽에서 줄 번호로 자름 — 이제 md5 도 기록). #4 = L1268~1656(_resolve_law_exact 끝), #5 = L1657 _ask_article 부터. 남은 구간 #5~#9 (약 L1657~3242, 400줄씩). 2026-10-17 23:55: v1.40 수정(23:20)으로 main.py 196,187바이트로 늘어 _resolve_law_exact 가 L1657~1693 으로 밀림 → #5 = L1694 _ask_article ~ L2065(_ask_sync 의 '질문 쪼개기' 끝), #6 = L2066 v1.40 '주 법령 고르기'(LAW_PICK) 부터. seg_md5 는 그 구간 줄만의 md5. 2026-10-18 06:20: v1.40 최종판(01:50, 199,959바이트, 3,478줄) 기준 #6 = L2090~2500, #7 = L2501 부터(#8·#9 는 L2900~3478). 앞 구간 #1~#5 는 줄 번호가 밀렸지만 reviews 0 구간을 먼저 봄. 2026-10-24 08:12: v1.41~1.43(10-22 07:35) 반영판 main.py 211,297바이트·3,607줄(md5 c934ad22…). LOCK 풀림 → 규칙 1(변경됨, 중요도 순)로 main.py#1 L1~465 3회차 검토. 새 판 주요 경계: def _guess_law L466, _resolve_law_exact L1687, _ask_article L1724, _ask_sync L1861, _ask_after_search L2688. 다음 실행은 main.py#2(L466~ 약 870) — #2~#9 는 새 판 기준으로 다시 나눔. 이전 지문(hash)들은 모두 옛 판이라 '변경됨'.",
+  "main.py#1 L1~465(머리~_named_law, def _guess_law 직전)": {
+    "reviews": 3,
+    "hash": "size=211297;mtime=2026-10-22T07:35:04+09:00;md5=c934ad2208ed5579a74515b6ef5394c1;seg_md5(L1~465)=591c81708e8292cdcc1be09eb42cc0cd",
+    "last": "2026-10-24 08:12",
+    "last_findings": 1
   },
   "main.py#2 L440~880(_named_law·_guess_law ~ verify_citations 앞부분)": {
-    "reviews": 1,
-    "hash": "size=175998;mtime=2026-10-16T10:41:46+09:00",
-    "last": "2026-10-17 10:40",
-    "last_findings": 3
+    "reviews": 2,
+    "hash": "size=211297;mtime=2026-10-22T07:35:04+09:00(v1.43 판 L466~880 — 셸 없어 md5 미산출)",
+    "last": "2026-10-25 08:30",
+    "last_findings": 2
   },
   "main.py#3 L880~1268(verify_citations 나머지 ~ _ctx_key)": {
-    "reviews": 1,
-    "hash": "size=176886;mtime=2026-10-17T10:48:17+09:00",
-    "last": "2026-10-17 11:55",
-    "last_findings": 4
+    "reviews": 2,
+    "hash": "size=211297;mtime=2026-10-22T07:35:04+09:00(v1.43 판 약 L880~1290 verify_citations 나머지 ~ _pick_stmd 시작 — 셸 없어 md5 미산출)",
+    "last": "2026-10-25 11:58",
+    "last_findings": 2
   },
   "main.py#4 L1268~1656(개정 전후 비교 HISTORY_COMPARE ~ _resolve_law_exact)": {
-    "reviews": 1,
-    "hash": "size=178426;mtime=2026-10-17T14:13:26+09:00;md5=5c4cfea1ed1d84037d9f3d7efc0a3131",
-    "last": "2026-10-17 18:10",
-    "last_findings": 3
+    "reviews": 2,
+    "hash": "size=211297;mtime=2026-10-22T07:35:04+09:00(v1.43 판 L1279~1723 _pick_stmd ~ _resolve_law_exact 끝, _ask_article 직전)",
+    "last": "2026-10-25 17:58",
+    "last_findings": 4
   },
   "main.py#5 L1694~2065(_ask_article ~ _ask_sync 질문 쪼개기 끝)": {
-    "reviews": 1,
-    "hash": "size=196187;mtime=2026-10-17T23:20:18+09:00;seg_md5=3a9354867f2fc49a1624f91da4e941b5",
-    "last": "2026-10-17 23:55",
+    "reviews": 2,
+    "hash": "size=211297;mtime=2026-10-22T07:35:04+09:00;seg_md5(v1.43 판 L1724~2125 _ask_article docstring ~ LAW_PICK _stmd_rows 줄)=3c84a53012059d620c708f9751a9536e",
+    "last": "2026-10-28 01:15",
     "last_findings": 4
   },
   "main.py#6 L2090~2500(v1.40 주 법령 고르기 LAW_PICK ~ 체계도 수집 루프 _score 앞)": {
