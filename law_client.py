@@ -140,6 +140,21 @@ def _require_oc() -> str:
     return OC
 
 
+def _mask_oc(text) -> str:
+    """★ v1.44 — 글 안의 인증키(OC)를 *** 로 가립니다(화면·로그·오류 문구로 나가지 않게)."""
+    t = str(text or "")
+    if OC:
+        t = t.replace(OC, "***")
+    return re.sub(r"(OC=)[^&\s'\"]+", r"\1***", t)
+
+
+def _safe_err(e: Exception) -> str:
+    """★ v1.44 — httpx 오류를 URL 없이 짧게. 상태 오류면 'HTTP 500', 그 밖에는 예외 종류(+가린 문구)."""
+    if isinstance(e, httpx.HTTPStatusError) and e.response is not None:
+        return f"HTTP {e.response.status_code}"
+    return type(e).__name__          # 연결 오류 문구에도 URL 이 들어 있어 종류만 남깁니다
+
+
 def _get(url: str, params: dict) -> str:
     """공통 GET 호출. 응답 본문(문자열)을 그대로 돌려줍니다."""
     params = {"OC": _require_oc(), "type": "XML", **params}
@@ -156,11 +171,14 @@ def _get(url: str, params: dict) -> str:
             if attempt == 1:
                 time.sleep(1.0)
                 continue
-            raise LawApiError(f"법제처 호출 실패(2회): {e}") from e
+            # ★ v1.44 (C-20261028-01, 보안) — httpx 오류 문구에는 요청 URL 전체(OC 인증키 포함)가 들어가고,
+            #   이 문구가 _err() 로 화면·로그에 그대로 나갔습니다(예: /api/detail?id= → 법제처 500).
+            #   상태 코드·예외 종류만 남기고, 혹시 남은 인증키는 가립니다. 원래: f"법제처 호출 실패(2회): {e}"
+            raise LawApiError(f"법제처 호출 실패(2회): {_safe_err(e)}") from None
 
     # 법제처가 인증 실패 시에도 HTTP 200 에 에러 문구를 담아 보내는 경우가 있습니다.
     if "인증" in resp.text and len(resp.text) < 300:
-        raise LawApiError(f"인증키 문제로 보입니다. 응답: {resp.text[:200]}")
+        raise LawApiError(f"인증키 문제로 보입니다. 응답: {_mask_oc(resp.text[:200])}")
 
     return resp.text
 

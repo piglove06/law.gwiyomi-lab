@@ -280,7 +280,7 @@ SELECT_ARTICLES = os.getenv("SELECT_ARTICLES", "1") not in ("0", "false", "False
 # 조회 후 지자체기관명으로 한 번 더 걸러냅니다.
 LOCAL_GOV = os.getenv("LOCAL_GOV", "성남시").strip()
 
-VERSION = "1.43"
+VERSION = "1.44"
 
 app = FastAPI(title="법령 조회 도우미", version=VERSION)
 
@@ -314,7 +314,10 @@ def _is_logged_in(request: Request) -> bool:
         return True
     token = request.cookies.get(COOKIE_NAME, "")
     # compare_digest 는 타이밍 공격을 막습니다. == 대신 이걸 쓰는 게 정석입니다.
-    return hmac.compare_digest(token, _make_token())
+    # ★ v1.44 (C-20261028-02) — 문자열끼리 비교하면 쿠키에 비ASCII 글자(é 등)가 있을 때 TypeError →
+    #   로그인 안 한 사람도 모든 경로를 500 으로 만들 수 있었습니다(login_submit 은 2026-08-19 에 고침).
+    #   원래: return hmac.compare_digest(token, _make_token())
+    return hmac.compare_digest(token.encode("utf-8", "replace"), _make_token().encode("utf-8"))
 
 
 @app.middleware("http")
@@ -432,7 +435,10 @@ CITE_RE = re.compile(
     #   괄호를 빼두면 "]" 에서 끊겨 법령명이 통째로 안 잡히고, 그러면
     #   아래 _guess_law 가 default(법률)로 떨어뜨립니다.
     #   실제로 시행규칙 제12조제2항 인용이 법률 제12조제2항으로 표시됐습니다.
-    r"(?:([가-힣A-Za-z0-9·ㆍ\s「」\[\]]{2,40}?)\s*)?"              # 앞에 붙은 법령명(선택)
+    # ★ v1.44 (C-20261028-03) — 법령명 자리에 '제+숫자' 가 들어가 앞 인용을 삼켰습니다
+    #   ("(제3조 및 제4조)" → 제4조만, "제54조·제55조제1항·제63조" → 제54조 사라짐). '제\s*숫자' 로 시작하는 글자는 못 들어가게.
+    #   원래: r"(?:([가-힣A-Za-z0-9·ㆍ\s「」\[\]]{2,40}?)\s*)?"
+    r"(?:((?:(?!제\s*\d)[가-힣A-Za-z0-9·ㆍ\s「」\[\]]){2,40}?)\s*)?"   # 앞에 붙은 법령명(선택)
     r"제\s*(\d+)\s*조(?:\s*의\s*(\d+))?"                          # 제○조(의○)
     r"(?:\s*제\s*(\d+)\s*항)?(?:\s*제\s*(\d+)\s*호)?"            # 제○항 제○호
 )
@@ -463,6 +469,26 @@ def _named_law(prefix: str, laws: list[dict]) -> str:
         return ""
 
 
+_EXPLICIT_BRACKET = re.compile(r"[「\[]\s*([^」\]]{2,60}?)\s*[」\]]\s*$")
+_EXPLICIT_WORD = re.compile(r"(?:^|[^가-힣ㆍ·])([가-힣ㆍ·]{2,40}?(?:법률|법))(?:\s*(시행령|시행규칙))?\s*$")
+_NOT_LAW_NAME = {"같은법", "해당법", "관계법", "관련법", "개별법", "다른법", "특별법", "일반법", "상기법", "위의법", "모법", "이법률", "같은법률"}
+
+
+def _explicit_law_name(prefix: str) -> str:
+    """★ v1.44 — 인용 앞 글자가 법령명을 직접 밝혔으면 그 이름(「」·[] 안, 또는 '…법 [시행령|시행규칙]' 낱말). 아니면 ""."""
+    p = (prefix or "").strip()
+    m = _EXPLICIT_BRACKET.search(p)
+    if m:
+        return m.group(1).strip()
+    m = _EXPLICIT_WORD.search(p)
+    if m:
+        name = m.group(1)
+        if name.replace(" ", "") in _NOT_LAW_NAME or len(name.replace(" ", "")) < 3:
+            return ""
+        return (name + (" " + m.group(2) if m.group(2) else "")).strip()
+    return ""
+
+
 def _guess_law(prefix: str, laws: list[dict], default: str) -> str:
     """
     인용문 앞에 붙은 글자에서 법령명을 추려냅니다.
@@ -477,6 +503,16 @@ def _guess_law(prefix: str, laws: list[dict], default: str) -> str:
     n = _named_law(prefix, laws)
     if n:
         return n
+    # ★ v1.44 (C-20261028-04) — 답변이 법령명을 **직접 밝혔는데**(「건축법」 제3조, 대기환경보전법 시행령 제3조)
+    #   수집한 법령에 없으면, 아래 단계 표시·기본값 경로로 떨어져 직전 법령의 같은 번호 조문이 '확인' 으로 찍혔습니다.
+    #   밝힌 이름을 그대로 돌려줘 '수집한 조문에 없음' 으로 표시되게 합니다. 되돌리기: 이 블록 삭제.
+    _ex = _explicit_law_name(prefix)
+    if _ex:
+        _kx = re.sub(r"[\s「」『』\[\]()·ㆍ・]+", "", _ex)       # 가운뎃점 표기 차이(소음·진동 / 소음ㆍ진동)는 같은 법
+        for law in laws:
+            if re.sub(r"[\s「」『』\[\]()·ㆍ・]+", "", law.get("name", "")) == _kx:
+                return law["name"]
+        return _ex
     # "시행령 제3조" 처럼 법령명 없이 단계만 쓴 경우
     # ★ 2026-08-19 — default(= 직전에 이름이 명시된 법령)가 이미 하위법령이면
     #   여기서 단계 이름을 **덧붙이기만** 해서 "…시행규칙시행령" 이라는 없는
@@ -960,7 +996,9 @@ def _excluded_terms(answered: str) -> list:
                          q.strip()):
             continue
         # 질문에서 핵심 명사만 남깁니다.
-        t = re.sub(r"(에\s*해당하나요|에\s*해당합니까|인가요|입니까|맞나요|있나요|"
+        # ★ v1.44 (C-20261028-09) — 위 통과 조건에 있는 '에 해당되나요'·'인지요' 꼬리를 여기서 못 떼어
+        #   "방사성폐기물에 해당되나요?: 아니오" → 제외어 '해당되나요?' 가 되어 법령 제외가 안 됐습니다. 두 꼬리 추가.
+        t = re.sub(r"(에\s*해당하나요|에\s*해당합니까|에\s*해당되나요|인가요|입니까|맞나요|인지요|있나요|"
                    r"하나요|받았나요|였나요)\s*\??$", "", q.strip())
         # "배출하는 폐기물이 방사성폐기물" 처럼 앞말이 붙으면 마지막 명사구만 씁니다.
         t = t.split()[-1] if t.split() else ""
@@ -2112,6 +2150,7 @@ def _ask_sync(req: AskRequest, progress: list):
     #   있는 법인지 체계도로 확인). 고른 법이 후보에 없으면 후보에 **더하기만** 합니다(아래 '법령 후보 추가').
     #   (L-1751-1 지방공무원 육아휴직 → 남녀고용평등법 1위·'어느 법?' / L-1751-3 외부강의 사례금 → 청탁금지법 누락)
     law_pick = []
+    _abbr_full = ""          # ★ v1.44 (C-20261028-12) 약칭 복구로 찾은 정식명(아래 후보 순서에서 AI 추측 이름으로 대접)
     if (LAW_PICK and not user_laws and not asp_plan and not asp_same and req.target in ("auto", "law")
             and (names or ai_laws)):
         _gk = {_law_key(re.sub(r"\s*(시행령|시행규칙)$", "", n)) for n in names}
@@ -2133,9 +2172,15 @@ def _ask_sync(req: AskRequest, progress: list):
                 if n and not any(_law_key(n) == _law_key(x) for x in pool):
                     pool.append(n)
             if pool:
+                _ait_k = {}
+                for _k0, _v0 in ai_titles.items():
+                    _ait_k.setdefault(_law_key(_k0), []).extend(_v0)
                 picks, other, subj = ai_client.pick_main_laws(
                     req.question + (f"\n(확인된 조건: {answered})" if answered else ""), pool,
-                    [("지능형 검색 조문: " + ", ".join(ai_titles[x])) if ai_titles.get(x)
+                    # ★ v1.44 (C-20261028-11) — 후보가 AI 표기("소음·진동관리법")면 지능형 표기("소음ㆍ진동관리법")와 글자가 달라
+                    #   근거를 못 찾고 "조문 없음"으로 보여 맞는 법이 탈락했습니다. 가운뎃점·공백을 무시한 키로 찾습니다.
+                    #   원래: ai_titles.get(x)
+                    [("지능형 검색 조문: " + ", ".join(_ait_k[_law_key(x)])) if _ait_k.get(_law_key(x))
                      else "지능형 검색 조문 없음(이름 추측)" for x in pool])
                 if other and not any(_law_key(other) == _law_key(x) for x in pool + picks):
                     rows = _stmd_rows(other)
@@ -2344,7 +2389,12 @@ def _ask_sync(req: AskRequest, progress: list):
                                 "detail": f"'{', '.join(cand)}' 을(를) 공식 약칭으로 보고 "
                                           f"'{full}' 로 재시도",
                             })
-                            cand = [full] + cand
+                            # ★ v1.44 (C-20261028-12) — 약칭이 후보 칸에 그대로 남아 정식명이 뒤로 밀리고(LAW_CANDIDATES=3에서 수집
+                            #   누락) '체계도 없음' 가짜 경고도 남겼습니다. 약칭 자리를 정식명으로 바꿉니다. 원래: cand = [full] + cand
+                            _ab = {_law_key(nm) for nm in cand
+                                   if law_client.resolve_abbrev(nm.replace(" 시행령", "").replace(" 시행규칙", "").strip()) == full}
+                            cand = [full] + [c for c in cand if _law_key(c) not in _ab]
+                            _abbr_full = full
                             break
                     except law_client.LawApiError:
                         pass
@@ -2462,6 +2512,8 @@ def _ask_sync(req: AskRequest, progress: list):
             #   질문의 주 법령이 따로 있는 경우(소비기한 지난 원재료 → AI 추측 식품위생법, 지능형 1위 위생용품 관리법)
             #   식품위생법이 후보 3위로 밀려 조문을 못 받았습니다(L-1016-1). 본문검색 복구로 올라온 이름은 해당 없음.
             _nk = {_law_key(re.sub(r"\s*(시행령|시행규칙)$", "", n)) for n in names}
+            if _abbr_full:                                       # ★ v1.44 (C-20261028-12)
+                _nk.add(_law_key(_abbr_full))
             named_o = [c for c in others if _law_key(c) in _nk]
             others = [c for c in others if c not in named_o]
             cand = [top] + corr + named_o[:1] + ai2[:1] + [c for c in named_o[1:] + others
@@ -2749,7 +2801,9 @@ def _ask_after_search(req, steps, answered, found, flat, catalog, refs, it=None,
         if picked:
             steps.append({"name": "조문 선별 재사용",
                           "detail": f"이전 라운드에서 고른 {len(picked)}개"})
-    elif SELECT_ARTICLES and len(flat) > 12:
+    # ★ v1.44 (C-20261028-08) — 캐시된 선별이 되묻기 '아니오' 제외로 모두 빠지면(picked=None) 다시 선별합니다.
+    #   예전엔 elif 라 재선별 없이 전체 조문이 목록 순서대로 들어가 보강·보호 기능이 모두 꺼졌습니다. 원래: elif SELECT_ARTICLES …
+    if picked is None and SELECT_ARTICLES and len(flat) > 12:
         try:
             # ★ 2026-09-29 — 법령이 여럿이면 조문 목록만으로도 수천 토큰입니다.
             #   컨텍스트를 넘으면 목록 뒤쪽을 잘라서 보냅니다(번호는 그대로라 매핑 유지).
@@ -2796,6 +2850,11 @@ def _ask_after_search(req, steps, answered, found, flat, catalog, refs, it=None,
             #   순서를 지키며 중복 제거. 되돌리기: 아래 두 줄 삭제.
             _seen_n: set = set()
             picked = [x for x in picked if not (id(x[1]) in _seen_n or _seen_n.add(id(x[1])))]
+            # ★ v1.44 (C-20261028-07) — 선별 응답이 깨져 번호가 하나도 없으면([]) '전체 사용' 이어야 하는데,
+            #   빈 목록이 아래에서 지능형 조문 6개만 남기고 다음 라운드까지 캐시됐습니다. 되돌리기: 아래 3줄 삭제.
+            if not picked:
+                steps.append({"name": "조문 선별", "detail": "선별 결과 없음(응답 형식 오류) — 전체 조문을 씁니다"})
+                picked = None
         except ai_client.AiError as e:
             applog.warn(f"조문 선별 실패 — 전체 조문을 씁니다: {e}")
             picked = None                      # 실패하면 전체를 씁니다
@@ -3014,6 +3073,7 @@ def _ask_after_search(req, steps, answered, found, flat, catalog, refs, it=None,
     prio = {id(a): float(i) for i, (f, a) in enumerate(use)}
     prio.update(parent_rank)
     cite_rank: dict = {}
+    _cite_src: dict = {}          # ★ v1.44 (C-20261028-06) 별표 키 → 인용한 조문 id 목록
     for i_use, (f, a) in enumerate(use):
         body = a.get("조문내용", "")
         for mt in re.finditer(r"(별표|별지)\s*제?\s*(\d+)(?:\s*의\s*(\d+))?\s*호?", body):
@@ -3030,6 +3090,7 @@ def _ask_after_search(req, steps, answered, found, flat, catalog, refs, it=None,
                     continue          # 우리가 안 가진 법령의 별표 — 건드리지 않음
             wanted.add((owner, kind, no))
             cite_rank.setdefault((owner, kind, no), i_use)
+            _cite_src.setdefault((owner, kind, no), []).append(id(a))
     # v1.35 — 질문에 이름이 나온 조문과 그 조문이 인용한 별표는 예산에서 끝까지 남깁니다.
     # v1.35 — 질문자가 "○○이 아니다" 라고 밝힌 대상의 특례 조문(제목에 그 이름이 든 것)은 예산에서 먼저 뺍니다.
     #   (비교15: "토양오염관리대상시설이 아니라서" 인데 시설 설치자 조문이 남고 일반 규정 제11조가 빠짐)
@@ -3058,6 +3119,13 @@ def _ask_after_search(req, steps, answered, found, flat, catalog, refs, it=None,
     for f, a in use:
         if id(a) in _cited_ids:
             prio[id(a)] = min(prio.get(id(a), 0.0), 0.2)
+    # ★ v1.44 (C-20261028-06) — 별표 순위를 인용 조문의 **목록 위치**(use 안 index)로 매겨, 뒤에 붙는 상위·위임·참조·
+    #   질문 조문(prio 0.2~0.4)이 인용한 별표는 가장 먼저 빠지고, 뒤로 민(+100) 특례 조문의 별표는 높은 순위를 지켰습니다.
+    #   모든 prio 조정이 끝난 뒤 '인용한 조문들 중 가장 높은 prio' 로 다시 매깁니다(질문 조문 보호 별표는 0.6 상한 유지).
+    #   되돌리기: 이 for 블록 삭제.
+    for k3, ids in _cite_src.items():
+        pr = min(prio.get(i, 999.0) for i in ids)
+        cite_rank[k3] = min(pr, 0.6) if k3 in named_bp else pr
     # 선별이 직접 고른 별표도, 그 별표를 인용한 조문이 더 앞에 있으면 그 순위를 따릅니다.
     for f, a in use:
         k = _bp_no(a)
@@ -3092,6 +3160,11 @@ def _ask_after_search(req, steps, answered, found, flat, catalog, refs, it=None,
         if still:
             by_name = {}
             for f, _ in use:
+                by_name.setdefault(f["name"], f)
+            # ★ v1.44 (C-20261028-05) — 다른 법령 별표 인용("「폐기물관리법 시행규칙」 별표 5에 따른")에서 그 법령 조문이
+            #   선별에 하나도 없으면 by_name 에 없어 API 조회도 경고도 없이 건너뛰었습니다. 받아 둔 법령(found)도 찾습니다.
+            #   되돌리기: 아래 두 줄 삭제.
+            for f in found:
                 by_name.setdefault(f["name"], f)
             fetched = []
             for law_name, kind, no in still:
@@ -3516,7 +3589,10 @@ def _ask_after_search(req, steps, answered, found, flat, catalog, refs, it=None,
                 # 다시 쓴 답이 근거를 잃으면(1차 실측: 일요일 소음 — 표기 지적 하나로 다시 써 인용 0건) 처음 답을 씁니다
                 _c1 = sum(1 for c in verify_citations(text, found) if c["ok"])
                 _c2 = sum(1 for c in verify_citations(text2, found) if c["ok"])
-                if "【결론】" in text2 and len(text2) > 80 and "【근거】" in text2 and _c2 >= max(1, _c1 // 2):
+                # ★ v1.44 (C-20261028-10) — 다시 쓴 답이 출력 상한에서 잘리면(【설명】 등 뒷부분 없음) 멀쩡한 첫 답을 덮었습니다.
+                #   첫 답에 있던 블록이 다시 쓴 답에 모두 있어야 채택합니다. 되돌리기: _keep_secs 조건 삭제.
+                _keep_secs = all(h in text2 for h in ("【결론】", "【근거】", "【계산】", "【설명】") if h in text)
+                if "【결론】" in text2 and len(text2) > 80 and "【근거】" in text2 and _c2 >= max(1, _c1 // 2) and _keep_secs:
                     text = text2
                 else:
                     probs = [dict(p, kind=p["kind"] + "(다시 쓴 답 버림)") for p in probs]
