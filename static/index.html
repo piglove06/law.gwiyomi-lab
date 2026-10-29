@@ -1407,7 +1407,7 @@ $("clearhist").onclick = () => {
 })();
 
 // 서버 버전 확인 — 화면과 서버가 다른 버전이면 경고
-const UI_VERSION = "1.46";
+const UI_VERSION = "1.47";
 fetch("/api/version").then(r => r.json()).then(d => {
   if(d.version !== UI_VERSION){
     $("vbadge").innerHTML =

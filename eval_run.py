@@ -188,20 +188,29 @@ def pick_option(question: str, options: list, answers: dict, default: str) -> st
     #     ② 보기가 예/아니오 꼴인데 원하는 값이 보기와 안 맞으면: 그 값이 질문 문장에 들어 있으면 '예'
     #        ("3년 이상입니까?" ← "3년 이상"), 아니면 그 키는 건너뜁니다(자유 입력으로 넣지 않음).
     #   되돌리기: 아래를 예전 반복문(dict 순서, 무조건 자유 입력)으로.
+    #   ③ (10-30 보정) 예/아니오 꼴 = '아니오' 보기가 있는 문항. 긍정 보기는 '예' 가 아니라 용어일 수 있습니다
+    #     (["등록대상동물", "아니오", "모름"]) — '예' 를 원하면 그 긍정 보기를 고릅니다.
     _ns = lambda t: re.sub(r"\s+", "", str(t or ""))
-    yn = [o for o in options if re.match(r"^(예|아니|네)", str(o))]
+    is_yn = any(re.match(r"^아니", str(o)) for o in options)
+    neg = [o for o in options if re.match(r"^아니", str(o))]
+    pos = next((o for o in options if re.match(r"^(예|네)", str(o))), None) or \
+        next((o for o in options if not re.match(r"^(아니|모름|모르|기타|확인 안|미확인)", str(o))), None)
     keys = sorted((k for k in (answers or {}) if k and k in question), key=len, reverse=True)
     for key in keys:
-        want = answers[key]
+        want = str(answers[key])
         for o in options:
             if o == want:
                 return o
+        if is_yn and pos and re.match(r"^(예|네)$", want):
+            return pos
+        if is_yn and neg and re.match(r"^아니", want):
+            return neg[0]
         for o in options:
             if want in o or o in want:
                 return o
-        if yn:
-            if _ns(want) and _ns(want) in _ns(question):
-                return next((o for o in yn if re.match(r"^(예|네)", str(o))), yn[0])
+        if is_yn:
+            if pos and _ns(want) and _ns(want) in _ns(question):
+                return pos
             continue
         return want                          # 보기에 없으면 자유 입력값으로
     if default == "first" and options:
