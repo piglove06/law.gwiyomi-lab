@@ -371,9 +371,14 @@ def grade(case: dict, data: dict) -> dict:
             ck(f"본문 없어야: {bad}", True)
             continue
         sents = [x for x in re.split(r"(?<=[.。!?])\s+|\n", answer) if bad in x]
-        cond_only = bool(ec_ok) and bool(sents) and all(_COND_RE.search(x.split(bad)[0]) for x in sents)
+        # ★ 2026-10-30 — 따옴표 안(옛 해석례를 옮겨 적은 말 등)도 같은 취급: 해석27 이 "법제처(2022)는 \"…명할 수 없습니다\"
+        #   라고 해석했으나 개정 전 조문 기준" 이라고 바르게 썼는데 금지어로 실패했습니다.
+        def _quoted(x):
+            head = x.split(bad)[0]
+            return (head.count('"') % 2 == 1) or (head.count("“") > head.count("”"))
+        cond_only = bool(ec_ok) and bool(sents) and all(_COND_RE.search(x.split(bad)[0]) or _quoted(x) for x in sents)
         ck(f"본문 없어야: {bad}", cond_only,
-           "조건 문장에만 있음 — 결론 판정이 맞아 통과" if cond_only else (sents[0][:160] if sents else ""))
+           "조건·인용 문장에만 있음 — 결론 판정이 맞아 통과" if cond_only else (sents[0][:160] if sents else ""))
     for want in case.get("expect_laws", []):
         ck(f"법령 수집: {want}", any(want in l for l in laws), ", ".join(laws))
     if case.get("expect_primary_law"):
