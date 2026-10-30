@@ -12,7 +12,9 @@ set "LLAMA_DIR=C:\llama"
 set "LLAMA_MODEL=unsloth/Qwen3.6-35B-A3B-GGUF:Q4_K_M"
 rem  v1.49 (2026-10-30) --slot-save-path : kv_reuse.py saves/restores the fixed prompt-prefix state there
 rem    (answer/clarify instructions, ~3k tokens). Remove it to turn that off (kv_reuse skips by itself).
-set "LLAMA_ARGS=-hf %LLAMA_MODEL% -lm none --no-mmproj -np 1 -c 16384 -ctk q8_0 -ctv q8_0 -fa on -t 6 --jinja --cache-ram 2048 --slot-save-path "%~dp0_cache\slots" --port 8080"
+rem    Relative path on purpose: an absolute path with Korean letters made llama-server fail to start
+rem    ("No mapping for the Unicode character ... code page", 2026-10-30 22:33). Runs from this folder.
+set "LLAMA_ARGS=-hf %LLAMA_MODEL% -lm none --no-mmproj -np 1 -c 16384 -ctk q8_0 -ctv q8_0 -fa on -t 6 --jinja --cache-ram 2048 --slot-save-path _cache\slots --port 8080"
 set "PY=.venv\Scripts\python.exe"
 
 rem  2026-10-15 - check the process too, not only the port. While the model is loading (~3 min)
