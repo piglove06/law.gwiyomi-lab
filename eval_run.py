@@ -299,7 +299,8 @@ def grade(case: dict, data: dict) -> dict:
       expect_no_warning : true 면 별표 경고가 뜨면 실패
       expect_warning    : true 면 경고가 없으면 실패
       all_cites_ok      : true 면 인용 검증이 전부 통과해야 함
-      expect_primary_law: 수집된 법령 중 **첫 번째**(주 법령)에 이 말이 있어야 함
+      expect_primary_law: 법령 목록 **첫 번째**(주 법령)에 이 말이 있어야 함
+                          (v1.48~ 서버가 목록을 '답변이 많이 인용한 법령' 순으로 돌려주므로 = 답이 주로 기댄 법령)
                           (2026-09-29 — 맞는 법이 2순위로 밀려도 expect_laws 는 통과해서
                            방사성폐기물·가덕도신공항 법으로 답한 것을 못 잡았습니다)
       no_law_in_clarify : true 면 되묻기 질문·보기에 법령 이름이 있으면 실패

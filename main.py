@@ -317,7 +317,7 @@ SELECT_ARTICLES = os.getenv("SELECT_ARTICLES", "1") not in ("0", "false", "False
 # 조회 후 지자체기관명으로 한 번 더 걸러냅니다.
 LOCAL_GOV = os.getenv("LOCAL_GOV", "성남시").strip()
 
-VERSION = "1.47"
+VERSION = "1.48"
 
 app = FastAPI(title="법령 조회 도우미", version=VERSION)
 
@@ -1417,6 +1417,30 @@ def _pick_stmd(rows: list, name: str):
     ends = [(r, k) for r, k in named if k.endswith(key)]
     pool = ends or named
     return min(pool, key=lambda x: len(x[1]))[0] if pool else None
+
+
+def _laws_by_cites(found: list, cites: list) -> list:
+    """
+    ★ v1.48 — 답변이 실제로 기댄 법령을 목록 맨 앞으로.
+    수집 순서(지능형 검색·후보 순서)대로 돌려주면, 답은 개인정보 보호법으로 했는데 맨 앞이 민원처리법이거나(해석36)
+    엉뚱한 법원조직법이 맨 앞(해석23)이었습니다. 이 순서는 화면 법령 목록, '이어서 묻기'에 넘기는 앞 답의 법령(앞 2개),
+    eval '주 법령' 검사에 그대로 쓰입니다.
+    정렬: 인용 확인된 횟수(법률·시행령·시행규칙은 한 묶음) 많은 순 → 답변에 먼저 나온 순 → 원래 순서.
+    인용이 없으면 원래 순서 그대로. 새 목록을 만들 뿐 found(검색 캐시에 들어 있음)는 바꾸지 않습니다.
+    되돌리기: 반환값의 _laws_by_cites(found, cites) 를 found 로.
+    """
+    def _b(n):
+        return re.sub(r"\s*(시행령|시행규칙)$", "", str(n or "")).strip()
+    cnt, first = {}, {}
+    for i, c in enumerate(cites or []):
+        if c.get("ok") and c.get("law"):
+            k = _b(c["law"])
+            cnt[k] = cnt.get(k, 0) + 1
+            first.setdefault(k, i)
+    if not cnt:
+        return found
+    pos = {id(f): i for i, f in enumerate(found)}
+    return sorted(found, key=lambda f: (-cnt.get(_b(f.get("name")), 0), first.get(_b(f.get("name")), 10 ** 6), pos[id(f)]))
 
 
 def _ctx_key(f: dict, a: dict) -> str:
@@ -3849,7 +3873,8 @@ def _ask_after_search(req, steps, answered, found, flat, catalog, refs, it=None,
             applog.warn(f"참고 사례 검색 실패 — 건너뜁니다: {e}")
 
     return {
-        "steps": steps, "answer": text, "laws": found, "citations": cites,
+        # ★ v1.48 — 법령 목록을 답변이 인용한 순서(많이 인용한 법령 묶음 먼저)로 돌려줍니다. 원래: "laws": found
+        "steps": steps, "answer": text, "laws": _laws_by_cites(found, cites), "citations": cites,
         "cases": cases,
         "cited_keys": [f"{n}|{j}|{g}" for n, j, g in hit],
         "references": [r for r, _ in sorted(refs.items(), key=lambda x: -x[1])][:12],
