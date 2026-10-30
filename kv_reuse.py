@@ -49,6 +49,17 @@ _PFX: dict = {}                          # stage → {"last", "text", "ids", "fi
 _TL = threading.local()                  # 요청 스레드별 '방금 쓴 답변' 이어 쓰기 정보
 
 
+def _chain_enabled() -> bool:
+    """
+    ★ v1.49a — ① 이어 쓰기(답변 검토)는 기본으로 끕니다. 켜기: _cache\\flags\\kv_chain_on 파일(또는 .env KV_CHAIN=1).
+    10-30 평가: 모델이 **방금 자기가 쓴 답을 같은 대화 안에서** 검토하자 '문제 없음'이 크게 늘어(다시 쓰기 9→1회,
+    핵심 주장 5.1→3.6개) 해석 문항이 15/19 → 12/19 로 떨어졌습니다. 검토 시간은 24초 → 11초로 줄었지만 품질 우선.
+    """
+    if os.getenv("KV_CHAIN") == "1":
+        return True
+    return os.path.exists(os.path.join(FLAG_DIR, "kv_chain_on"))
+
+
 def enabled() -> bool:
     if os.getenv("KV_REUSE", "1") == "0":
         return False
@@ -253,6 +264,8 @@ def chain_call(answer_text: str, user2: str, temperature: float, max_tokens: int
     answer_text 가 기억해 둔 답변과 다르거나(다시 쓴 답 등) 쓸 수 없으면 None(→ 예전 방식).
     """
     ch = getattr(_TL, "chain", None)
+    if not _chain_enabled():                 # ★ v1.49a — 기본 꺼짐(위 _chain_enabled 설명)
+        return None
     if not ch or not enabled() or time.time() - ch["t"] > CHAIN_TTL:
         return None
     a = _qn(answer_text)[:200]
@@ -280,3 +293,30 @@ def chain_call(answer_text: str, user2: str, temperature: float, max_tokens: int
     except Exception as e:                               # noqa: BLE001
         applog.warn(f"KV 이어 쓰기 실패 — 예전 방식으로: {type(e).__name__}: {e}")
         return None
+
+
+# ── ★ v1.49a — llama-server 한 번 다시 띄우기(실행 옵션 반영용) ─────────────────
+# _cache\\flags\\llm_restart_once 파일이 있으면 서버(이 프로그램)가 그 파일을 지우고, 5초 뒤
+# ai_client.restart_local_llm()(워치독이 쓰는 것과 같은 재시작: LLM 창 정리 → _5_restart_llm.bat)을 한 번 부릅니다.
+# start.bat·_5_restart_llm.bat 의 --slot-save-path 같은 새 옵션을 사람이 창을 닫지 않고 반영하려고 넣었습니다.
+# 파일을 먼저 지우므로 한 번만 동작합니다. 되돌리기: 아래 함수와 호출 삭제.
+def _restart_once() -> None:
+    p = os.path.join(FLAG_DIR, "llm_restart_once")
+    if not os.path.exists(p):
+        return
+    try:
+        os.remove(p)
+    except OSError:
+        return
+
+    def _run():
+        time.sleep(5)
+        try:
+            import ai_client
+            ai_client.restart_local_llm("요청 파일(_cache/flags/llm_restart_once) — 바뀐 실행 옵션 반영")
+        except Exception as e:                           # noqa: BLE001
+            applog.warn(f"LLM 한 번 다시 띄우기 실패: {type(e).__name__}: {e}")
+    threading.Thread(target=_run, daemon=True).start()
+
+
+_restart_once()
