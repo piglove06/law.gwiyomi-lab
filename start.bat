@@ -22,7 +22,9 @@ rem    2026-10-08 the server died twice with "bad allocation" when RAM ran out.
 rem ------------------------------------------------------------
 set "LLAMA_DIR=C:\llama"
 set "LLAMA_MODEL=unsloth/Qwen3.6-35B-A3B-GGUF:Q4_K_M"
-set "LLAMA_ARGS=-hf %LLAMA_MODEL% -lm none --no-mmproj -np 1 -c 16384 -ctk q8_0 -ctv q8_0 -fa on -t 6 --jinja --cache-ram 2048 --port 8080"
+rem  v1.49 (2026-10-30) --slot-save-path : kv_reuse.py saves/restores the fixed prompt-prefix state there
+rem    (answer/clarify instructions, ~3k tokens). Remove it to turn that off (kv_reuse skips by itself).
+set "LLAMA_ARGS=-hf %LLAMA_MODEL% -lm none --no-mmproj -np 1 -c 16384 -ctk q8_0 -ctv q8_0 -fa on -t 6 --jinja --cache-ram 2048 --slot-save-path "%~dp0_cache\slots" --port 8080"
 
 rem ------------------------------------------------------------
 rem  Log windows: logpipe.py adds Seoul time to each line, removes

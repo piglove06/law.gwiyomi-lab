@@ -22,6 +22,7 @@ import time
 import httpx
 
 import applog
+import kv_reuse          # ★ v1.49 kv_reuse — 프롬프트 캐시(KV) 재사용(이어 쓰기·고정 앞부분 복원)
 
 # ── 출력 토큰 상한 ────────────────────────────────────────────
 # 상한이 없으면 모델이 계속 생성합니다.
@@ -608,12 +609,24 @@ def _call_local(prompt: str, temperature: float, model: str,
                 "json_schema": {"name": re.sub(r"\W", "_", stage) or "out",
                                 "schema": schema, "strict": True},
             }
+        # ★ v1.49 kv_reuse ② — 되묻기처럼 앞부분 지시문이 매번 같은 단계는 저장해 둔 앞부분 상태를 복원해 이어 읽습니다.
+        #   쓸 수 없으면(None) 아래 예전 방식 그대로. 되돌리기: 이 블록 삭제.
+        if LOCAL_SERVER == "llamacpp" and stage in kv_reuse.PREFIX_STAGES:
+            _kv = kv_reuse.prefix_call(prompt, temperature, max_tokens, stage,
+                                       schema if (schema and json_enabled()) else None)
+            if _kv is not None and _kv.strip():
+                if schema and json_enabled():
+                    return _kv.strip()
+                return _clean_output(_kv)
 
     applog.debug(stage, f"── 프롬프트 ({n_prompt or '?'} tok, max_tokens={max_tokens}) ──\n{prompt}")
     t0 = time.time()
     who = "Ollama" if LOCAL_SERVER == "ollama" else "llama-server"
     try:
-        resp = httpx.post(url, json=payload, timeout=LOCAL_TIMEOUT)
+        # ★ v1.49 kv_reuse — 앞부분 복원과 그 호출 사이에 다른 요청이 끼지 않게 모든 LLM 호출이 같은 잠금을 씁니다
+        #   (llama-server 는 -np 1 이라 원래 한 번에 하나만 처리 — 처리량은 같음). 원래: 잠금 없이 post
+        with kv_reuse.LOCK:
+            resp = httpx.post(url, json=payload, timeout=LOCAL_TIMEOUT)
         resp.raise_for_status()
     except httpx.ConnectError as e:
         msg = f"로컬 LLM 서버에 연결하지 못했습니다 ({url}). {who} 가 실행 중인지 확인하세요."
@@ -1195,8 +1208,19 @@ def _tidy_answer(text: str) -> str:
 
 def answer(question: str, context: str) -> str:
     """조문 원문을 근거로 답변 생성."""
-    return _tidy_answer(_call(ANSWER_PROMPT.format(question=question, context=context),
-                              max_tokens=MAXTOK_ANSWER, stage="answer"))
+    prompt = ANSWER_PROMPT.format(question=question, context=context)
+    # ★ v1.49 kv_reuse ① — /completion 으로 불러 생성 토큰을 기억해 두고(답변 검토가 이어서 씀), 고정 지시문은 ② 로 복원.
+    #   쓸 수 없으면 None → 아래 예전 방식. 되돌리기: 이 블록 삭제.
+    if LOCAL_SERVER == "llamacpp" and kv_reuse.enabled():
+        try:
+            _room = server_ctx() - (count_tokens(prompt) + 32) - 16
+            if _room >= 64:
+                _kv = kv_reuse.answer_call(prompt, 0.3, min(MAXTOK_ANSWER, _room))
+                if _kv is not None and _kv.strip():
+                    return _tidy_answer(_clean_output(_kv))
+        except Exception as e:                           # noqa: BLE001
+            applog.warn(f"KV 답변 경로 실패 — 예전 방식으로: {type(e).__name__}: {e}")
+    return _tidy_answer(_call(prompt, max_tokens=MAXTOK_ANSWER, stage="answer"))
 
 
 # ── v1.40 — 답변 검토 (U-20·22·23, L-2244-1·3, U-7) ─────────────────────
@@ -1245,6 +1269,21 @@ REVIEW_SCHEMA = {
     },
     "required": ["claims", "premise", "premise_fix", "contradiction", "contradiction_fix"],
 }
+# ★ v1.49 kv_reuse ① — 답변에 **이어서** 보내는 검토 지시(위 REVIEW_PROMPT 와 같은 내용, 질문·조문·답변은 이미 대화 안에 있음)
+REVIEW_CHAIN_PROMPT = """이제 너는 검토자다. 답변을 다시 쓰지 말고, 바로 앞에 쓴 답변의 핵심 주장을 위 【조문 원문】과 하나씩 대조한다.
+
+1. claims — 답변의 【결론】·【계산】에서 **판정을 정하는 핵심 주장**을 최대 6개 뽑는다(기한·예외·단서도 포함).
+   (기준 수치, 기한, 대상·요건, 보정값, 적용되는 조·호. 예: "주거지역 공사장 주간 기준 65dB", "4명 이하 사업장에도 제60조 적용")
+   주장마다 【조문 원문】에서 그 주장을 확인하거나 반박하는 문구를 **그대로 복사**해 quote 에 넣고 verdict 를 정한다.
+     일치 — 원문 문구가 주장과 같다
+     불일치 — 원문 문구가 주장과 다르다(다른 수치·다른 표 칸·다른 호·단서/괄호 예외를 빠뜨림)
+     원문없음 — 원문 어디에도 그 주장의 근거가 없다(quote 는 빈칸)
+   fix 에는 불일치·원문없음일 때 무엇으로 고쳐야 하는지 한 줄.
+2. premise — 답변이 【사용자 질문】·(확인된 조건)에 적힌 사실과 **반대로** 단정했으면 질문의 그 문구를 복사(없으면 빈칸).
+3. contradiction — 답변 【결론】의 판정과 【계산】·【설명】의 판정이 다르면 답변에서 어긋나는 문구를 복사(없으면 빈칸).
+표기 차이(dB/㏈, 띄어쓰기, 말 바꿔 쓰기)는 일치로 본다. 확실하지 않으면 일치로 본다.
+JSON 하나만 출력한다:
+{"claims": [{"claim": "...", "quote": "...", "verdict": "일치|불일치|원문없음", "fix": ""}], "premise": "", "premise_fix": "", "contradiction": "", "contradiction_fix": ""}"""
 MAXTOK_REVIEW = int(os.getenv("MAXTOK_REVIEW", "1100"))   # ★ v1.43 주장 6개라 800 → 1100
 REVIEW_STATS = {"claims": 0, "dropped": 0}      # 마지막 검토의 주장 수·근거 못 찾아 버린 지적 수(처리 과정 표시용)
 
@@ -1258,11 +1297,21 @@ def _qnorm(t: str) -> str:
 def review_answer(question: str, answer_text: str, context: str) -> list:
     """다 쓴 답변의 핵심 주장을 원문과 대조합니다. 근거 글자가 실제로 있는 지적만 돌려줍니다. 실패하면 []."""
     REVIEW_STATS["ok"] = False      # ★ v1.45 (C-20261028-14) 검토 호출 성공 여부(실패를 '문제 없음' 으로 보이지 않게)
-    try:
-        obj, _ = call_json(REVIEW_PROMPT.format(question=question, answer=answer_text, context=context),
-                           REVIEW_SCHEMA, temperature=0, max_tokens=MAXTOK_REVIEW, stage="review")
-    except AiError:
-        return []
+    obj = None
+    # ★ v1.49 kv_reuse ① — 방금 쓴 답변에 이어서 검토 지시만 보냅니다(조문·질문·답변 약 8~10k 토큰을 다시 읽지 않음).
+    #   쓸 수 없으면 아래 예전 방식. 되돌리기: 이 블록 삭제.
+    if json_enabled() and LOCAL_SERVER == "llamacpp":
+        _raw = kv_reuse.chain_call(answer_text, REVIEW_CHAIN_PROMPT, 0, MAXTOK_REVIEW, "review", schema=REVIEW_SCHEMA)
+        if _raw:
+            obj = _parse_json(_raw)
+            if obj is None:
+                applog.warn(f"LLM review(이어 쓰기): JSON 파싱 실패 — 예전 방식으로. 앞부분: {_raw[:120]}")
+    if obj is None:
+        try:
+            obj, _ = call_json(REVIEW_PROMPT.format(question=question, answer=answer_text, context=context),
+                               REVIEW_SCHEMA, temperature=0, max_tokens=MAXTOK_REVIEW, stage="review")
+        except AiError:
+            return []
     if not isinstance(obj, dict):
         return []
     REVIEW_STATS["ok"] = True
