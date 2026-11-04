@@ -26,7 +26,11 @@ rem  v1.49 (2026-10-30) --slot-save-path : kv_reuse.py saves/restores the fixed 
 rem    (answer/clarify instructions, ~3k tokens). Remove it to turn that off (kv_reuse skips by itself).
 rem    Relative path on purpose: an absolute path with Korean letters made llama-server fail to start
 rem    ("No mapping for the Unicode character ... code page", 2026-10-30 22:33). Runs from this folder.
-set "LLAMA_ARGS=-hf %LLAMA_MODEL% -lm none --no-mmproj -np 1 -c 16384 -ctk q8_0 -ctv q8_0 -fa on -t 6 --jinja --cache-ram 2048 --slot-save-path _cache\slots --port 8080"
+rem  v1.49b (2026-11-04) -fit off -ngl 99 -ncmoe 26 : explicit GPU/CPU placement instead of auto-fit.
+rem    Auto-fit hit CUDA out of memory on every start (2026-11-04 10:44~). draft_lab test (11-01):
+rem    auto-fit 51.8 tok/s, -ncmoe 24 57.6 tok/s (10.9 GB VRAM), -ncmoe 26 55.7 tok/s (more headroom).
+rem    Rollback: delete "-fit off -ngl 99 -ncmoe 26" (both here and in _5_restart_llm.bat).
+set "LLAMA_ARGS=-hf %LLAMA_MODEL% -lm none --no-mmproj -np 1 -c 16384 -ctk q8_0 -ctv q8_0 -fa on -t 6 --jinja --cache-ram 2048 --slot-save-path _cache\slots --port 8080 -fit off -ngl 99 -ncmoe 26"
 
 rem ------------------------------------------------------------
 rem  Log windows: logpipe.py adds Seoul time to each line, removes
@@ -34,6 +38,11 @@ rem  color codes, hides noise, and saves the full log to _runs\
 rem  (llama-server prints elapsed time, cloudflared prints UTC).
 rem ------------------------------------------------------------
 set "PY=.venv\Scripts\python.exe"
+rem  v1.49b (2026-11-04) GGML_CUDA_NO_PINNED=1 : do not pin (page-lock) host RAM for the CPU-side experts.
+rem    With VRAM nearly free (1.1/12 GB) llama-server still died 2 s into loading with
+rem    "CUDA error: out of memory" -> the pinned host allocation (~13 GB) failed, not VRAM.
+rem    Decode speed is not affected; large prompt batches may be a bit slower. Rollback: delete this line.
+set "GGML_CUDA_NO_PINNED=1"
 
 rem  2026-10-15 - check the process too, not only the port. While the model is loading (~3 min)
 rem  port 8080 is not open yet, so running 3 right after 5 started a SECOND llama-server (RAM 95%%).
