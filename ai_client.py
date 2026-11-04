@@ -136,6 +136,7 @@ _TERM_RULES_JSON = """JSON 하나만 출력한다.
   측면 하나에는 법 하나만. 질문에 없는 조건(미성년자·직무 중 등)을 전제로 한 법을 고르지 마라.
   한 법 안의 여러 사항(신고 대상·서류·검사 시기 등), 한 가지 기준·절차를 묻는 질문은 빈 배열 [] 이다.
   질문자가 묻지 않은 관련 법(안전·소방·건축 등)을 측면으로 덧붙이지 마라.
+  법령과 무관한 부탁(식사·맛집·추천·잡담 등)을 법적 측면(금연·위생·근무시간 등)으로 바꿔 만들지 마라(★ v1.50).
   law 는 그 측면을 직접 규율하는 법(범죄는 형법보다 특별법)을 쓴다.
   하위 질문에는 원래 질문의 상황(누가·무엇을)을 그대로 담는다."""
 
@@ -866,30 +867,71 @@ legal=false (답하지 않을 질문):
 "옥외광고물 허가 절차" → true
 "토익 900점 받는 방법" → false
 
-JSON 하나만 출력한다: {{"legal": true 또는 false, "reason": "한 줄 이유"}}
+★ v1.50 — 섞인 질문: 법령으로 답할 부분과 법령과 무관한 부탁(식사·맛집·추천·잡담 등)이 한 질문에 같이 있으면
+legal=true 로 두고, law_part 에 **법령으로 답할 부분만** 질문자의 말 그대로 옮겨 적고, other 에 뺀 부분을 짧게 적는다.
+- law_part 에 질문에 없는 사실·조건·법령을 보태지 마라. 무관한 부탁을 법적인 말(금연·위생·근무시간 등)로 바꿔 남기지 마라.
+- 사실관계·상황 설명·감정 표현은 법령 판단에 쓰이므로 빼지 않는다. 법령 질문과 **따로 요청한 별개의 부탁**만 뺀다.
+- 질문 전체가 법령 질문이면 law_part 와 other 는 빈 문자열 "" 이다. legal=false 일 때도 "" 이다.
+예시:
+"건축 허가 절차 알려주고 근처 맛집도 추천해줘" → legal=true, law_part="건축 허가 절차 알려줘", other="맛집 추천"
+"식품 영업신고 서류가 뭐야? 그리고 오늘 날씨 어때" → legal=true, law_part="식품 영업신고 서류가 뭐야?", other="날씨"
+"옥외광고물 허가 절차" → legal=true, law_part="", other=""
+
+JSON 하나만 출력한다: {{"legal": true 또는 false, "reason": "한 줄 이유", "law_part": "...", "other": "..."}}
 
 질문: {question}
 """
 SCOPE_SCHEMA = {
     "type": "object",
-    "properties": {"legal": {"type": "boolean"}, "reason": {"type": "string", "maxLength": 80}},
-    "required": ["legal", "reason"],
+    "properties": {"legal": {"type": "boolean"}, "reason": {"type": "string", "maxLength": 80},
+                   # ★ v1.50 — 섞인 질문에서 법령 부분 / 뺀 부분
+                   "law_part": {"type": "string", "maxLength": 300},
+                   "other": {"type": "string", "maxLength": 60}},
+    "required": ["legal", "reason", "law_part", "other"],
 }
 
 
-def scope_check(question: str) -> tuple:
-    """(법령 질문인가, 이유). 실패하면 (True, "") — 막지 않습니다."""
+def _scope_part_ok(part: str, question: str) -> bool:
+    """★ v1.50 — law_part 가 원래 질문에서 떼어낸 것인지 확인(모델이 말을 지어 붙였으면 쓰지 않음).
+    글자 2-gram 의 85% 이상이 원래 질문에 있고, 원래 질문보다 확실히 짧아야 함."""
+    p = re.sub(r"\s+", "", part or "")
+    q = re.sub(r"\s+", "", question or "")
+    if len(p) < 4 or len(p) >= len(q) * 0.95:
+        return False
+    grams = [p[i:i + 2] for i in range(len(p) - 1)]
+    return sum(1 for g in grams if g in q) >= 0.85 * len(grams)
+
+
+def scope_split(question: str) -> dict:
+    """★ v1.50 — {"legal": bool, "reason": str, "law_part": str, "other": str}.
+    law_part 가 비어 있지 않으면 '법령 부분 + 무관한 부탁'이 섞인 질문 — 법령 부분만 검색·답변에 씁니다.
+    실패하면 legal=True·나머지 "" — 막지도, 자르지도 않습니다."""
+    out = {"legal": True, "reason": "", "law_part": "", "other": ""}
     try:
+        # v1.50 — law_part 를 적어야 해서 출력 한도 80 → 200
         obj, raw = call_json(SCOPE_PROMPT.format(question=str(question or "")[:600]),
-                             SCOPE_SCHEMA, temperature=0, max_tokens=80, stage="scope")
+                             SCOPE_SCHEMA, temperature=0, max_tokens=200, stage="scope")
     except AiError:
-        return True, ""
+        return out
     if not isinstance(obj, dict):
         m = re.search(r'"legal"\s*:\s*(true|false)', raw or "")
-        if not m:
-            return True, ""
-        return m.group(1) == "true", ""
-    return bool(obj.get("legal", True)), str(obj.get("reason", ""))[:80]
+        if m:
+            out["legal"] = m.group(1) == "true"
+        return out
+    out["legal"] = bool(obj.get("legal", True))
+    out["reason"] = str(obj.get("reason", ""))[:80]
+    part = str(obj.get("law_part") or "").strip()
+    other = str(obj.get("other") or "").strip()
+    if out["legal"] and other and _scope_part_ok(part, str(question or "")):
+        out["law_part"], out["other"] = part, other[:60]
+    return out
+
+
+def scope_check(question: str) -> tuple:
+    """(법령 질문인가, 이유). 실패하면 (True, "") — 막지 않습니다.
+    ★ v1.50 — scope_split 을 감싼 예전 모양(섞인 질문 정보는 버림)."""
+    r = scope_split(question)
+    return r["legal"], r["reason"]
 
 
 # ── v1.38 — 참고 사례 고르기 ─────────────────────────────────────

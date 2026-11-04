@@ -317,7 +317,7 @@ SELECT_ARTICLES = os.getenv("SELECT_ARTICLES", "1") not in ("0", "false", "False
 # 조회 후 지자체기관명으로 한 번 더 걸러냅니다.
 LOCAL_GOV = os.getenv("LOCAL_GOV", "성남시").strip()
 
-VERSION = "1.49"
+VERSION = "1.50"  # ★ v1.50 섞인 질문 법령 부분만 (원래 "1.49")
 
 app = FastAPI(title="법령 조회 도우미", version=VERSION)
 
@@ -1679,6 +1679,13 @@ RELATED_CASES = os.getenv("RELATED_CASES", "1") != "0"
 CASE_LLM_POOL = int(os.getenv("CASE_LLM_POOL", "10"))
 # v1.37 — 법령과 무관한 질문 거르기(ai_client.scope_check). 0 이면 끔
 SCOPE_CHECK = os.getenv("SCOPE_CHECK", "1") != "0"
+# ★ v1.50 — 법령 질문 + 무관한 부탁(점심 메뉴 등)이 섞인 질문: 법령 부분만 검색·답변하고 나머지는 답하지 않았다고 알림.
+#   실사용 2026-11-04 #1104-020: "9급 응시 자격 조문 + 점심 뭐 먹지" → 검색어 변환이 '점심 식사 시 금연 의무'라는
+#   묻지 않은 측면을 지어내 국민건강증진법으로 답함. 원래 질문 → (시각, 법령 부분, 뺀 부분). 되묻기 라운드에도 같은 질문으로 씀.
+#   되돌리기: SCOPE_TRIM=0 (.env) — 예전처럼 원래 질문 그대로.
+SCOPE_TRIM = os.getenv("SCOPE_TRIM", "1") != "0"
+_SCOPE_TRIM: dict = {}
+_SCOPE_TRIM_TTL = 3600.0     # 되묻기 응답이 늦어도(applog 블록과 같은 1시간) 같은 법령 부분을 씀
 # ★ v1.40 — 주 법령 LLM 선택(법령 추측과 지능형 1위가 엇갈릴 때). .env LAW_PICK=0 이면 예전 규칙.
 LAW_PICK = os.getenv("LAW_PICK", "1") != "0"
 # ★ v1.40 — 참고 해석례를 답변 전에 골라 답변 지시에 넣음(약 5~10초 추가). 0 이면 예전처럼 답변 뒤에 화면에만.
@@ -1974,6 +1981,19 @@ class _LoggedSteps(list):
             pass
 
 
+def _scope_note(req: AskRequest, result) -> None:
+    """★ v1.50 — 섞인 질문에서 뺀 부분(점심 메뉴 등)은 답하지 않았다고 최종 답 끝에 한 줄 알립니다.
+    되묻기 중(clarify)·오류 응답에는 붙이지 않습니다."""
+    if not (SCOPE_TRIM and isinstance(result, dict)) or result.get("clarify") or not result.get("answer"):
+        return
+    tr = _SCOPE_TRIM.get(req.question.strip())
+    if not tr or time.time() - tr[0] > _SCOPE_TRIM_TTL:
+        return
+    result["scope_trim"] = {"law_part": tr[1], "other": tr[2]}
+    result["answer"] = (str(result["answer"]).rstrip() + "\n\n【답하지 않은 부분】\n"
+                        f"질문 중 「{tr[2]}」 부분은 법령 조문으로 답할 수 있는 내용이 아니어서 답하지 않았습니다.")
+
+
 def _ask_logged(req: AskRequest, progress: list):
     """
     _ask_sync 를 질문 블록 로그로 감쌉니다.
@@ -1994,9 +2014,12 @@ def _ask_logged(req: AskRequest, progress: list):
         # ★ v1.45 (C-20261028-17) — '이어서 묻기'에서 _ask_sync 가 req.laws 를 앞 답의 법령으로 바꿔,
         #   저장 키(바뀐 laws)와 조회 키(빈 laws)가 달라 캐시가 영영 맞지 않았습니다. 저장 전에 되돌립니다.
         _laws0, _mode0 = list(getattr(req, "laws", None) or []), getattr(req, "laws_mode", "")
+        _q0 = req.question               # ★ v1.50 — _ask_sync 가 법령 부분만 남기면 req.question 이 바뀜. 저장 전에 되돌림
         result = _ac_res if _ac_res is not None else _ask_sync(req, progress)
         if _ac_res is None:
             req.laws, req.laws_mode = _laws0, _mode0
+            req.question = _q0
+            _scope_note(req, result)     # ★ v1.50
             answer_cache.after(req, result, _ac_state, VERSION)
     except Exception as e:
         applog.end(sess, error=f"{type(e).__name__}: {e}")
@@ -2053,6 +2076,13 @@ def _ask_sync(req: AskRequest, progress: list):
     # 사용자가 직접 적은 내용을 조건에 합칩니다.
     answered = " / ".join(x for x in (prev_note, req.answered, req.note.strip()) if x)
 
+    # ★ v1.50 — 되묻기 라운드: 첫 라운드에서 법령 부분만 남긴 질문이면 같은 법령 부분으로 이어 갑니다
+    #   (화면은 원래 질문을 다시 보냄). 검색 캐시 키·답변 지시가 첫 라운드와 같아집니다.
+    if SCOPE_TRIM and req.round > 0:
+        _tr = _SCOPE_TRIM.get(req.question.strip())
+        if _tr and time.time() - _tr[0] <= _SCOPE_TRIM_TTL:
+            req.question = _tr[1]
+
     # ★ v1.31 — 질문 의도(Intent). 규칙 기반이라 LLM 호출이 없습니다(intent.py).
     #   경로가 갈립니다: 조문 조회는 그 조문만, 정의·일반 기준은 되묻기 없이 답변.
     it = intent_mod.classify(req.question)
@@ -2071,7 +2101,21 @@ def _ask_sync(req: AskRequest, progress: list):
     #   참고 법령을 직접 고른 경우·앞 질문에 이어 묻는 경우는 법령 질문으로 보고 건너뜁니다.
     if (SCOPE_CHECK and req.round == 0 and not req.answered and not req.laws
             and not (req.prev_question or "").strip()):
-        ok, why = ai_client.scope_check(req.question)
+        # ★ v1.50 — scope_check → scope_split(섞인 질문이면 법령 부분 law_part 도 돌려줌). 원래: ok, why = ai_client.scope_check(req.question)
+        _sc = ai_client.scope_split(req.question)
+        ok, why = _sc["legal"], _sc["reason"]
+        if ok and SCOPE_TRIM and _sc["law_part"]:
+            q0 = req.question.strip()
+            now = time.time()
+            for k in [k for k, v in list(_SCOPE_TRIM.items()) if now - v[0] > _SCOPE_TRIM_TTL]:
+                _SCOPE_TRIM.pop(k, None)
+            _SCOPE_TRIM[q0] = (now, _sc["law_part"], _sc["other"])
+            req.question = _sc["law_part"]
+            steps.append({"name": "법령 외 부분 제외",
+                          "detail": f"법령 부분만 찾습니다: {_sc['law_part'][:80]} · 뺀 부분: {_sc['other']}"})
+            _it2 = intent_mod.classify(req.question)
+            if _it2.kind != intent_mod.ARTICLE_LOOKUP:     # 조문 직접 조회 경로는 이미 지났으므로 그대로 둠
+                it = _it2
         if not ok:
             steps.append({"name": "법령 질문 아님", "detail": why or "법령과 무관한 질문"})
             return {
