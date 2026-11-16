@@ -187,12 +187,19 @@ def llm(stage: str, prompt_tokens, output_tokens, secs: float,
     pt = f"{int(prompt_tokens):,}" if prompt_tokens is not None else "?"
     ct = f"{int(output_tokens):,}" if output_tokens is not None else "?"
     speed = f" · {tps:.0f} tok/s" if tps else ""
+    if sent:
+        _tls.finish = {**(getattr(_tls, "finish", None) or {}), stage: finish}
     warn = ""
     if finish == "length":
         warn = "  ⚠ 출력 상한에 걸려 잘림"
     bar = "  │   " if s else "  "
     emit(f"[{ts()}]{bar}└ LLM {stage:<7} 입력 {pt} → 출력 {ct} tok · {secs:.1f}s{speed}{warn}"
          + (f" · {note}" if note else ""))
+
+
+def last_finish(stage: str) -> str:
+    """이 스레드에서 마지막으로 끝난 그 단계 LLM 호출의 종료 사유("length" = 출력 상한에 잘림)."""
+    return (getattr(_tls, "finish", None) or {}).get(stage, "")
 
 
 def warn(msg: str) -> None:

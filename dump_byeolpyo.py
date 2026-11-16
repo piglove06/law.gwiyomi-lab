@@ -23,7 +23,7 @@
   python dump_byeolpyo.py "물환경보전법 시행규칙"     # 다른 법령으로 보고 싶을 때
 
 표준 라이브러리만 씁니다. .venv 활성화 없이 그냥 python 으로 돌아갑니다.
-결과는 files\_dump\ 폴더에 저장됩니다.
+결과는 files\\_dump\\ 폴더에 저장됩니다.
 """
 
 import os

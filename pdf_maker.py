@@ -156,7 +156,7 @@ def build(payload: dict) -> bytes:
     payload: {question, answered, answer, citations[], laws[], generated_at}
     """
     st = _styles()
-    f, fb = FONT, FONT_BOLD
+    fb = FONT_BOLD
 
     buf = io.BytesIO()
     doc = SimpleDocTemplate(

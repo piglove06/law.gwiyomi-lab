@@ -234,7 +234,39 @@ class VerdictConflict(unittest.TestCase):
         self.assertEqual(main._verdict_conflict(a), "")
 
     def test_thinking_trace_is_self_correction(self):
-        self.assertTrue(main._SELF_CORR_RE.search("*잠깐, 다시 확인해 보겠습니다.*"))
+        for t in ("*잠깐, 다시 확인해 보겠습니다.*", "**재검토:**", "**결론 수정:**", "**최종 결론:**"):
+            self.assertTrue(main._SELF_CORR_RE.search(t), t)
+
+    def test_explanation_verdict_when_no_calc(self):
+        a = ("【결론】\n예, 규제기준을 초과했습니다.\n\n【설명】\n1. 기준은 75dB 입니다.\n"
+             "2. 68dB < 75dB 이므로 초과가 아닙니다.\n")
+        self.assertTrue(main._verdict_conflict(a))
+        self.assertEqual(main._verdict_conflict(a.replace("이므로 초과가 아닙니다", "이므로 초과했습니다")), "")
+
+    def test_conditional_sentence_ignored(self):
+        a = "【결론】\n초과하지 않았습니다.\n\n【설명】\n만약 기준이 65dB 이면 초과이므로 조치를 받습니다.\n"
+        self.assertEqual(main._verdict_conflict(a), "")
+
+    def test_revision_notes_removed(self):
+        a = "【결론】\n초과합니다.\n\n【설명】\n1. 기준 65dB.\n\n※ 검토 의견 반영 및 최종 수정\n이전 답변의 결론을 정정합니다."
+        got = ai_client._strip_revision_notes(a)
+        self.assertNotIn("검토 의견", got)
+        self.assertIn("【설명】\n1. 기준 65dB.", got)
+
+
+class LastFinish(unittest.TestCase):
+    def test_truncation_is_remembered_per_stage(self):
+        import applog
+        old = applog.emit
+        applog.emit = lambda *a, **k: None
+        try:
+            applog.llm("answer", 10, 10, 0.1, finish="length")
+            applog.llm("review", 10, 10, 0.1, finish="stop")
+            self.assertEqual(applog.last_finish("answer"), "length")
+            applog.llm("answer", 10, 10, 0.1, finish="stop")
+            self.assertEqual(applog.last_finish("answer"), "stop")
+        finally:
+            applog.emit = old
 
 
 class LawClient(unittest.TestCase):

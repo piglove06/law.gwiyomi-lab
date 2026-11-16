@@ -243,26 +243,38 @@ def _merge_conclusion(text: str, text2: str) -> str:
 
 
 _SELF_CORR_RE = re.compile(r"(?m)(수정된|정정된|바로잡은|다시\s*정리한)\s*결론|^\s*\**\s*(수정|정정)\s*\**\s*[:：]|정정하면"
-                           r"|잠깐[,，]?\s*다시|다시\s*(확인|계산)해\s*보겠")
+                           r"|잠깐[,，]?\s*다시|다시\s*(확인|계산)해\s*보겠"
+                           r"|결론\s*(수정|정정|변경)|재검토\s*\**\s*[:：]|최종\s*결론\s*\**\s*[:：]|이전\s*답변의?\s*결론")
 _VERDICT_WORDS = re.compile(r"초과|해당|대상|위반|필요|가능")
-_NEG_WORDS = re.compile(r"않|아니|아님|미달|미초과|없")
+_NEG_WORDS = re.compile(r"않|아니|아닙|아님|아닌|미달|미초과|없")
+_FINAL_WORDS = re.compile(r"판정|최종|따라서|그러므로|결론적으로|이므로|므로")
+_COND_WORDS = re.compile(r"경우|이면|라면|다면|만약|만일|할 때|하면")
 
 
 def _verdict_conflict(text: str) -> str:
-    """【결론】 첫 문장과 【계산】의 '판정' 줄이 같은 말(초과·해당…)을 두고 긍정·부정이 반대면 그 결론 문장, 아니면 ""."""
+    """【결론】 첫 문장과 뒤쪽 판정(【계산】의 '판정' 줄, 없으면 【설명】의 마지막 판정 문장)이
+    같은 말(초과·해당…)을 두고 긍정·부정이 반대면 그 결론 문장, 아니면 ""."""
     mc = re.search(r"【결론】\s*([^\n]+)", text or "")
-    mk = re.search(r"【계산】([\s\S]*?)(?=【|\Z)", text or "")
-    if not mc or not mk:
-        return ""
-    lines = [ln for ln in mk.group(1).splitlines() if "판정" in ln]
-    if not lines:
+    if not mc:
         return ""
     concl = re.split(r"(?<=[.다])\s", mc.group(1).strip(), 1)[0]
-    calc = lines[-1]
-    shared = set(_VERDICT_WORDS.findall(concl)) & set(_VERDICT_WORDS.findall(calc))
-    if shared and bool(_NEG_WORDS.search(concl)) != bool(_NEG_WORDS.search(calc)):
+    later = ""
+    mk = re.search(r"【계산】([\s\S]*?)(?=【|\Z)", text or "")
+    if mk:
+        lines = [ln for ln in mk.group(1).splitlines() if "판정" in ln]
+        later = lines[-1] if lines else ""
+    if not later:
+        me = re.search(r"【설명】([\s\S]*?)(?=【|\Z)", text or "")
+        sents = re.split(r"(?<=[.다])\s+|\n", me.group(1)) if me else []
+        sents = [x for x in sents if _VERDICT_WORDS.search(x) and _FINAL_WORDS.search(x)
+                 and not _COND_WORDS.search(x)]
+        later = sents[-1] if sents else ""
+    shared = set(_VERDICT_WORDS.findall(concl)) & set(_VERDICT_WORDS.findall(later))
+    if shared and bool(_NEG_WORDS.search(concl)) != bool(_NEG_WORDS.search(later)):
         return concl
     return ""
+
+
 _SELF_CORR_FIX = ("【결론】과 뒤쪽(【설명】 끝의 '수정된 결론' 등)의 판정이 다르다. 조문 원문으로 다시 따져 하나의 판정으로 정하고, "
                   "고친 흔적 없이 【결론】부터 처음부터 다시 쓴다")
 
@@ -343,7 +355,7 @@ SELECT_ARTICLES = os.getenv("SELECT_ARTICLES", "1") not in ("0", "false", "False
 # 조회 후 지자체기관명으로 한 번 더 걸러냅니다.
 LOCAL_GOV = os.getenv("LOCAL_GOV", "성남시").strip()
 
-VERSION = "1.53"
+VERSION = "1.54"
 
 app = FastAPI(title="법령 조회 도우미", version=VERSION)
 
@@ -1308,7 +1320,10 @@ def _hist_cached(kind: str, key: str, fn):
         return hit[1]
     val = fn()
     if val:
-        _HIST_CACHE[k] = (time.time(), val)
+        now = time.time()
+        for k0 in [k0 for k0, v0 in list(_HIST_CACHE.items()) if now - v0[0] >= 3600]:
+            _HIST_CACHE.pop(k0, None)
+        _HIST_CACHE[k] = (now, val)
     return val
 
 
@@ -3236,6 +3251,7 @@ def _ask_after_search(req, steps, answered, found, flat, catalog, refs, it=None,
         text = ai_client.answer(q_for_answer, context)
     except ai_client.AiError as e:
         return _err(str(e))
+    _trunc = applog.last_finish("answer") == "length"
     if _neg and "【결론】" in text:
         pre = text[:text.index("【결론】")]
         if pre.strip() and re.search(r"제공된\s*(\[?조문|원문)", pre):
@@ -3253,8 +3269,13 @@ def _ask_after_search(req, steps, answered, found, flat, catalog, refs, it=None,
                 probs = list(probs) + [{"kind": "결론모순", "quote": _vc[:80],
                                         "fix": "【결론】의 판정이 【계산】의 판정과 반대다. 【계산】을 조문 원문으로 다시 확인해 "
                                                "하나의 판정으로 맞추고 【결론】부터 다시 쓴다"}]
+            if _trunc:
+                probs = list(probs) + [{"kind": "잘림", "quote": text.strip()[-80:],
+                                        "fix": "답이 출력 한도에 걸려 끝까지 쓰이지 않았다. 같은 내용 되풀이·고친 흔적 없이 "
+                                               "필요한 블록만 간결하게 처음부터 다시 쓴다"}]
             if probs:
                 text2 = ai_client.answer_revised(q_for_answer, context, probs)
+                _trunc2 = applog.last_finish("answer") == "length"
                 if _neg and "【결론】" in text2:
                     pre2 = text2[:text2.index("【결론】")]
                     if pre2.strip() and re.search(r"제공된\s*(\[?조문|원문)", pre2):
@@ -3263,7 +3284,7 @@ def _ask_after_search(req, steps, answered, found, flat, catalog, refs, it=None,
                 _c2 = sum(1 for c in verify_citations(text2, found) if c["ok"])
                 _keep_secs = all(h in text2 for h in ("【결론】", "【근거】", "【계산】", "【설명】") if h in text)
                 if "【결론】" in text2 and len(text2) > 80 and "【근거】" in text2 and _c2 >= max(1, _c1 // 2) and _keep_secs:
-                    text = text2
+                    text, _trunc = text2, _trunc2
                 elif any(p.get("kind") == "결론모순" for p in probs) and _merge_conclusion(text, text2):
                     text = _merge_conclusion(text, text2)
                     probs = [dict(p, kind=p["kind"] + "(결론만 반영)") for p in probs]
@@ -3287,6 +3308,13 @@ def _ask_after_search(req, steps, answered, found, flat, catalog, refs, it=None,
     steps.append({"name": "인용 검증", "detail": f"{sum(1 for c in cites if c['ok'])}/{len(cites)}건 확인"})
 
     warnings = []
+    _vc_final = _verdict_conflict(text)
+    if _vc_final:
+        warnings.append("답변의 【결론】과 계산·설명의 판정이 서로 다릅니다. 근거 조문 원문과 수치로 직접 확인하세요.")
+        steps.append({"name": "결론 불일치 경고", "detail": _vc_final[:60]})
+    if _trunc:
+        warnings.append("답변이 길이 한도에서 잘렸습니다. 뒷부분이 빠졌을 수 있으니 근거 조문 원문으로 확인하세요.")
+        steps.append({"name": "답변 잘림", "detail": "출력 상한에 걸려 끝까지 쓰이지 않음 — 화면에 경고 표시"})
     if missing_bp:
         cited_bp = _bp_used_as_basis(text)
         hits = [m for m in missing_bp

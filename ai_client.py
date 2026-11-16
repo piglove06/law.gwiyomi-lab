@@ -1276,12 +1276,22 @@ def review_answer(question: str, answer_text: str, context: str) -> list:
     return out[:4]
 
 
+_REVISION_NOTE_RE = re.compile(r"검토\s*의견|이전\s*답변|앞선\s*답변|처음\s*답변|결론을\s*정정|최종\s*수정")
+
+
+def _strip_revision_notes(text: str) -> str:
+    """다시 쓴 답에서 '검토 의견 반영… 이전 답변의 결론을 정정합니다' 같은 고친 과정 설명 문단을 뺍니다(【 머리 문단은 남김)."""
+    paras = re.split(r"\n\s*\n", str(text or ""))
+    keep = [p for p in paras if p.lstrip().startswith("【") or not _REVISION_NOTE_RE.search(p)]
+    return "\n\n".join(keep).strip()
+
+
 def answer_revised(question: str, context: str, problems: list) -> str:
     """검토 지적을 붙여 답변을 다시 씁니다."""
     notes = "\n".join(f"- [{p['kind']}] \"{p['quote']}\" → {p['fix']}" for p in problems)
     q = (question + "\n\n[검토 의견 — 앞서 쓴 답변에서 발견된 오류. 이 오류를 반드시 바로잡아 처음부터 다시 쓴다. "
          "검토 의견을 답변에 옮겨 적지는 마라]\n" + notes)
-    return answer(q, context)
+    return _strip_revision_notes(answer(q, context))
 
 
 CLARIFY_PROMPT = """너는 법령 질문에 답하기 전에, 결론을 가르는 사실 중 빠진 것만 되묻는 도구다.
