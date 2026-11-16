@@ -116,22 +116,22 @@ extract_terms → ai_search(질문 원문, 비면 재시도 → 용어로) → �
 - 단계별 출력 토큰 상한(TERMS 420·SELECT 400·CLARIFY 800·ANSWER 4000·REVIEW 1100). 상한이 없으면 끝없이 생성. REVIEW 는 주장 6개로 늘며 800→1100(v1.43).
 
 ### ai_client.py :: MAXTOK_SELECT
-- 선별 출력 상한(번호 나열).
+- 선별 출력 상한 400(번호 나열).
 
 ### ai_client.py :: MAXTOK_CLARIFY
-- 되묻기 출력 상한(질문 몇 줄).
+- 되묻기 출력 상한 800(질문 몇 줄).
 
 ### ai_client.py :: MAXTOK_ANSWER
-- 답변 출력 상한(근거 + 설명).
+- 답변 출력 상한 4,000(근거 + 설명). 넘으면 잘림 — main 이 감지(v1.54).
 
 ### ai_client.py :: SELECT_MAX
 - 조문 선별 최대 20개(프롬프트도 5~20개 요구). 예전 40개 → 답변 프롬프트가 16,384 컨텍스트를 넘는 원인이었음(09-29).
 
 ### ai_client.py :: LOCAL_BASE_URL
-- 로컬 LLM 서버 주소.
+- 로컬 LLM 서버 주소(기본 http://localhost:8080/v1).
 
 ### ai_client.py :: LOCAL_TIMEOUT
-- 로컬은 느려 넉넉히.
+- 요청 하나 300초. 로컬은 느려 넉넉히.
 
 ### ai_client.py :: LOCAL_NO_THINK
 - 생각 모드 끔: 형식 준수가 중요하고 추론은 불필요, 끄면 훨씬 빠름. 방법은 코드 주석(Qwen 은 /no_think 무시).
@@ -346,10 +346,10 @@ extract_terms → ai_search(질문 원문, 비면 재시도 → 용어로) → �
 - 이 위치에서 `.env` 를 다른 모듈보다 먼저 읽음(import 순서 중요). httpx "HTTP Request" 로그 숨김(오류는 보임).
 
 ### main.py :: CLARIFY_CTX_TOKENS
-- 되묻기에 넘기는 선별 조문 **본문** 토큰 상한(v1.31). 전엔 제목 60줄만 → 기준값(2만L·1년·3회)을 못 봐 보기를 못 나눔. 지시문(~2.5천)+이 값+출력(800) ≤ 컨텍스트.
+- 되묻기에 넘기는 선별 조문 **본문** 토큰 상한 5,000(v1.31). 전엔 제목 60줄만 → 기준값(2만L·1년·3회)을 못 봐 보기를 못 나눔. 지시문(~2.5천)+이 값+출력(800) ≤ 컨텍스트.
 
 ### main.py :: BP_CTX_CHARS
-- 별표 본문 글자 상한. 표 테두리(─│┼)·정렬 공백을 걷어낸 **뒤** 기준(v1.32). 원문 2천 자 자르기는 테두리가 절반이라 소음 별표 8 의 비고(+5dB/−5dB 보정)가 잘려 68dB 를 65dB 와 비교해 "초과" 로 답했음.
+- 별표 본문 글자 상한 3,500. 표 테두리(─│┼)·정렬 공백을 걷어낸 **뒤** 기준(v1.32). 원문 2천 자 자르기는 테두리가 절반이라 소음 별표 8 의 비고(+5dB/−5dB 보정)가 잘려 68dB 를 65dB 와 비교해 "초과" 로 답했음.
 
 ### main.py :: BP_FETCH_CHARS
 - 별표 글자 한도들: API 로 받은 별표 본문 최대 12,000(`BP_FETCH_CHARS`, v1.32 6천→1만2천 — 비고까지), 예산 초과 시 별표 축약 1,800(`BP_SHRINK_CHARS`), 되묻기 근거로 넘길 때 별표 2,500·조문 1,500(`CLARIFY_BP_CHARS`·`CLARIFY_ART_CHARS`, 별표는 비고가 보기를 가르므로 조금 길게).
@@ -388,7 +388,7 @@ extract_terms → ai_search(질문 원문, 비면 재시도 → 용어로) → �
 - 【설명】에서 최종 판정 문장을 고를 말. `_COND_WORDS` 는 조건 문장(만약 …이면)을 빼는 말.
 
 ### main.py :: _VERDICT_WORDS
-- 판정 낱말(초과·해당·대상·위반·필요·가능). `_NEG_WORDS`(않·아니·아님·미달·미초과·없)와 함께 `_verdict_conflict` 가 씀.
+- 판정 낱말(초과·해당·대상·위반·필요·가능). `_NEG_WORDS`(않·아니·아닙·아님·아닌·미달·미초과·없)와 함께 `_verdict_conflict` 가 씀.
 
 ### main.py :: _verdict_conflict
 - 【결론】 첫 문장과 뒤쪽 판정이 같은 판정 낱말(초과·해당…)을 두고 긍정·부정이 반대면 그 결론 문장. 뒤쪽 판정 = 【계산】의 마지막 '판정' 줄, 없으면 【설명】에서 판정 말(`_FINAL_WORDS`: 판정·따라서·이므로…)이 있고 조건 말(`_COND_WORDS`: 경우·이면·만약…)이 없는 마지막 문장.
@@ -423,7 +423,7 @@ extract_terms → ai_search(질문 원문, 비면 재시도 → 용어로) → �
 - 자치법규(조례·규칙)를 찾을 지자체.
 
 ### main.py :: VERSION
-- 앱 버전 문자열. 올릴 때 CHANGELOG 와 맞춤.
+- 앱 버전 문자열. 올릴 때 CHANGELOG 제목과 맞춤(화면·/api/version 에 나옴).
 
 ### main.py :: APP_PASSWORD
 - 로그인 비밀번호(.env). 비우면 로그인 기능 꺼짐(집 안 테스트용). static 폴더는 /static.
@@ -564,7 +564,7 @@ extract_terms → ai_search(질문 원문, 비면 재시도 → 용어로) → �
 - 참고 사례(해석례·부처 해석·판례, v1.36). 제목 검색으로 넓게 모으고 LLM 이 같은 쟁점만 최대 3건(v1.38), 답변 **전에** 본문으로 확인한 것만 답변 지시에(v1.40, CASE_IN_ANSWER).
 
 ### main.py :: CASE_LLM_POOL
-- 참고 사례 후보 중 LLM 에 보일 개수.
+- 참고 사례 후보 중 LLM 에 보일 개수 10.
 
 ### main.py :: SCOPE_CHECK
 - 법령과 무관한 질문 거르기(v1.37). 0 이면 끔.
@@ -803,19 +803,19 @@ extract_terms → ai_search(질문 원문, 비면 재시도 → 용어로) → �
 (전부 기본 꺼짐: flags/rag_select·rag_refs·rag_clarify·rag_hyde)
 
 ### rag_select.py :: TOPK
-- 유사도 상위 후보 수.
+- 유사도 상위 후보 수 12.
 
 ### rag_select.py :: MAX_ADD
-- 선별 결과에 덧붙일 최대 수.
+- 선별 결과에 덧붙일 최대 수 6.
 
 ### rag_select.py :: DOC_CHARS
-- 긴 별표는 앞부분만 색인(속도).
+- 앞 6,000자만 색인(긴 별표, 속도).
 
 ### rag_select.py :: EMBED_URL
 - (선택) 임베딩 주소. 비면 BM25 만(예: :8081/v1/embeddings).
 
 ### rag_select.py :: EMBED_BUDGET
-- 한 질문의 임베딩 계산 최대 초.
+- 한 질문의 임베딩 계산 최대 20초.
 
 ### rag_select.py :: _WORD
 - 토큰화 = 글자 2-gram.
@@ -862,7 +862,7 @@ extract_terms → ai_search(질문 원문, 비면 재시도 → 용어로) → �
 ## intent.py
 
 ### intent.py :: NEEDS_FACTS
-- 사용자 사실이 결론을 가르는 의도 — 이것만 되묻기 허용.
+- 사용자 사실이 결론을 가르는 의도(적용 판단·기한·제재·기타) — 이것만 되묻기 허용. 조문 조회·정의·일반 기준은 묻지 않음.
 
 ### intent.py :: Intent
 - 결과: 의도·걸린 규칙(로그·화면용), 조문 조회면 법령명 후보·조·가지번호.
@@ -939,7 +939,7 @@ extract_terms → ai_search(질문 원문, 비면 재시도 → 용어로) → �
 ## applog.py
 
 ### applog.py :: CONSOLE_WIDTH
-- 콘솔 한 줄 최대 글자(파일엔 전부).
+- 콘솔 한 줄 최대 150자(파일엔 전부).
 
 ### applog.py :: SESSION_TTL
 - 되묻기 응답이 이 시간 없으면 블록을 닫음(1시간).
