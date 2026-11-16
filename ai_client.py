@@ -22,45 +22,33 @@ import time
 import httpx
 
 import applog
-import kv_reuse          # ★ v1.49 kv_reuse — 프롬프트 캐시(KV) 재사용(이어 쓰기·고정 앞부분 복원)
+import kv_reuse
 
-# ── 출력 토큰 상한 ────────────────────────────────────────────
-# 상한이 없으면 모델이 계속 생성합니다.
-# 단계마다 필요한 분량이 다르므로 따로 잡습니다.
 # (llama-server 에서는 남은 컨텍스트보다 크면 자동으로 줄여서 보냅니다)
-MAXTOK_TERMS   = int(os.getenv("MAXTOK_TERMS",   "420"))    # 두 줄
-MAXTOK_SELECT  = int(os.getenv("MAXTOK_SELECT",  "400"))    # 번호 나열
-MAXTOK_CLARIFY = int(os.getenv("MAXTOK_CLARIFY", "800"))    # 질문 몇 줄
-MAXTOK_ANSWER  = int(os.getenv("MAXTOK_ANSWER",  "4000"))   # 근거 + 설명
+MAXTOK_TERMS   = int(os.getenv("MAXTOK_TERMS",   "420"))
+MAXTOK_SELECT  = int(os.getenv("MAXTOK_SELECT",  "400"))
+MAXTOK_CLARIFY = int(os.getenv("MAXTOK_CLARIFY", "800"))
+MAXTOK_ANSWER  = int(os.getenv("MAXTOK_ANSWER",  "4000"))
 
-# 조문 선별에서 받아들일 최대 개수. 프롬프트도 5~20개를 요구합니다.
-# ★ 2026-09-29 — 예전에는 40개까지 받아서, 답변 프롬프트가 컨텍스트(16,384)를
-#   넘는 원인 중 하나였습니다.
 SELECT_MAX = int(os.getenv("SELECT_MAX", "20"))
 
-# ── 로컬 LLM 서버 ─────────────────────────────────────────────
 LOCAL_BASE_URL = os.getenv("LOCAL_BASE_URL", "http://localhost:8080/v1").rstrip("/")
 LOCAL_MODEL = os.getenv("LOCAL_MODEL", "Qwen3.6-35B-A3B")
-LOCAL_TIMEOUT = float(os.getenv("LOCAL_TIMEOUT", "300"))   # 로컬은 느리므로 넉넉히
+LOCAL_TIMEOUT = float(os.getenv("LOCAL_TIMEOUT", "300"))
 # 서버에서 컨텍스트 길이를 읽지 못할 때 쓸 값. llama-server 의 -c 와 맞추세요.
 LOCAL_CTX_FALLBACK = int(os.getenv("LOCAL_CTX", "16384"))
 
-# 사고 과정(Thinking)을 끌지. 이 프로그램은 형식 준수가 중요하지
-# 추론이 필요한 작업이 아니므로 끄는 편이 훨씬 빠릅니다.
 # (프롬프트에 /no_think 를 붙이는 방식은 Qwen 계열에서 듣지 않았습니다)
 #   · llama-server: /v1/chat/completions 에
 #                   chat_template_kwargs={"enable_thinking": false} 를 보냅니다.
 #   · Ollama      : 네이티브 /api/chat 에 think=false 를 보냅니다.
 LOCAL_NO_THINK = os.getenv("LOCAL_NO_THINK", "1") not in ("0", "", "false", "False")
 
-# 어느 서버인지. 비워두면 주소로 판별합니다 (포트 11434 → ollama, 그 외 → llamacpp).
 # llama-server 에는 Ollama 전용 /api/chat 이 없어서 구분이 필요합니다.
 _srv = os.getenv("LOCAL_SERVER", "").strip().lower()
 LOCAL_SERVER = _srv if _srv in ("ollama", "llamacpp") else (
     "ollama" if ":11434" in LOCAL_BASE_URL else "llamacpp")
 
-# 1 이면 프롬프트와 응답 전문을 _runs/llm_debug_YYYYMMDD.log 에 남깁니다.
-# (콘솔에는 찍지 않습니다 — 콘솔이 읽을 수 없을 만큼 길어졌습니다)
 LLM_DEBUG = os.getenv("LLM_DEBUG", "0") not in ("0", "", "false", "False")
 
 
@@ -72,9 +60,6 @@ def _dbg(msg: str) -> None:
     """파싱 과정 메모. LLM_DEBUG=1 일 때 디버그 파일에만 남깁니다."""
     applog.debug("parse", msg)
 
-
-# --- 프롬프트 --------------------------------------------------------
-# 이 프로그램의 핵심입니다. 여기가 부실하면 AI가 아는 척하며 지어냅니다.
 
 TERM_PROMPT = """너는 대한민국 국가법령 검색을 돕는 도구다.
 질문자는 행정 실무자이거나 일반 시민이다. 분야는 정해져 있지 않다.
@@ -145,7 +130,6 @@ TERM_SCHEMA = {
     "properties": {
         "laws": {"type": "array", "items": {"type": "string"}, "maxItems": 3},
         "terms": {"type": "array", "items": {"type": "string"}, "minItems": 1, "maxItems": 6},
-        # v1.38 — 여러 측면을 묻는 질문의 하위 질문(측면별 검색용). 한 가지만 물으면 [].
         "aspects": {"type": "array", "maxItems": 3, "items": {
             "type": "object",
             "properties": {"q": {"type": "string", "maxLength": 120}, "law": {"type": "string", "maxLength": 40}},
@@ -392,8 +376,6 @@ def server_ctx() -> int:
     now = time.time()
     if _ctx_cache["n"] and now - _ctx_cache["t"] < 300:
         return _ctx_cache["n"]
-    # ★ v1.42 (C-20261021-1) — 실패도 30초 기억합니다. LLM 이 꺼져 있으면 부를 때마다 5초씩 기다렸습니다.
-    #   되돌리기: 아래 두 줄과 except 의 fail_t 기록 삭제.
     if now - _ctx_cache.get("fail_t", 0.0) < 30:
         return _ctx_cache["n"] or LOCAL_CTX_FALLBACK
     n = 0
@@ -406,7 +388,7 @@ def server_ctx() -> int:
     if n > 0:
         _ctx_cache.update(n=n, t=now)
         return n
-    _ctx_cache["fail_t"] = now                           # ★ v1.42 (C-20261021-1)
+    _ctx_cache["fail_t"] = now
     return LOCAL_CTX_FALLBACK
 
 
@@ -436,14 +418,6 @@ def _call(prompt: str, temperature: float = 0.3, max_tokens: int = 0,
     return _call_local(prompt, temperature, LOCAL_MODEL, max_tokens, stage, schema)
 
 
-# ── JSON 출력 강제 (v1.31) ───────────────────────────────────
-# ★ 2026-10-07 — 되묻기·선별·검색어 출력이 자유 텍스트라서 형식이 깨질 때마다
-#   정규식으로 고쳐 왔습니다(되묻기 후처리만 약 600줄). llama-server 는
-#   response_format 에 JSON Schema 를 주면 **문법으로 출력 형식을 강제**합니다
-#   (토큰을 고를 때 스키마에 맞지 않는 토큰을 아예 못 고르게 함).
-#   서버가 이 옵션을 거절하면(구버전·다른 서버) 한 번 끄고 예전 텍스트 방식으로
-#   돌아갑니다. 호출하는 쪽은 결과가 None 이면 기존 파서를 씁니다.
-#   LLM_JSON=0 이면 처음부터 끕니다.
 _JSON_MODE = {"ok": os.getenv("LLM_JSON", "1") not in ("0", "false", "False", "")}
 
 
@@ -459,7 +433,7 @@ def _parse_json(text: str):
         return json.loads(t)
     except (ValueError, TypeError):
         pass
-    m = re.search(r"\{[\s\S]*\}", t)            # 앞뒤에 말이 붙은 경우
+    m = re.search(r"\{[\s\S]*\}", t)
     if m:
         try:
             return json.loads(m.group(0))
@@ -485,12 +459,6 @@ def call_json(prompt: str, schema: dict, temperature: float = 0,
     return obj, raw
 
 
-# ── v1.33 — 로컬 LLM 자동 재시작 (워치독) ─────────────────────────
-# 2026-10-08 새벽: llama-server 가 메모리 부족으로 두 번 꺼지고, 한 번은 로그 창이 멈춰
-# (콘솔 "빠른 편집" 선택) 응답 없이 매달렸습니다. 사람이 없으면 평가·서비스가 그대로 멈춥니다.
-# 실제 LLM 호출이 LLM_RESTART_GRACE 초 넘게 계속 실패(연결 안 됨·시간 초과)하면
-# lawfinder-llm 창과 llama-server 를 정리하고 _5_restart_llm.bat 으로 다시 켭니다.
-# Windows 에서만 동작합니다. .env 에 LLM_AUTO_RESTART=0 이면 끕니다. 10분에 한 번까지만.
 LLM_AUTO_RESTART = os.getenv("LLM_AUTO_RESTART", "1") not in ("0", "false", "False")
 LLM_RESTART_GRACE = float(os.getenv("LLM_RESTART_GRACE", "180"))
 _LLM_STATE = {"first_fail": 0.0, "last_restart": 0.0, "fails": 0}
@@ -564,7 +532,7 @@ def _call_local(prompt: str, temperature: float, model: str,
 
     n_prompt = None
     if LOCAL_SERVER == "llamacpp":
-        n_prompt = count_tokens(prompt) + 32             # 채팅 템플릿이 붙이는 토큰 여유
+        n_prompt = count_tokens(prompt) + 32
         ctx = server_ctx()
         room = ctx - n_prompt
         if room < 64:
@@ -581,7 +549,7 @@ def _call_local(prompt: str, temperature: float, model: str,
         payload = {
             "model": model,
             "messages": [{"role": "user", "content": prompt}],
-            "think": False,          # ★ 사고 과정 끄기
+            "think": False,
             "stream": False,
             "options": {
                 "temperature": temperature,
@@ -610,8 +578,6 @@ def _call_local(prompt: str, temperature: float, model: str,
                 "json_schema": {"name": re.sub(r"\W", "_", stage) or "out",
                                 "schema": schema, "strict": True},
             }
-        # ★ v1.49 kv_reuse ② — 되묻기처럼 앞부분 지시문이 매번 같은 단계는 저장해 둔 앞부분 상태를 복원해 이어 읽습니다.
-        #   쓸 수 없으면(None) 아래 예전 방식 그대로. 되돌리기: 이 블록 삭제.
         if LOCAL_SERVER == "llamacpp" and stage in kv_reuse.PREFIX_STAGES:
             _kv = kv_reuse.prefix_call(prompt, temperature, max_tokens, stage,
                                        schema if (schema and json_enabled()) else None)
@@ -624,8 +590,6 @@ def _call_local(prompt: str, temperature: float, model: str,
     t0 = time.time()
     who = "Ollama" if LOCAL_SERVER == "ollama" else "llama-server"
     try:
-        # ★ v1.49 kv_reuse — 앞부분 복원과 그 호출 사이에 다른 요청이 끼지 않게 모든 LLM 호출이 같은 잠금을 씁니다
-        #   (llama-server 는 -np 1 이라 원래 한 번에 하나만 처리 — 처리량은 같음). 원래: 잠금 없이 post
         with kv_reuse.LOCK:
             resp = httpx.post(url, json=payload, timeout=LOCAL_TIMEOUT)
         resp.raise_for_status()
@@ -642,7 +606,6 @@ def _call_local(prompt: str, temperature: float, model: str,
         code, body = e.response.status_code, e.response.text[:300]
         applog.llm(stage, n_prompt, None, time.time() - t0, note=f"실패: HTTP {code}")
         applog.warn(f"LLM {stage} HTTP {code}: {body}")
-        # ★ v1.33 — 재시작 직후 모델을 올리는 중(503 "Loading model")이면 5초씩, 최대 2분 기다립니다.
         if code == 503 and "loading" in body.lower() and _wait < 24:
             time.sleep(5)
             return _call_local(prompt, temperature, model, max_tokens, stage, schema, _wait + 1)
@@ -658,11 +621,6 @@ def _call_local(prompt: str, temperature: float, model: str,
                 "프롬프트가 로컬 LLM 컨텍스트 길이를 넘었습니다. "
                 "llama-server 실행 옵션의 -c 값을 늘리세요(예: -c 24576).") from e
         if code in (400, 422) and schema and json_enabled():
-            # 서버가 JSON 형식 강제를 못 받는 경우 — 끄고 같은 요청을 한 번 다시 보냅니다.
-            # ★ v1.42 (C-20261021-5) — 400/422 한 번에 **프로세스 전체**에서 영구히 꺼졌습니다.
-            #   오류 본문이 형식 강제(response_format·json_schema·grammar) 문제일 때만 영구히 끄고,
-            #   그 밖의 400/422 는 이번 요청만 텍스트 방식으로 다시 보냅니다.
-            #   원래: 무조건 _JSON_MODE["ok"] = False
             _bl = body.lower()
             if any(k in _bl for k in ("response_format", "json_schema", "grammar", "schema")):
                 _JSON_MODE["ok"] = False
@@ -723,7 +681,6 @@ def _call_local(prompt: str, temperature: float, model: str,
     return text
 
 
-# ── 응답 정리 ────────────────────────────────────────────────
 def _clean_output(text: str) -> str:
     """
     로컬 모델이 덧붙이는 것들을 걷어냅니다.
@@ -732,64 +689,29 @@ def _clean_output(text: str) -> str:
     파싱이 깨지지 않도록 여기서 정리합니다.
     """
     t = str(text or "")
-    # 사고 과정 블록
     t = re.sub(r"<think>[\s\S]*?</think>", "", t, flags=re.I)
     t = re.sub(r"<\|?thinking?\|?>[\s\S]*?<\|?/?thinking?\|?>", "", t, flags=re.I)
-    # 닫히지 않은 <think> 는 그 뒤를 전부 사고 과정으로 봅니다
     t = re.sub(r"<think>[\s\S]*$", "", t, flags=re.I)
-    # 코드펜스
     t = re.sub(r"```[a-zA-Z]*\n?", "", t)
     t = t.replace("```", "")
 
-    # ── 마크다운 정리 ────────────────────────────────────────────
-    # ★ 2026-08-18 — 여기서 `**굵게**` 를 **무조건 지우고 있었습니다.**
-    #   원래 의도는 용어추출·되묻기 단계에서 모델이 `**법령명:**` 처럼 라벨을
-    #   감싸 파싱이 깨지는 것을 막는 것이었는데, 이 함수는 **답변에도 똑같이**
-    #   적용됩니다. 그래서 프롬프트로 "수치는 굵게, 의무는 밑줄" 을 시키고
-    #   화면에도 `**`→<b>, `__`→<u> 변환이 멀쩡히 있는데도, 그 사이에서
-    #   마커가 전부 지워져 **강조가 한 번도 화면에 안 나왔습니다.**
-    #   (v1.7 에서 "지시가 실제로 안 들어갔다"고 고쳤던 것과 같은 자리인데,
-    #    이번엔 지시는 들어갔고 출력 정리 단계에서 지워지고 있었습니다.)
-    #
-    #   답변인지 아닌지는 【근거】/【설명】/【결론】 머리표로 구분합니다.
-    #   용어추출·되묻기·조문선택 응답에는 이 머리표가 없습니다.
-    #   ★ 2026-08-19 — 머리표를 굵게 감싸는 일이 잦습니다(`**【결론】**`).
-    #     그대로 두면 화면에서 `**`→<b> 가 먼저 돌아 `<b>【결론】</b>` 이 되고,
-    #     그 다음 소제목 정규식 `^【…】$` 가 안 걸려 **결론 상자와 모든
-    #     소제목이 통째로 사라집니다.** 판정 전에 벗겨냅니다.
     t = re.sub(r"\*\*[ \t]*(【[^】\n]{1,12}】)[ \t]*\*\*", r"\1", t)
 
     is_answer = any(k in t for k in ("【근거】", "【설명】", "【결론】"))
     if is_answer:
-        # 답변 — 강조와 글머리표를 살립니다.
-        t = re.sub(r"^\s*#+\s*", "", t, flags=re.M)        # 제목(#) 만 제거
-        t = re.sub(r"^\s*>+\s*", "", t, flags=re.M)        # 인용부호(>) 제거
-        t = re.sub(r"^(\s*)\*\s+", r"\1- ", t, flags=re.M)  # * 글머리표 → -
+        t = re.sub(r"^\s*#+\s*", "", t, flags=re.M)
+        t = re.sub(r"^\s*>+\s*", "", t, flags=re.M)
+        t = re.sub(r"^(\s*)\*\s+", r"\1- ", t, flags=re.M)
         # 조문번호에 굵게가 끼면 화면의 조문 링크 정규식이 깨집니다.
         # (`제**12**조` → "제12조" 로 못 읽음). 그 자리만 걷어냅니다.
         t = re.sub(r"제\s*\*\*(\d+)\*\*\s*(조|항|호|목)", r"제\1\2", t)
     else:
-        # 파싱 대상 응답 — 마커가 있으면 형식이 깨지므로 전부 걷어냅니다.
         t = re.sub(r"\*\*(.+?)\*\*", r"\1", t)
         t = re.sub(r"^\s*[#>\-\*]+\s*", "", t, flags=re.M)
-    # 전각 콜론·쉼표를 반각으로
     t = t.replace("：", ":").replace("，", ",")
 
-    # ★ 숫자 뒤에 끼는 공백을 붙입니다.
     #   로컬 모델(Qwen)은 "제8 조제1 항제1 호", "매 8 년", "90 일 이내",
     #   "2 만 리터" 처럼 숫자와 뒷글자 사이를 띄웁니다.
-    #
-    #   읽기만 나쁜 것이 아닙니다. 화면의 조문 링크 정규식이 "제\d+조" 를
-    #   찾는데 "제8 조" 는 걸리지 않아, **답변의 하이퍼링크가 전부 사라집니다.**
-    #   실제로 그렇게 됐습니다. 서버의 인용 검증 정규식은 공백을 허용해서
-    #   한쪽만 동작하고 있었습니다.
-    #   ★ 2026-08-19 — `\s` 대신 `[ \t]` 를 씁니다. `\s` 는 줄바꿈도 먹어서
-    #     숫자로 끝난 줄이 다음 줄과 통째로 붙었습니다. 실측 사례:
-    #         「…시행규칙」 별표 4
-    #         일반기준에 따라 매 8년마다 …
-    #       → "「…시행규칙」 별표 4일반기준에 따라 매 8년마다 …"
-    #     근거 두 줄이 한 줄로 뭉개지고, 별표 번호와 수치가 같은 문장에
-    #     들어가 버려서 main.py 의 별표 경고까지 **멀쩡한 답변에** 떴습니다.
     t = re.sub(r"(제[ \t]*\d+)[ \t]+(조|항|호|목|장|절|편|관)", r"\1\2", t)
     t = re.sub(r"(\d)[ \t]+(년|월|일|개월|주일|시간|분|초|회|차|건|명|배|"
                r"천|만|억|리터|킬로그램|킬로|그램|톤|퍼센트|미터|제곱미터)",
@@ -797,18 +719,15 @@ def _clean_output(text: str) -> str:
     return t.strip()
 
 
-# 라벨 표기 흔들림 대응. 모델마다 "법령명" 을 "법령", "법률명" 등으로 씁니다.
 _LABEL_LAW = ("법령명", "법령", "법률명", "법률", "law")
 _LABEL_TERM = ("용어", "법령용어", "키워드", "term", "keyword")
 
 
-# 프롬프트의 양식 자리표시자나 모델의 사고 과정 조각이 섞여 들어오는 것을 막습니다.
-# 실제로 관측된 예: "용어1", "LawA", "Term3", "용어2 (Wait", "`누출검사`."
 _JUNK_RE = re.compile(
-    r"^(용어|법령명|term|law|keyword|보기|option|item)\s*\d*$"   # 자리표시자
-    r"|^\d+$"                                                   # 숫자만
-    r"|^[a-zA-Z\s]+$"                                           # 영어만
-    r"|wait|but |usually|related|however|note:|example",          # 사고 과정 조각
+    r"^(용어|법령명|term|law|keyword|보기|option|item)\s*\d*$"
+    r"|^\d+$"
+    r"|^[a-zA-Z\s]+$"
+    r"|wait|but |usually|related|however|note:|example",
     re.I,
 )
 
@@ -819,7 +738,6 @@ def _is_junk(s: str) -> bool:
         return True
     if _JUNK_RE.search(s):
         return True
-    # 한글이 하나도 없으면 법령 용어가 아닙니다.
     if not re.search(r"[가-힣]", s):
         return True
     return False
@@ -830,20 +748,11 @@ def _looks_like_law(s: str) -> bool:
     s = s.strip()
     if not s:
         return False
-    # ★ 2026-08-19 — "…방법/용법/기법" 이 '법' 으로 끝난다는 이유로 법령명으로
-    #   승격돼, "누출검사방법" 같은 용어로 lsStmd 를 조회하고 있었습니다.
-    #   헛 조회로 끝나긴 하지만 용어 목록에서 빠져 검색 품질이 떨어집니다.
     if re.search(r"(방법|용법|기법|공법|수법|요법)$", s):
         return False
-    # ★ 2026-09-29 — "…에 관한 법률" 은 '률' 로 끝나서 법령명으로 안 잡혔습니다.
-    #   되묻기 보기에 "광산피해의 방지 및 복구에 관한 법률" 이 그대로 나갔습니다.
     return bool(re.search(r"(법|법률|령|규칙|조례|고시|지침|예규|훈령)$", s))
 
 
-# ── v1.37 — 법령과 무관한 질문 거르기 ─────────────────────────────
-# 실사용 2026-10-13: "공무원 시험 합격은 에듀윌이야?" 에 공무원임용시험령을 찾아 답했습니다.
-# 법령으로 답할 수 없는 질문(업체·학원·상품 추천, 공부법, 잡담 등)은 검색 전에 거릅니다.
-# 애매하면 통과(법령 질문으로 봄) — 진짜 법령 질문을 막는 쪽이 더 나쁩니다.
 SCOPE_PROMPT = """너는 질문이 '법령 조회 도우미'가 답할 질문인지 가르는 도구다.
 이 도우미는 대한민국 법령(법률·시행령·시행규칙·행정규칙·자치법규)의 조문을 근거로
 기준·절차·의무·자격·처벌·징계·배상·세금·허가·신고 같은 것을 찾아 답한다.
@@ -884,7 +793,6 @@ JSON 하나만 출력한다: {{"legal": true 또는 false, "reason": "한 줄 �
 SCOPE_SCHEMA = {
     "type": "object",
     "properties": {"legal": {"type": "boolean"}, "reason": {"type": "string", "maxLength": 80},
-                   # ★ v1.50 — 섞인 질문에서 법령 부분 / 뺀 부분
                    "law_part": {"type": "string", "maxLength": 300},
                    "other": {"type": "string", "maxLength": 60}},
     "required": ["legal", "reason", "law_part", "other"],
@@ -908,7 +816,6 @@ def scope_split(question: str) -> dict:
     실패하면 legal=True·나머지 "" — 막지도, 자르지도 않습니다."""
     out = {"legal": True, "reason": "", "law_part": "", "other": ""}
     try:
-        # v1.50 — law_part 를 적어야 해서 출력 한도 80 → 200
         obj, raw = call_json(SCOPE_PROMPT.format(question=str(question or "")[:600]),
                              SCOPE_SCHEMA, temperature=0, max_tokens=200, stage="scope")
     except AiError:
@@ -934,8 +841,6 @@ def scope_check(question: str) -> tuple:
     return r["legal"], r["reason"]
 
 
-# ── v1.38 — 참고 사례 고르기 ─────────────────────────────────────
-# 해석례·판례 후보(제목)를 질문과 같은 쟁점인지 LLM 이 고릅니다. 불용어·점수 규칙을 대체.
 CASE_PICK_PROMPT = """아래는 법령 질문과, 제목으로 찾은 법령해석례·부처 해석·판례 후보 목록이다.
 담당 공무원이 이 질문을 처리할 때 **바로 참고할 수 있는** 사례만 고른다.
 
@@ -984,9 +889,6 @@ def pick_cases(question: str, titles: list) -> list:
     return out[:3]
 
 
-# ── v1.40 — 참고 해석례 확인 (답변에 넣기 전) ───────────────────────
-# 제목만 보고 고른 사례 중 쟁점이 다른 것(세차장 질문에 '학교환경위생 정화구역')이 섞여, 답변에 넣기 전에
-# 질의요지·회답 본문을 보고 한 번 더 거릅니다.
 CASE_CONFIRM_PROMPT = """질문과, 참고 후보 해석례(질의요지·회답)가 있다. 질문과 **같은 대상·같은 법적 쟁점**에
 결론을 낸 해석례만 고른다. 대상(시설·업종·사람)이나 쟁점(신고·허가·기준·처분 등)이 다르면 고르지 않는다.
 확실하지 않으면 고르지 않는다. JSON 하나만 출력한다: {{"keep": [후보 번호, ...]}}
@@ -1013,7 +915,7 @@ def confirm_cases(question: str, items: list):
         obj, _ = call_json(CASE_CONFIRM_PROMPT.format(question=str(question or "")[:500], cands=cands),
                            CASE_CONFIRM_SCHEMA, temperature=0, max_tokens=30, stage="case_confirm")
     except AiError:
-        return None                 # ★ v1.45 (C-27) 원래: return []
+        return None
     if not isinstance(obj, dict):
         return None
     out = []
@@ -1027,9 +929,6 @@ def confirm_cases(question: str, items: list):
     return out
 
 
-# ── v1.38c — 측면별 법 고르기 (U-19) ──────────────────────────────
-# 측면마다 후보 법(LLM 추측 + 그 측면 지능형 검색 상위)을 보여 주고 가장 직접 적용되는 법 하나를 고르게 합니다.
-# (추측만 믿으면 '형사 → 형법'(조문 0개), 검색 1위만 믿으면 '형사 → 아동ㆍ청소년성보호법'(미성년자 없음)이 붙었음)
 ASPECT_LAW_PROMPT = """질문과, 질문을 측면별로 나눈 하위 질문, 그리고 측면마다 후보 법령 목록이 있다.
 측면마다 그 하위 질문에 **가장 직접 적용되는 법 하나**를 후보 중에서 고른다.
 - 그 행위를 직접 규정·처벌하는 특별법이 후보에 있으면 일반법(형법·민법 등)보다 특별법을 고른다.
@@ -1072,10 +971,6 @@ def pick_aspect_laws(question: str, aspects: list) -> list:
     return out
 
 
-# ── v1.40 — 주 법령 고르기 (L-1751-1·1751-3, L-1016-1, U-8) ─────────────────────
-# 검색어 변환 LLM 의 법령 추측과 지능형 검색 순위가 엇갈릴 때, 예전에는 규칙(지능형 1위 앞세우기·
-# 신뢰 낮음 비율·'어느 법?' 되묻기)으로 정했습니다. 지방공무원 육아휴직에 남녀고용평등법(민간 근로자 법)이
-# 1위로 오거나, 외부강의 사례금에 청탁금지법이 3위라 빠지는 일이 생겨, 두 목록을 합쳐 LLM 이 고르게 합니다.
 MAIN_LAW_PROMPT = """질문과 후보 법령 목록이 있다. 후보마다 법제처 지능형 검색이 질문으로 찾은 **조문 제목**이 붙어 있다.
 이 질문에 답할 때 **조문을 봐야 할 법**을 고른다.
 먼저 subject 에 질문의 주체와 행위를 한 줄로 적는다. 예) "지방공무원 + 육아휴직 요건·기간"
@@ -1143,13 +1038,11 @@ def extract_terms(question: str) -> dict:
     """
     out = {"법령명": [], "용어": [], "측면": []}
 
-    # ★ v1.31 — JSON 형식 강제를 먼저 시도합니다. 안 되면 예전 텍스트 방식.
     obj, _ = call_json(TERM_PROMPT.format(question=question, output_rules=_TERM_RULES_JSON),
                        TERM_SCHEMA, temperature=0, max_tokens=MAXTOK_TERMS, stage="terms")
     if isinstance(obj, dict):
         raw = ("법령명: " + ", ".join(str(x) for x in (obj.get("laws") or []) if x) + "\n"
                + "용어: " + ", ".join(str(x) for x in (obj.get("terms") or []) if x))
-        # v1.38 — 측면별 하위 질문(2개 이상일 때만 의미가 있음)
         for a in (obj.get("aspects") or [])[:3]:
             if isinstance(a, dict) and str(a.get("q") or "").strip():
                 out["측면"].append({"q": str(a["q"]).strip()[:120],
@@ -1161,17 +1054,14 @@ def extract_terms(question: str) -> dict:
                     temperature=0, max_tokens=MAXTOK_TERMS, stage="terms")
 
     def add(key: str, chunk: str):
-        # ★ 2026-09-29 — 가운뎃점(·)으로는 나누지 않습니다. "소음·진동관리법" 이
-        #   "소음" / "진동관리법" 으로 쪼개져 엉뚱한 법을 찾았습니다.
         for item in re.split(r"[,、/]|\s{2,}", chunk):
             item = item.strip().strip("\"'“”‘’[]()「」『』`.")
-            item = re.sub(r"^\d+[.)]\s*", "", item)      # "1. " 같은 번호 제거
-            item = re.sub(r"\s*\(.*$", "", item)          # "용어2 (Wait" 같은 꼬리 제거
+            item = re.sub(r"^\d+[.)]\s*", "", item)
+            item = re.sub(r"\s*\(.*$", "", item)
             item = item.strip()
             if item and item not in out[key] and not _is_junk(item):
                 out[key].append(item)
 
-    # 1) 라벨이 붙은 줄
     for line in raw.splitlines():
         line = line.strip()
         if ":" not in line:
@@ -1183,7 +1073,6 @@ def extract_terms(question: str) -> dict:
         elif any(label.startswith(x) for x in _LABEL_TERM):
             add("용어", rest)
 
-    # 2) 라벨이 하나도 없으면 줄 단위로 추정합니다.
     if not out["법령명"] and not out["용어"]:
         for line in raw.splitlines():
             line = line.strip().strip("-*· ")
@@ -1198,14 +1087,12 @@ def extract_terms(question: str) -> dict:
                 if item not in out[key]:
                     out[key].append(item)
 
-    # 3) 용어만 나왔는데 그중 법령처럼 생긴 게 있으면 옮깁니다.
     if not out["법령명"]:
         movers = [t for t in out["용어"] if _looks_like_law(t)]
         for m in movers:
             out["용어"].remove(m)
             out["법령명"].append(m)
 
-    # 법령명 자리에 법령처럼 생기지 않은 것이 들어왔으면 용어로 내립니다.
     bad = [x for x in out["법령명"] if not _looks_like_law(x)]
     for b in bad:
         out["법령명"].remove(b)
@@ -1251,8 +1138,6 @@ def _tidy_answer(text: str) -> str:
 def answer(question: str, context: str) -> str:
     """조문 원문을 근거로 답변 생성."""
     prompt = ANSWER_PROMPT.format(question=question, context=context)
-    # ★ v1.49 kv_reuse ① — /completion 으로 불러 생성 토큰을 기억해 두고(답변 검토가 이어서 씀), 고정 지시문은 ② 로 복원.
-    #   쓸 수 없으면 None → 아래 예전 방식. 되돌리기: 이 블록 삭제.
     if LOCAL_SERVER == "llamacpp" and kv_reuse.enabled():
         try:
             _room = server_ctx() - (count_tokens(prompt) + 32) - 16
@@ -1265,11 +1150,6 @@ def answer(question: str, context: str) -> str:
     return _tidy_answer(_call(prompt, max_tokens=MAXTOK_ANSWER, stage="answer"))
 
 
-# ── v1.40 — 답변 검토 (U-20·22·23, L-2244-1·3, U-7) ─────────────────────
-# 답변 지시문에 규칙을 더 붙여도 로컬 모델이 긴 지시문을 다 지키지 못합니다(지시문이 이미 200줄).
-# 대신 다 쓴 답변을 **한 번 더 읽혀** 네 가지 오류만 찾게 하고, 오류마다 원문·질문·답변에서 그대로 복사한
-# 근거 글자를 붙이게 합니다. 코드가 그 글자가 실제로 있는지 확인해(검토자가 지어낸 지적은 버림),
-# 남은 지적이 있으면 그 지적을 붙여 답변을 한 번 다시 씁니다.
 REVIEW_PROMPT = """너는 법령 답변 검토자다. [답변]의 핵심 주장을 [조문 원문]과 하나씩 대조한다.
 
 1. claims — [답변]의 【결론】·【계산】에서 **판정을 정하는 핵심 주장**을 최대 6개 뽑는다(기한·예외·단서도 포함).
@@ -1297,7 +1177,7 @@ JSON 하나만 출력한다:
 REVIEW_SCHEMA = {
     "type": "object",
     "properties": {
-        "claims": {"type": "array", "maxItems": 6, "items": {  # ★ v1.43 (L-0552-3②) 4 → 6
+        "claims": {"type": "array", "maxItems": 6, "items": {
             "type": "object",
             "properties": {"claim": {"type": "string", "maxLength": 100},
                            "quote": {"type": "string", "maxLength": 160},
@@ -1311,7 +1191,6 @@ REVIEW_SCHEMA = {
     },
     "required": ["claims", "premise", "premise_fix", "contradiction", "contradiction_fix"],
 }
-# ★ v1.49 kv_reuse ① — 답변에 **이어서** 보내는 검토 지시(위 REVIEW_PROMPT 와 같은 내용, 질문·조문·답변은 이미 대화 안에 있음)
 REVIEW_CHAIN_PROMPT = """이제 너는 검토자다. 답변을 다시 쓰지 말고, 바로 앞에 쓴 답변의 핵심 주장을 위 【조문 원문】과 하나씩 대조한다.
 
 1. claims — 답변의 【결론】·【계산】에서 **판정을 정하는 핵심 주장**을 최대 6개 뽑는다(기한·예외·단서도 포함).
@@ -1326,8 +1205,8 @@ REVIEW_CHAIN_PROMPT = """이제 너는 검토자다. 답변을 다시 쓰지 말
 표기 차이(dB/㏈, 띄어쓰기, 말 바꿔 쓰기)는 일치로 본다. 확실하지 않으면 일치로 본다.
 JSON 하나만 출력한다:
 {"claims": [{"claim": "...", "quote": "...", "verdict": "일치|불일치|원문없음", "fix": ""}], "premise": "", "premise_fix": "", "contradiction": "", "contradiction_fix": ""}"""
-MAXTOK_REVIEW = int(os.getenv("MAXTOK_REVIEW", "1100"))   # ★ v1.43 주장 6개라 800 → 1100
-REVIEW_STATS = {"claims": 0, "dropped": 0}      # 마지막 검토의 주장 수·근거 못 찾아 버린 지적 수(처리 과정 표시용)
+MAXTOK_REVIEW = int(os.getenv("MAXTOK_REVIEW", "1100"))
+REVIEW_STATS = {"claims": 0, "dropped": 0}
 
 
 def _qnorm(t: str) -> str:
@@ -1338,10 +1217,8 @@ def _qnorm(t: str) -> str:
 
 def review_answer(question: str, answer_text: str, context: str) -> list:
     """다 쓴 답변의 핵심 주장을 원문과 대조합니다. 근거 글자가 실제로 있는 지적만 돌려줍니다. 실패하면 []."""
-    REVIEW_STATS["ok"] = False      # ★ v1.45 (C-20261028-14) 검토 호출 성공 여부(실패를 '문제 없음' 으로 보이지 않게)
+    REVIEW_STATS["ok"] = False
     obj = None
-    # ★ v1.49 kv_reuse ① — 방금 쓴 답변에 이어서 검토 지시만 보냅니다(조문·질문·답변 약 8~10k 토큰을 다시 읽지 않음).
-    #   쓸 수 없으면 아래 예전 방식. 되돌리기: 이 블록 삭제.
     if json_enabled() and LOCAL_SERVER == "llamacpp":
         _raw = kv_reuse.chain_call(answer_text, REVIEW_CHAIN_PROMPT, 0, MAXTOK_REVIEW, "review", schema=REVIEW_SCHEMA)
         if _raw:
@@ -1374,7 +1251,6 @@ def review_answer(question: str, answer_text: str, context: str) -> list:
                 REVIEW_STATS["dropped"] += 1
                 _dbg(f"[review] 원문 문구를 찾지 못해 버림: {claim[:50]} / {quote[:50]}")
         elif v == "원문없음" and fix and re.search(r"\d", claim):
-            # 수치·기한 주장인데 원문에 근거가 없으면 지어낸 것일 가능성이 큼
             out.append({"kind": "원문없음", "quote": claim, "fix": fix})
     pr, prf = str(obj.get("premise", "")).strip(), str(obj.get("premise_fix", "")).strip()
     if pr and prf and len(_qnorm(pr)) >= 4 and _qnorm(pr) in nq:
@@ -1531,12 +1407,6 @@ _CLARIFY_RULES_JSON = """JSON 하나만 출력한다.
 CLARIFY_SCHEMA = {
     "type": "object",
     "properties": {
-        # ★ v1.32 — 질문에 이미 있는 사실을 **먼저** 적게 합니다(구조화된 출력 안의 짧은 추론).
-        #   실제 사례: "평일 오후 3시 · 하루 2시간 · 주거지역" 이라고 적힌 질문에
-        #   측정 시각·사용 시간·지역을 3라운드에 걸쳐 되물었고, 답변까지 꼬였습니다.
-        # ★ v1.40 — 질문자가 알고 싶은 것(asked)을 먼저 적고, 되묻기마다 근거 조문 문구(basis)와
-        #   '그 답에 따라 asked 의 답이 어떻게 달라지는지'(changes)를 적게 합니다. basis 가 [관련 조문]에
-        #   실제로 없으면 코드가 그 질문을 버립니다(조문에 없는 성별·신청 기간 같은 되묻기 — L-1751-1).
         "asked": {"type": "string", "maxLength": 100},
         "known": {"type": "array", "items": {"type": "string"}, "maxItems": 8},
         "done": {"type": "boolean"},
@@ -1558,8 +1428,6 @@ CLARIFY_SCHEMA = {
     "required": ["asked", "known", "done", "questions"],
 }
 
-# ── v1.32 — 질문 원문에 이미 있는 사실을 되묻는 항목 거르기 (마지막 그물) ──────────
-#   프롬프트·known 으로 1차로 막고, 그래도 나오면 여기서 버립니다. 표면 신호만 봅니다.
 _Q_TIME_OF_DAY = re.compile(r"(오전|오후|새벽|아침|저녁|밤|낮)\s*\d{1,2}\s*시(?!간)|정오|자정|\d{1,2}\s*시\s*(\d{1,2}\s*분)?\s*(에|경|쯤|무렵)")
 _Q_DURATION = re.compile(r"\d+(\.\d+)?\s*(시간|분간)")
 _Q_ZONE = re.compile(r"(주거|상업|공업|녹지|관리|농림|자연환경보전)\s*지역")
@@ -1588,12 +1456,9 @@ def _known_in_question(question: str, item: dict) -> str:
         return "대상 지역이 질문에 있음"
     if re.search(r"(공휴일|휴일|요일|평일)", ask) and _Q_DAY.search(q):
         return "요일이 질문에 있음"
-    # "주거지역·아파트 공사장" 인데 "300m 안에 주택이 있습니까?" — 지시문에 예로 넣어도 계속 물어서 코드로 막습니다.
     if re.search(r"(주택|주거)", ask) and re.search(r"(주거\s*지역|아파트|주택가|주택\s*단지|빌라|다세대)", q):
         return "주거 시설이 질문에 있음"
-    # 날짜: 질문에 "2020년 8월 20일에 … 검사" 처럼 그 일의 날짜가 이미 있으면 묻지 않습니다.
     if re.search(r"(언제|날짜|일자|연월일|시점)", ask):
-        # 가장 구체적인 낱말 하나로 맞춥니다("완공검사일" 은 "완공" 으로 — "검사" 로 맞추면 엉뚱한 날짜에 걸림).
         kws = [k for k in ("완공", "착공", "준공", "취득", "등록", "허가", "신고", "설치", "사용", "검사")
                if k in ask]
         if kws:
@@ -1604,23 +1469,18 @@ def _known_in_question(question: str, item: dict) -> str:
     uq, uo = _unit_of(q), _unit_of(opts + " " + ask)
     if uq & uo:
         return f"수치({', '.join(sorted(uq & uo))})가 질문에 있음"
-    # ★ v1.35 — 보기 가운데 하나가 질문에 이미 나와 있으면(같은 말·같은 뜻) 묻지 않습니다.
-    #   (2026-10-10 실사용: "땅을 파다가 기름이 나왔어" 인데
-    #    "어떤 물질로 오염되었습니까? [석유류 / 유기용제류 / 기타 / 모름]" 을 물음)
     hit = _option_in_question(q, item.get("options", []))
     if hit:
         return f"'{hit}' 가 질문에 있음"
     return ""
 
 
-# 보기 낱말 ↔ 질문에서 같은 뜻으로 쓰이는 말. 보기에 왼쪽 말이 들어 있고 질문에 오른쪽 패턴이 있으면 같은 것.
 _OPT_SYNONYMS = {
     "석유": r"(기름|유류|석유|경유|휘발유|등유|벙커|윤활유|폐유|엔진오일|오일)",
     "유기용제": r"(유기\s*용제|솔벤트|시너|신나|트리클로로|테트라클로로|TCE|PCE)",
     "중금속": r"(중금속|카드뮴|비소|수은|구리|아연|니켈|크롬)",
     "불소": r"불소",
 }
-# 고를 수 있는 내용이 없는 보기(예/아니오·모름·기타·직접 입력)는 비교하지 않습니다.
 _OPT_SKIP = re.compile(r"^(예|네|아니오|아니요|있음|없음|해당|해당\s*없음|해당하지\s*않음|모름|기타|직접)")
 
 
@@ -1641,35 +1501,22 @@ def _option_in_question(question: str, options) -> str:
                 return o
     return ""
 
-# 되묻기가 "결론"(기한·의무)을 질문자에게 되묻는 꼴. clarify() 마지막 그물에서 버립니다.
-#   "…언제까지 받아야 합니까?" / "…설치해야 합니까?" / "…신고해야 하나요?"
-# 사실을 묻는 "언제 설치했습니까?" "용량은 얼마입니까?" 는 걸리지 않습니다.
 # eval_run.py 에 같은 규칙이 복사돼 있습니다 (그쪽은 표준 라이브러리만 씀).
 CONCLUSION_Q = re.compile(r"언제까지|야\s*(합니|하나요|하는지|할까요|됩니|되나요|하는가)"
-                          # v1.32 — "보정 적용 여부는?", "기준일이 설치일로부터 계산됩니까?" 처럼
-                          #   조문을 보고 이 도구가 판단할 것을 묻는 꼴
                           r"|(적용|보정|가산|감경|면제)\s*(여부|대상인|되나요|됩니까|되는지)"
                           r"|(계산|산정|기산)\s*(됩니까|되나요|하나요|합니까)")
 
 
-# "…에 해당하나요?" 같은 예/아니오 질문인지 판별합니다.
-# 예/아니오로 답하는 질문의 어미.
-# ★ 2026-08-18 — "지정되었나요?" 처럼 `되었나요`·`했나요`·`인가?` 로 끝나는
-#   물음이 빠져 있어서, 부정 보기가 없는 채로 화면에 나갔습니다
-#   ("시설이 …로 지정되었나요?  ○ 지정됨  ○ 모름" — 아니라고 답할 방법이 없음).
 _YESNO_RE = re.compile(
     r"(해당하나요|해당합니까|인가요|입니까|습니까|맞나요|있나요|없나요|하나요|"
     r"되나요|되었나요|됐나요|했나요|받았나요|였나요|이었나요|"
     r"인가|인지|되었는지|맞는가|있는가)\s*\??$")
 
-# 의문사. 이게 있으면 예/아니오로 답하는 질문이 아닙니다.
-# (어미는 같은데 답이 전혀 다릅니다 — "언제 받았나요?" 에 "아니오" 는 답이 아님)
 _WH_RE = re.compile(
     r"(언제|어디|어느\s*곳|무엇|뭐|어떤|어떻게|어찌|얼마|몇|"
     r"누가|누구|왜|무슨|어느)")
 
 
-# 보기로 흔히 쓰이는 낱말. 질문 자리에 이런 것이 오면 그 줄은 버립니다.
 _OPTION_WORDS = {
     "예", "네", "아니오", "아니요", "아니다", "모름", "모르겠음",
     "해당함", "해당없음", "해당하지않음", "있음", "없음", "맞음", "아님",
@@ -1682,7 +1529,6 @@ def _looks_like_option(s: str) -> bool:
     return t in _OPTION_WORDS or len(t) < 2
 
 
-# 출력 형식 틀의 라벨. "질문|보기1|보기2" 라는 틀을 로컬 모델이 그대로 베낍니다.
 _LABEL_ONLY_RE = re.compile(
     r"^(질문|물음|보기\s*\d*|선택지\s*\d*|option\s*\d*|q|a)\s*$", re.I)
 _LABEL_HEAD_RE = re.compile(
@@ -1709,7 +1555,7 @@ def _split_clarify_line(line: str) -> list[str]:
     for p in line.split("|"):
         p = p.strip().strip("\"'“”")
         if not p or _LABEL_ONLY_RE.match(p):
-            continue                       # "질문" / "보기1" 같은 형식 라벨은 버립니다
+            continue
         p = _LABEL_HEAD_RE.sub("", p).strip()
         if p:
             pieces.append(p)
@@ -1717,8 +1563,6 @@ def _split_clarify_line(line: str) -> list[str]:
     if len(pieces) >= 3:
         return pieces
 
-    # 조각이 모자랍니다. 마지막 조각이 "질문?: 보기 / 보기 / 모름" 인지 봅니다.
-    # ★ 구분자는 "/" 만 씁니다. "·" 로 자르면 "지상·옥내 저장시설" 이 쪼개집니다.
     tail = pieces[-1] if pieces else ""
     m = re.match(r"^(.{4,70}?)\s*[:：]\s*(.+)$", tail)
     if m:
@@ -1727,9 +1571,6 @@ def _split_clarify_line(line: str) -> list[str]:
             q = pieces[0] if len(pieces) >= 2 else m.group(1).strip()
             return [q] + opts
 
-    # ★ 2026-08-19 — 콜론 없이 보기를 한 칸에 "/" 로만 몰아넣는 형태.
-    #     저장시설 종류|지하매설/지상·옥내/모름
-    #   조각이 2개라 3조각 조건에 걸려 **줄째로 버려지고 있었습니다.**
     if len(pieces) == 2:
         opts = _expand_slash_options([pieces[1]])
         if len(opts) >= 2:
@@ -1737,20 +1578,13 @@ def _split_clarify_line(line: str) -> list[str]:
     return pieces
 
 
-# 확실한 물음 어미. 보기 자리에 오면 안 됩니다.
 _OPT_LOOKS_LIKE_Q_RE = re.compile(r"(인가요|입니까|습니까|나요|은가요)\s*\??$")
 
-# ★ 2026-08-18 — 물음표가 **붙은** 어미. 위 목록에 "인가/인지/는가" 를 그냥
-#   넣으면 "이중벽인지", "2만리터 이상인지" 같은 멀쩡한 보기까지 버려집니다
-#   (예전에 실제로 그랬습니다). 물음표를 요구하면 그 사고 없이
-#   "지상·옥내 저장시설인가?" 만 정확히 걸러집니다.
 _OPT_Q_MARK_RE = re.compile(r"(인가|인지|는가|ㄴ가|맞나|맞는가)\s*\?$")
 
-# 물음 어미를 떼어내 보기 문구로 만들 때 씁니다.
 _Q_TAIL_RE = re.compile(
     r"\s*(인가요|입니까|습니까|인가|인지|나요|은가요|는가|맞나요|맞나|맞는가)\s*\?*$")
 
-# "A인지 B인지" 형태의 질문. 여기서 보기를 뽑아낼 수 있습니다.
 _A_OR_B_RE = re.compile(r"^(.{2,25}?)\s*인지\s+(.{2,25}?)\s*인지\s*\??$")
 
 
@@ -1774,9 +1608,6 @@ def _opt_is_question(o: str) -> bool:
                 or _A_OR_B_RE.match(o))
 
 
-# "…확인이 필요합니다" 처럼 **할 일**로 쓴 꼬리말.
-# 프롬프트에 "할 일을 보기로 만들지 마라" 고 적어 뒀지만 로컬 모델이 지키지
-# 않습니다. 코드에서 걸러야 합니다.
 _TODO_TAIL_RE = re.compile(
     r"\s*(에 대한|에 대해|의)?\s*"
     r"(확인|검토|파악|조회|점검)\s*(이|가|을|를)?\s*"
@@ -1784,12 +1615,10 @@ _TODO_TAIL_RE = re.compile(
     r"요망합니다|요망|해야 합니다|해야함|해야 하나요|해야 합니까|"
     r"바랍니다)\s*[\.\?]?$")
 
-# "…궁금합니다 / …알고 싶습니다" — 질문이 아니라 하소연입니다.
 _WISH_TAIL_RE = re.compile(
     r"\s*(이|가)?\s*(궁금합니다|궁금함|알고 싶습니다|알고싶습니다|"
     r"알아야 합니다|모르겠습니다)\s*\.?$")
 
-# "A인지 B인지" — 앞의 군말 길이를 제한하지 않는 느슨한 판. 보기를 뽑는 데 씁니다.
 _A_OR_B_LOOSE_RE = re.compile(r"^(.+?)\s*인지\s+(.{1,30}?)\s*인지\s*[\.\?]?$")
 
 
@@ -1797,14 +1626,13 @@ def _strip_todo(s: str) -> str:
     """보기 끝의 '…확인이 필요합니다' 류 군말을 떼어냅니다."""
     t = str(s or "").strip()
     prev = None
-    while t != prev:                      # "확인이 필요합니다" + "." 처럼 겹칠 수 있음
+    while t != prev:
         prev = t
         t = _TODO_TAIL_RE.sub("", t).strip()
         t = _WISH_TAIL_RE.sub("", t).strip()
     return t.rstrip(" .·,")
 
 
-# "모름" 과 같은 뜻으로 쓰이는 보기. 이건 버리면 안 됩니다.
 _UNKNOWN_OPTS = ("모름", "모르겠음", "모르겠습니다", "모르겠어요", "잘모름",
                  "확인안됨", "미확인", "확인필요없음")
 
@@ -1818,10 +1646,6 @@ def _is_todo_option(s: str) -> bool:
     s = str(s or "").strip()
     if not s:
         return False
-    # ★ 2026-08-19 — "모르겠습니다" 는 _WISH_TAIL_RE 에 걸려 '할 일'로 판정돼
-    #   **삭제되고 있었습니다.** 그러면 화면에 "모름" 계열 보기가 하나도 안 남고,
-    #   index.html 은 그럴 때 **마지막 보기를 기본 선택**하므로, 사용자가 그냥
-    #   "이대로 검색" 을 누르면 모르는 사실을 확정 조건으로 넣게 됩니다.
     if _is_unknown_option(s):
         return False
     return bool(_TODO_TAIL_RE.search(s) or _WISH_TAIL_RE.search(s))
@@ -1924,7 +1748,6 @@ def _clean_question(q: str, options: list) -> str:
     if not q:
         return q
 
-    # (1) 새어 들어온 답 잘라내기
     for sep in (":", "："):
         if sep in q:
             head, tail = q.split(sep, 1)
@@ -1938,9 +1761,8 @@ def _clean_question(q: str, options: list) -> str:
                 q = head
                 break
 
-    # (2) 할 일·하소연 꼬리말 떼기
     cleaned = _strip_todo(q)
-    if len(cleaned) >= 4:                 # 너무 짧아지면 원문을 둡니다
+    if len(cleaned) >= 4:
         q = cleaned
     return q.strip()
 
@@ -1981,9 +1803,6 @@ def _repair_all_questions(question: str, options: list) -> list:
 
     others = [o.strip() for o in options
               if o and not _is_unknown_option(o)]
-    # ★ 2026-08-19 — 물음 어미만 떼면 "면제 대상인지 확인해야 하나요?" 가
-    #   "면제 대상인지 확인해야 하" 라는 **잘린 조각**으로 남습니다.
-    #   할 일 문장은 여기서 미리 걸러냅니다.
     others = [o for o in others if not _is_todo_option(o)]
     if not others or not any(_opt_is_question(o) for o in others):
         return None
@@ -2030,7 +1849,6 @@ def _expand_slash_options(options: list) -> list:
       공백 없이 "A/B/모름" 으로 낸 경우는, 단위가 안 섞였을 때만 한 번 더
       갈라 줍니다.
     """
-    # 숫자+단위 뒤에 바로 "/" 가 붙는 형태 (㎥/일, mg/L, 톤/년 …)
     unit_slash = re.compile(r"\d\s*[a-zA-Z가-힣㎥㎡㎎㎍ℓ%]*\s*/")
 
     def _split(s: str) -> list:
@@ -2091,20 +1909,9 @@ def _fix_yesno(question: str, options: list) -> list:
     if not _YESNO_RE.search(q):
         return opts
 
-    # ★ 2026-08-19 — 어미만 보면 **의문사 질문**까지 걸립니다.
-    #   "마지막 누출검사를 언제 받았나요?" 도 `받았나요?` 로 끝나거든요.
-    #   그러면 보기에 "아니오" 가 붙어서
-    #       마지막 누출검사를 언제 받았나요?  ○ 아래 칸에 날짜 입력  ○ 아니오
-    #   가 됩니다. 사용자가 "아니오" 를 고르면
-    #   "마지막 누출검사를 언제 받았나요?: 아니오" 가 확인된 조건으로 답변
-    #   프롬프트에 들어가고, 거기서 다음 검사일을 계산하려 듭니다.
-    #   하필 이게 우리가 **최우선으로 묻게 만든** 질문이라 더 나쁩니다.
     if _WH_RE.search(q):
         return opts
 
-    # ★ 2026-09-29 — 실질 보기가 **부정 하나뿐**인 경우.
-    #   실사례: "악취배출시설이 있습니까?" → [악취배출시설이 없습니다 / 모름]
-    #   "있다" 를 고를 수 없었습니다. 부정 문장을 긍정으로 바꿔 앞에 넣습니다.
     _UNK = ("모름", "모르겠음", "모르겠어요", "잘모름", "확인안됨", "미확인")
     real0 = [o for o in opts if o.replace(" ", "") not in _UNK]
     if len(real0) == 1:
@@ -2123,24 +1930,12 @@ def _fix_yesno(question: str, options: list) -> list:
     flat = [o.replace(" ", "") for o in opts]
     has_no = any(o in NO_WORDS for o in flat)
     if has_no:
-        return opts                      # 부정 보기가 이미 있으면 그대로
+        return opts
 
-    # "모름" 을 뺀 실질 보기가 둘 이상이면 대립 선택지로 보고 유지합니다.
     real = [o for o, f in zip(opts, flat) if f not in UNKNOWN]
     if len(real) >= 2:
         return opts
 
-    # ★ 2026-08-18 — 실질 보기가 하나뿐일 때 예전에는 통째로
-    #   ["예", "아니오", "모름"] 으로 **갈아치웠습니다.** 그래서
-    #       저장된 물질이 석유류인가요?  ○ 석유류  ○ 모름
-    #   이 이렇게 바뀌었습니다.
-    #       저장된 물질이 석유류인가요?  ○ 예  ○ 아니오  ○ 모름
-    #   모델이 애써 뽑아 준 "석유류" 라는 구체적인 말이 사라지고, 담당자는
-    #   질문을 다시 읽어야 무엇에 "예" 인지 알 수 있습니다. 정보가 줄어듭니다.
-    #   (실사용 지적: "두 번째 되묻기에 예 라고 글자가 잘못 들어간다")
-    #
-    #   → 있는 보기는 그대로 두고 **부정만 채웁니다.**
-    #       저장된 물질이 석유류인가요?  ○ 석유류  ○ 아니오  ○ 모름
     if real:
         out = []
         for o in opts:
@@ -2151,7 +1946,6 @@ def _fix_yesno(question: str, options: list) -> list:
         out.append("모름")
         return out
 
-    # 실질 보기가 아예 없을 때만 예/아니오로 세웁니다.
     return ["예", "아니오", "모름"]
 
 
@@ -2161,8 +1955,7 @@ def _finalize_clarify(items: list, question: str = "") -> list:
     cleaned = []
     seen_q = set()
     for item in items:
-        _why = str(item.get("why") or "")       # ★ v1.41 — 아래에서 item 을 새로 만들므로 미리 보관
-        # v1.34 — 한 라운드에 같은 질문이 두 번 나오는 경우(실측)
+        _why = str(item.get("why") or "")
         qk = re.sub(r"[\s?？.]+", "", str(item.get("question", "")))
         if qk in seen_q:
             continue
@@ -2171,22 +1964,14 @@ def _finalize_clarify(items: list, question: str = "") -> list:
         if len(left) < len(item["options"]) and LLM_DEBUG:
             _dbg(f"[clarify] '할 일' 보기 {len(item['options']) - len(left)}개 제거: "
                   f"{item['question'][:30]}")
-        # 잘린 조각이 남지 않게 너무 짧은 보기도 버립니다.
-        # 단 "예"/"네" 는 한 글자여도 정상 보기입니다.
         left = [o for o in left
                 if len(o.strip()) >= 2 or o.strip() in ("예", "네")]
-        # ★ 2026-09-29 — "모름" 계열 보기가 둘 이상이면("모르겠음 / 모름") 하나만 남겨 맨 뒤로.
         unk = [o for o in left if _is_unknown_option(o)]
         if unk:
             left = [o for o in left if not _is_unknown_option(o)] + ["모름"]
-        # ★ 2026-09-29 — 물음이 아닌 질문("우려기준 초과")은 버립니다.
-        #   사용자가 무엇을 골라야 하는지 알 수 없습니다.
         if not re.search(r"(\?|？|까|요|나|가|지|니|죠)\s*$", item["question"].strip()):
             _dbg(f"[clarify] 물음이 아닌 질문 제거: {item['question'][:40]}")
             continue
-        # ★ 2026-09-29 — "어느 법이 적용되냐" 를 묻는 항목은 버립니다.
-        #   질문자는 법을 모르고, 법을 가리는 건 이 도구의 일입니다.
-        #   실제 사례: 질문 "토양환경보전법" / 보기 "광산피해의 … 법률 | 모름"
         q_bare = re.sub(r"[\s?？.]+$", "", item["question"])
         law_opts = [o for o in left if _looks_like_law(o.strip())]
         if _looks_like_law(q_bare) or law_opts:
@@ -2194,16 +1979,9 @@ def _finalize_clarify(items: list, question: str = "") -> list:
                 _dbg(f"[clarify] 법령 이름을 묻는 항목 제거: {item['question'][:30]} "
                       f"/ {', '.join(left)[:60]}")
             continue
-        # ★ 2026-10-02 — 결론(기한·의무)을 질문자에게 되묻는 항목은 버립니다.
-        #   실제 사례: 누출검사 주기를 물었는데 되묻기가
-        #   "다음 정기 누출검사를 언제까지 받아야 합니까?" — 질문자가 물은 것 그 자체.
         if CONCLUSION_Q.search(item["question"]):
             _dbg(f"[clarify] 결론을 되묻는 항목 제거: {item['question'][:40]}")
             continue
-        # ★ v1.34 — 보기 손질 (2026-10-08 실사용 피드백: "환경영향평가를 받아야 하나요?")
-        #   · "별표 3 기준 이상/미만" 처럼 조문·별표를 가리키는 보기 → 질문자는 그 기준을 모릅니다.
-        #   · "규모는 얼마입니까?" 인데 보기에 숫자가 없음 → 질문과 보기가 안 맞습니다.
-        #   → 수치를 묻는 질문이면 직접 입력으로 바꾸고, 아니면 그 질문을 버립니다.
         q_txt = item["question"]
         asks_qty = bool(re.search(r"(얼마|몇\s*\S{0,3}|규모|면적|용량|수량|크기|배출량|인원|금액|길이|높이)", q_txt))
         refs_law = [o for o in left if re.search(r"(별표|별지|제\s*\d+\s*조|시행령|시행규칙)", o)
@@ -2216,8 +1994,6 @@ def _finalize_clarify(items: list, question: str = "") -> list:
             else:
                 _dbg(f"[clarify] 조문·별표를 가리키는 보기 → 제거: {q_txt[:40]}")
                 continue
-        # 보기가 범주 목록이면(예/아니오·수치 범위가 아니면) "기타" 를, 그리고 항상 "모름" 을 둡니다.
-        #   (실사용: "사업의 종류" 보기에 맞는 것이 없어 아무거나 고른 뒤 답이 엉뚱해짐)
         real = [o for o in left if not _is_unknown_option(o)]
         categorical = len(real) >= 2 and not any(
             re.search(r"(^예$|^아니오|^네$|있음|없음|이상|미만|초과|이하|\d|입력|받은 적|해당)", o) for o in real)
@@ -2225,7 +2001,6 @@ def _finalize_clarify(items: list, question: str = "") -> list:
             real.append("기타 (아래 칸에 적기)")
         left = real + ["모름"]
         item = {"question": q_txt, "options": left}
-        # ★ v1.32 — 질문 원문에 이미 적힌 사실(시각·사용 시간·지역·요일·수치)을 되묻는 항목은 버립니다.
         why = _known_in_question(question, {"question": item["question"], "options": left})
         if why:
             _dbg(f"[clarify] 이미 질문에 있는 사실 → 제거 ({why}): {item['question'][:40]}")
@@ -2256,8 +2031,6 @@ def clarify(question: str, answered: str = "", catalog: str = "") -> list[dict]:
     fill = dict(question=question, answered=answered or "(없음)",
                 catalog=catalog or "(아직 수집된 조문이 없습니다. 일반적인 표현으로만 물으세요.)")
 
-    # ★ v1.31 — JSON 형식 강제를 먼저 시도합니다. 성공하면 형식 보정 단계를
-    #   건너뛰고 마지막 그물(_finalize_clarify)만 통과시킵니다.
     obj, _ = call_json(CLARIFY_PROMPT.format(output_rules=_CLARIFY_RULES_JSON, **fill),
                        CLARIFY_SCHEMA, temperature=0.2,
                        max_tokens=MAXTOK_CLARIFY, stage="clarify")
@@ -2268,8 +2041,6 @@ def clarify(question: str, answered: str = "", catalog: str = "") -> list[dict]:
             for it in (obj.get("questions") or [])[:3]:
                 if not isinstance(it, dict):
                     continue
-                # v1.40 — 근거 조문 문구가 [관련 조문]에 실제로 있는 되묻기만 남깁니다.
-                #   (날짜 입력 칸 질문은 조문 문구가 '설치 후 ○년' 처럼 있으므로 같은 기준을 씁니다)
                 b = _qnorm(it.get("basis") or "")
                 if catalog and (len(b) < 4 or b not in ncat):
                     _dbg(f"[clarify] 근거 문구가 조문에 없어 버림: {str(it.get('question'))[:50]} "
@@ -2282,8 +2053,6 @@ def clarify(question: str, answered: str = "", catalog: str = "") -> list[dict]:
                 opts = _fix_yesno(q, opts)
                 if len(q) >= 4 and len(opts) >= 2:
                     items.append({"question": q, "options": opts})
-                    # ★ v1.41 — 되묻기마다 '왜 묻는지'(changes: 답에 따라 결론이 어떻게 달라지는지)를 화면에 보여 줍니다.
-                    #   기본 꺼짐(_cache/flags/clarify_why 파일 또는 CLARIFY_WHY=1). 원복: 아래 2줄 삭제.
                     if _clarify_why_on() and str(it.get("changes") or "").strip():
                         items[-1]["why"] = str(it.get("changes")).strip()[:100]
         out = _finalize_clarify(items, question)
@@ -2294,8 +2063,6 @@ def clarify(question: str, answered: str = "", catalog: str = "") -> list[dict]:
     raw = _call(CLARIFY_PROMPT.format(output_rules=_CLARIFY_RULES_TEXT, **fill),
                 max_tokens=MAXTOK_CLARIFY, stage="clarify").strip()
 
-    # "OK" 만 나오면 더 물을 게 없다는 뜻입니다.
-    # 로컬 모델은 "OK." "OK 입니다" 처럼 덧붙이기도 합니다.
     head = raw.strip().splitlines()[0].strip() if raw.strip() else ""
     if re.match(r"^ok\b", head, re.I) or "|" not in raw:
         if LLM_DEBUG:
@@ -2308,27 +2075,16 @@ def clarify(question: str, answered: str = "", catalog: str = "") -> list[dict]:
         line = re.sub(r"^\d+[.)]\s*", "", line)
         if "|" not in line:
             continue
-        # ★ 2026-08-19 — 모델이 마크다운 표로 답할 때가 있습니다.
-        #   정렬 행("|:---|:---:|---:|")이 그대로 질문·보기로 올라가
-        #   화면에 ":---" 가 보기로 뜹니다. 한글이 한 글자도 없으면 버립니다.
         if not re.search(r"[가-힣]", line):
             continue
-        # 모델이 형식 틀("질문|보기1|…")의 낱말을 그대로 베끼거나
-        # "질문: 보기 / 보기 / 모름" 으로 흘러도 읽어냅니다.
         parts = _split_clarify_line(line)
-        # ★ 최소 3조각(질문 + 보기 2개)이어야 합니다.
-        #   2개로 완화하면 모델이 질문 없이 "예|아니오|모름" 만 뱉은 줄까지
-        #   받아들여 "예" 가 질문이 되어버립니다.
         if len(parts) < 3:
             continue
         q, opts = parts[0][:60], parts[1:5]
 
-        # 첫 조각이 보기 같은 낱말이면 질문이 아닙니다. 그 줄은 버립니다.
         if _looks_like_option(q):
             continue
 
-        # ★ 질문에 새어 들어온 이전 답변·할 일 꼬리말을 먼저 걷어냅니다.
-        #   이걸 안 하면 아래 보정들이 모두 오염된 질문을 기준으로 돕니다.
         q2 = _clean_question(q, opts)
         if q2 != q and LLM_DEBUG:
             _dbg(f"[clarify] 질문 정리: {q}  →  {q2}")
@@ -2336,12 +2092,8 @@ def clarify(question: str, answered: str = "", catalog: str = "") -> list[dict]:
         if len(q) < 4:
             continue
 
-        # 한 칸에 "/" 로 몰아넣은 보기를 먼저 폅니다.
         opts = _expand_slash_options(opts)
 
-        # ★ 보기 자리에 "…확인이 필요합니다" 같은 할 일이 여러 개 들어온 줄은
-        #   여러 개의 질문으로 폅니다. 제일 먼저 봅니다 — 이 형태는 아래
-        #   보정들이 전부 그냥 통과시켜 버립니다(물음 어미가 없어서).
         todo_split = _promote_todo_options(q, opts)
         if todo_split:
             if LLM_DEBUG:
@@ -2349,9 +2101,6 @@ def clarify(question: str, answered: str = "", catalog: str = "") -> list[dict]:
             out.extend(todo_split)
             continue
 
-        # ★ 질문과 보기가 둘 다 물음인 줄("A인가?|B인가?|모름")을 먼저 봅니다.
-        #   _repair_a_or_b 보다 앞에 둡니다 — 그쪽은 보기의 질문을 **버리는**
-        #   방향이라, 여기서 살릴 수 있는 선택지가 먼저 사라집니다.
         fixed = _repair_all_questions(q, opts)
         if fixed:
             if LLM_DEBUG:
@@ -2360,19 +2109,12 @@ def clarify(question: str, answered: str = "", catalog: str = "") -> list[dict]:
             out.append(fixed)
             continue
 
-        # 보기 자리에 질문이 들어온 줄을 고칩니다.
         opts = _repair_a_or_b(q, opts)
         opts = _fix_yesno(q, opts)
 
         if len(opts) >= 2:
             out.append({"question": q, "options": opts})
 
-    # ★ 마지막 그물 — 여기까지 와서도 "…확인이 필요합니다" 가 남아 있으면
-    #   화면에 내보내지 않습니다. 고를 수 없는 보기를 보여 주느니
-    #   그 질문을 안 묻는 편이 낫습니다.
-    #   ★ 2026-08-19 — 예전에는 이 그물이 마지막 분기 안에만 있어서,
-    #     `continue` 로 빠져나가는 _promote_todo_options / _repair_all_questions
-    #     결과는 **검사를 통째로 건너뛰었습니다.** 루프 밖으로 뺐습니다.
     out = _finalize_clarify(out, question)
 
     if LLM_DEBUG:
@@ -2463,8 +2205,6 @@ def select_articles(question: str, catalog: str) -> list[int]:
     raw = _call(SELECT_PROMPT.format(question=question, catalog=catalog,
                                      output_rules=_SELECT_RULES_TEXT),
                 temperature=0, max_tokens=MAXTOK_SELECT, stage="select")
-    # 숫자만 뽑습니다. 모델이 설명을 덧붙여도 번호는 건집니다.
-    # 다만 "제8조" 같은 조문 번호가 섞이지 않도록, 조/항/호 앞뒤 숫자는 제외합니다.
     cleaned = re.sub(r"제\s*\d+\s*(조|항|호)", " ", raw)
     nums = []
     for tok in re.findall(r"\d+", cleaned):
