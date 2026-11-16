@@ -91,9 +91,49 @@ BP_CTX_CHARS = int(os.getenv("BP_CTX_CHARS", "3500"))
 _BOX_CHARS = re.compile(r"[─━┌┐└┘├┤┬┴┼┏┓┗┛┣┫┳┻╋═║╔╗╚╝╠╣╦╩╬]+")
 
 
+_CELL_END = re.compile(r"[│├┼┤]")
+
+
+def _hoist_row_labels(text: str) -> str:
+    """세로로 합친 첫 칸(여러 행에 걸친 구분 이름)을 그 묶음 첫 줄 앞 '▶ 이름' 한 줄로 올립니다."""
+    lines = str(text or "").split("\n")
+    out, group = [], []
+
+    def flush():
+        cells = []
+        for ln in group:
+            body = ln.lstrip()
+            m = _CELL_END.search(body, 1)
+            cells.append((body, m.start() if m else len(body)))
+        label = ""
+        for b, e in cells:
+            frag = b[1:e]
+            if frag.strip():
+                label += (" " if label and label[-1] == " " else "") + frag.strip() + (" " if frag.endswith(" ") else "")
+        if label.strip() and any(b[e:e + 1] == "├" for b, e in cells):
+            out.append("▶ " + label.strip())
+            out.extend("│" + b[e:] for b, e in cells)
+        else:
+            out.extend(group)
+        group.clear()
+
+    for ln in lines:
+        if ln.lstrip().startswith("│"):
+            group.append(ln)
+            continue
+        if group and not ln.strip():
+            continue
+        if group:
+            flush()
+        out.append(ln)
+    if group:
+        flush()
+    return "\n".join(out)
+
+
 def _compact_bp(text: str) -> str:
     """별표 원문에서 표 테두리·정렬 공백·빈 줄을 걷어냅니다. 글자(내용)는 그대로입니다."""
-    t = _BOX_CHARS.sub("", str(text or ""))
+    t = _BOX_CHARS.sub("", _hoist_row_labels(text))
     t = re.sub(r"[ \t　 ]+", " ", t)
     lines = []
     for ln in t.split("\n"):
@@ -186,6 +226,18 @@ def _fit_keep_notes(text: str, limit: int, keywords=None) -> str:
         return head + "\n…(표 일부 생략)…\n" + notes + tail
     return t[:limit] + "\n…(이하 생략)"
 
+_CONCL_BLOCK_RE = re.compile(r"【결론】[\s\S]*?(?=【|\Z)")
+
+
+def _merge_conclusion(text: str, text2: str) -> str:
+    """text 의 【결론】 블록만 text2 의 【결론】 블록으로 바꿉니다. 둘 중 하나라도 없으면 빈 문자열."""
+    m1, m2 = _CONCL_BLOCK_RE.search(text or ""), _CONCL_BLOCK_RE.search(text2 or "")
+    if not m1 or not m2 or len(m2.group(0).strip()) <= len("【결론】"):
+        return ""
+    rest = text[m1.end():]
+    return text[:m1.start()] + m2.group(0).rstrip() + ("\n\n" + rest.lstrip() if rest.strip() else "")
+
+
 _SELF_CORR_RE = re.compile(r"(?m)(수정된|정정된|바로잡은|다시\s*정리한)\s*결론|^\s*\**\s*(수정|정정)\s*\**\s*[:：]|정정하면")
 _SELF_CORR_FIX = ("【결론】과 뒤쪽(【설명】 끝의 '수정된 결론' 등)의 판정이 다르다. 조문 원문으로 다시 따져 하나의 판정으로 정하고, "
                   "고친 흔적 없이 【결론】부터 처음부터 다시 쓴다")
@@ -267,7 +319,7 @@ SELECT_ARTICLES = os.getenv("SELECT_ARTICLES", "1") not in ("0", "false", "False
 # 조회 후 지자체기관명으로 한 번 더 걸러냅니다.
 LOCAL_GOV = os.getenv("LOCAL_GOV", "성남시").strip()
 
-VERSION = "1.50"
+VERSION = "1.51"
 
 app = FastAPI(title="법령 조회 도우미", version=VERSION)
 
@@ -3183,6 +3235,9 @@ def _ask_after_search(req, steps, answered, found, flat, catalog, refs, it=None,
                 _keep_secs = all(h in text2 for h in ("【결론】", "【근거】", "【계산】", "【설명】") if h in text)
                 if "【결론】" in text2 and len(text2) > 80 and "【근거】" in text2 and _c2 >= max(1, _c1 // 2) and _keep_secs:
                     text = text2
+                elif any(p.get("kind") == "결론모순" for p in probs) and _merge_conclusion(text, text2):
+                    text = _merge_conclusion(text, text2)
+                    probs = [dict(p, kind=p["kind"] + "(결론만 반영)") for p in probs]
                 else:
                     probs = [dict(p, kind=p["kind"] + "(다시 쓴 답 버림)") for p in probs]
                 steps.append({"name": "답변 검토",

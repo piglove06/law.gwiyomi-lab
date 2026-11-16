@@ -169,6 +169,44 @@ class EvalAutoAnswer(unittest.TestCase):
                                               {"등록대상동물": "예"}, "모름"), "등록대상동물")
 
 
+class TableCompact(unittest.TestCase):
+    RAW = ("┌────┬────┬────┐\n"
+           "│구분    │소음원  │주간    │\n"
+           "├────┼────┼────┤\n"
+           "│가. 주거│공장    │55 이하 │\n"
+           "\n"
+           "│지역    ├────┼────┤\n"
+           "│        │공사장  │65 이하 │\n"
+           "├────┼────┼────┤\n"
+           "│나. 그 밖│공장    │65 이하 │\n"
+           "│의 지역 ├────┼────┤\n"
+           "│        │공사장  │70 이하 │\n"
+           "└────┴────┴────┘")
+
+    def test_merged_first_cell_becomes_group_label(self):
+        lines = main._compact_bp(self.RAW).split("\n")
+        self.assertIn("▶ 가. 주거지역", lines)
+        self.assertIn("▶ 나. 그 밖의 지역", lines)
+        i, j = lines.index("▶ 가. 주거지역"), lines.index("▶ 나. 그 밖의 지역")
+        self.assertTrue(any("공사장" in ln and "65" in ln for ln in lines[i:j]))
+        self.assertTrue(any("공사장" in ln and "70" in ln for ln in lines[j:]))
+
+    def test_plain_rows_unchanged(self):
+        self.assertNotIn("▶", main._compact_bp("┌──┬──┐\n│가 │1   │\n├──┼──┤\n│나 │2   │\n└──┴──┘"))
+
+
+class ConclusionMerge(unittest.TestCase):
+    def test_only_conclusion_replaced(self):
+        a = "【결론】\n네, 초과했습니다.\n\n【근거】\nx\n\n【계산】\n판정: 초과하지 않았습니다."
+        got = main._merge_conclusion(a, "【결론】\n아니오, 초과하지 않았습니다.\n\n【근거】\nz")
+        self.assertTrue(got.startswith("【결론】\n아니오"))
+        self.assertIn("【계산】\n판정: 초과하지 않았습니다.", got)
+        self.assertNotIn("z", got)
+
+    def test_no_conclusion_in_rewrite(self):
+        self.assertEqual(main._merge_conclusion("【결론】\n네\n【근거】 x", "다시 쓴 답"), "")
+
+
 class LawClient(unittest.TestCase):
     def test_html_entities(self):
         self.assertEqual(law_client._fix_html_entities("소음&middot;진동 &foo; &amp;"), "소음·진동 &amp;foo; &amp;")
@@ -184,5 +222,5 @@ class LawClient(unittest.TestCase):
 
 
 if __name__ == "__main__":
-    res = unittest.main(exit=False, verbosity=1).result
+    res = unittest.main(exit=False, verbosity=1, warnings="ignore").result
     sys.exit(0 if res.wasSuccessful() else 1)
