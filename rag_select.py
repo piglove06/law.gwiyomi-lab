@@ -38,9 +38,11 @@ import time
 from array import array
 from collections import Counter
 
+import flags
+
 HERE = os.path.dirname(os.path.abspath(__file__))
 CACHE_DIR = os.path.join(HERE, "_cache")
-FLAG_DIR = os.path.join(CACHE_DIR, "flags")
+FLAG_DIR = flags.FLAG_DIR
 
 def _num_env(name: str, default):
     try:
@@ -62,10 +64,7 @@ RRF_K = 60
 
 
 def enabled(name: str = "select") -> bool:
-    env = os.getenv("RAG_" + name.upper())
-    if env is not None and env.strip() != "":
-        return env.strip() == "1"
-    return os.path.exists(os.path.join(FLAG_DIR, "rag_" + name))
+    return flags.on("rag_" + name, "RAG_" + name.upper())
 
 
 _WORD = re.compile(r"[가-힣a-zA-Z0-9]+")

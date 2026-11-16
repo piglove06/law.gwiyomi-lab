@@ -90,9 +90,7 @@ class ConclusionQuestion(unittest.TestCase):
         for q, want in self.CASES:
             self.assertEqual(bool(ai_client.CONCLUSION_Q.search(q)), want, q)
 
-    @unittest.expectedFailure
     def test_eval_run_same_rule(self):
-        # REFACTOR_PLAN A-1: eval_run 사본이 첫 갈래만 있음. 고치면 이 표시를 지운다.
         for q, want in self.CASES:
             self.assertEqual(bool(eval_run.CONCLUSION_Q.search(q)), want, q)
 
@@ -205,6 +203,38 @@ class ConclusionMerge(unittest.TestCase):
 
     def test_no_conclusion_in_rewrite(self):
         self.assertEqual(main._merge_conclusion("【결론】\n네\n【근거】 x", "다시 쓴 답"), "")
+
+
+class SplitTerms(unittest.TestCase):
+    def test(self):
+        self.assertEqual(ai_client._split_terms("소음·진동관리법, 1. 누출검사 / 토양오염 (설명)"),
+                         ["소음·진동관리법", "누출검사", "토양오염"])
+
+
+class Flags(unittest.TestCase):
+    def test_env_wins_then_file(self):
+        import flags
+        os.environ["ZZ_TEST_FLAG"] = "1"
+        self.assertTrue(flags.on("zz_no_such_flag", "ZZ_TEST_FLAG"))
+        os.environ["ZZ_TEST_FLAG"] = "0"
+        self.assertFalse(flags.on("zz_no_such_flag", "ZZ_TEST_FLAG"))
+        os.environ["ZZ_TEST_FLAG"] = " "
+        self.assertFalse(flags.on("zz_no_such_flag", "ZZ_TEST_FLAG"))
+        del os.environ["ZZ_TEST_FLAG"]
+
+
+class VerdictConflict(unittest.TestCase):
+    def test_conclusion_vs_calc(self):
+        a = ("【결론】\n네, 규제기준을 초과했습니다. 초과 시 조치를 받습니다.\n\n【계산】\n- 적용 기준: 75dB(A)\n"
+             "- 판정: 68dB(A) < 75dB(A) 이므로 기준 미달 (초과 아님)\n\n【설명】\nx")
+        self.assertTrue(main._verdict_conflict(a))
+
+    def test_consistent(self):
+        a = "【결론】\n초과하지 않았습니다.\n\n【계산】\n- 판정: 68 < 75 이므로 초과 아님\n"
+        self.assertEqual(main._verdict_conflict(a), "")
+
+    def test_thinking_trace_is_self_correction(self):
+        self.assertTrue(main._SELF_CORR_RE.search("*잠깐, 다시 확인해 보겠습니다.*"))
 
 
 class LawClient(unittest.TestCase):

@@ -88,6 +88,10 @@ CLARIFY_ROUNDS = int(os.getenv("CLARIFY_ROUNDS", "3"))
 CLARIFY_CTX_TOKENS = int(os.getenv("CLARIFY_CTX_TOKENS", "5000"))
 
 BP_CTX_CHARS = int(os.getenv("BP_CTX_CHARS", "3500"))
+BP_FETCH_CHARS = 12000
+BP_SHRINK_CHARS = 1800
+CLARIFY_BP_CHARS = 2500
+CLARIFY_ART_CHARS = 1500
 _BOX_CHARS = re.compile(r"[─━┌┐└┘├┤┬┴┼┏┓┗┛┣┫┳┻╋═║╔╗╚╝╠╣╦╩╬]+")
 
 
@@ -238,7 +242,27 @@ def _merge_conclusion(text: str, text2: str) -> str:
     return text[:m1.start()] + m2.group(0).rstrip() + ("\n\n" + rest.lstrip() if rest.strip() else "")
 
 
-_SELF_CORR_RE = re.compile(r"(?m)(수정된|정정된|바로잡은|다시\s*정리한)\s*결론|^\s*\**\s*(수정|정정)\s*\**\s*[:：]|정정하면")
+_SELF_CORR_RE = re.compile(r"(?m)(수정된|정정된|바로잡은|다시\s*정리한)\s*결론|^\s*\**\s*(수정|정정)\s*\**\s*[:：]|정정하면"
+                           r"|잠깐[,，]?\s*다시|다시\s*(확인|계산)해\s*보겠")
+_VERDICT_WORDS = re.compile(r"초과|해당|대상|위반|필요|가능")
+_NEG_WORDS = re.compile(r"않|아니|아님|미달|미초과|없")
+
+
+def _verdict_conflict(text: str) -> str:
+    """【결론】 첫 문장과 【계산】의 '판정' 줄이 같은 말(초과·해당…)을 두고 긍정·부정이 반대면 그 결론 문장, 아니면 ""."""
+    mc = re.search(r"【결론】\s*([^\n]+)", text or "")
+    mk = re.search(r"【계산】([\s\S]*?)(?=【|\Z)", text or "")
+    if not mc or not mk:
+        return ""
+    lines = [ln for ln in mk.group(1).splitlines() if "판정" in ln]
+    if not lines:
+        return ""
+    concl = re.split(r"(?<=[.다])\s", mc.group(1).strip(), 1)[0]
+    calc = lines[-1]
+    shared = set(_VERDICT_WORDS.findall(concl)) & set(_VERDICT_WORDS.findall(calc))
+    if shared and bool(_NEG_WORDS.search(concl)) != bool(_NEG_WORDS.search(calc)):
+        return concl
+    return ""
 _SELF_CORR_FIX = ("【결론】과 뒤쪽(【설명】 끝의 '수정된 결론' 등)의 판정이 다르다. 조문 원문으로 다시 따져 하나의 판정으로 정하고, "
                   "고친 흔적 없이 【결론】부터 처음부터 다시 쓴다")
 
@@ -319,7 +343,7 @@ SELECT_ARTICLES = os.getenv("SELECT_ARTICLES", "1") not in ("0", "false", "False
 # 조회 후 지자체기관명으로 한 번 더 걸러냅니다.
 LOCAL_GOV = os.getenv("LOCAL_GOV", "성남시").strip()
 
-VERSION = "1.51"
+VERSION = "1.53"
 
 app = FastAPI(title="법령 조회 도우미", version=VERSION)
 
@@ -2891,7 +2915,7 @@ def _ask_after_search(req, steps, answered, found, flat, catalog, refs, it=None,
                 link = (row or {}).get("link", "")
                 title = (row or {}).get("title", "")
                 if row and row.get("body"):
-                    body = row["body"][:12000]
+                    body = row["body"][:BP_FETCH_CHARS]
                     fetched.append(f"{law_name} {kind} {no}")
                 elif kind == "별지":
                     body = (f"[{kind} {no}] {title}\n"
@@ -3004,7 +3028,7 @@ def _ask_after_search(req, steps, answered, found, flat, catalog, refs, it=None,
             steps.append({"name": "되묻기 근거 유사도 정렬(v1.41)", "detail": " / ".join(_ctx_key(f_, a_) for f_, a_, _ in order[:4])})
         parts, used = [], 0
         for f, a, txt in order:
-            piece = _fit_keep_notes(txt, 2500 if _is_bp((f, a, txt)) else 1500,
+            piece = _fit_keep_notes(txt, CLARIFY_BP_CHARS if _is_bp((f, a, txt)) else CLARIFY_ART_CHARS,
                                     bp_kw if _is_bp((f, a, txt)) else None)
             if used + len(piece) > CLARIFY_CTX_TOKENS * 2 and parts:
                 break
@@ -3139,8 +3163,8 @@ def _ask_after_search(req, steps, answered, found, flat, catalog, refs, it=None,
     if n_tok > budget:
         shrunk = 0
         for j, u in enumerate(keep):
-            if _is_bp(u) and len(u[2]) > 1800:
-                keep[j] = (u[0], u[1], _fit_keep_notes(u[2], 1800, bp_kw or None))
+            if _is_bp(u) and len(u[2]) > BP_SHRINK_CHARS:
+                keep[j] = (u[0], u[1], _fit_keep_notes(u[2], BP_SHRINK_CHARS, bp_kw or None))
                 shrunk += 1
         if shrunk:
             before_tok = n_tok
@@ -3224,6 +3248,11 @@ def _ask_after_search(req, steps, answered, found, flat, catalog, refs, it=None,
             if _sc and not any(p.get("kind") == "결론모순" for p in probs):
                 probs = list(probs) + [{"kind": "결론모순", "quote": text[_sc.start():_sc.start() + 80].strip(),
                                         "fix": _SELF_CORR_FIX}]
+            _vc = _verdict_conflict(text)
+            if _vc and not any(p.get("kind") == "결론모순" for p in probs):
+                probs = list(probs) + [{"kind": "결론모순", "quote": _vc[:80],
+                                        "fix": "【결론】의 판정이 【계산】의 판정과 반대다. 【계산】을 조문 원문으로 다시 확인해 "
+                                               "하나의 판정으로 맞추고 【결론】부터 다시 쓴다"}]
             if probs:
                 text2 = ai_client.answer_revised(q_for_answer, context, probs)
                 if _neg and "【결론】" in text2:

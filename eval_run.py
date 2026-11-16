@@ -56,53 +56,7 @@ CASES = os.path.join(HERE, "eval_cases.json")
 _AUTH_COOKIE = ""
 
 
-def _env_value(name: str) -> str:
-    """.env 에서 값 하나를 읽습니다. (표준 라이브러리만 쓰므로 직접 파싱)"""
-    path = os.path.join(HERE, ".env")
-    if not os.path.exists(path):
-        return ""
-    try:
-        with open(path, encoding="utf-8", errors="ignore") as f:
-            for line in f:
-                line = line.strip()
-                if not line or line.startswith("#") or "=" not in line:
-                    continue
-                k, _, v = line.partition("=")
-                if k.strip() == name:
-                    return v.strip()
-    except OSError:
-        pass
-    return ""
-
-
-class _NoRedirect(urllib.request.HTTPRedirectHandler):
-    def redirect_request(self, *a, **kw):
-        return None
-
-
-def login(base: str) -> str:
-    """APP_PASSWORD 로 로그인해서 인증 쿠키 값을 얻습니다. 실패하면 빈 문자열."""
-    password = _env_value("APP_PASSWORD")
-    if not password:
-        return ""
-    opener = urllib.request.build_opener(_NoRedirect)
-    req = urllib.request.Request(
-        base.rstrip("/") + "/login",
-        data=urllib.parse.urlencode({"password": password}).encode("utf-8"),
-        headers={"Content-Type": "application/x-www-form-urlencoded"},
-        method="POST",
-    )
-    try:
-        with opener.open(req, timeout=10) as resp:
-            headers = resp.headers
-    except urllib.error.HTTPError as e:
-        headers = e.headers
-    except Exception:                             # noqa: BLE001
-        return ""
-    for raw in headers.get_all("Set-Cookie") or []:
-        if raw.startswith("lawfinder_auth="):
-            return raw.split(";", 1)[0].split("=", 1)[1]
-    return ""
+from evalkit import env_value as _env_value, login  # noqa: E402
 
 
 OUTDIR = os.path.join(HERE, "_eval")
@@ -153,9 +107,7 @@ def ask(base: str, payload: dict, timeout: float = 600.0) -> dict:
     return out
 
 
-# 되묻기가 "결론"을 사용자에게 되묻는 꼴 — ai_client.CONCLUSION_Q 와 같은 규칙
-# (이 파일은 표준 라이브러리만 쓰려고 import 하지 않고 복사해 둡니다)
-CONCLUSION_Q = re.compile(r"언제까지|야\s*(합니|하나요|하는지|할까요|됩니|되나요|하는가)")
+from rules import CONCLUSION_Q  # noqa: E402
 
 
 def pick_option(question: str, options: list, answers: dict, default: str) -> str:

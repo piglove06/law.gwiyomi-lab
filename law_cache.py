@@ -29,9 +29,11 @@ import os
 import re
 import threading
 
+import flags
+
 HERE = os.path.dirname(os.path.abspath(__file__))
 CACHE_DIR = os.path.join(HERE, "_cache")
-FLAG_DIR = os.path.join(CACHE_DIR, "flags")
+FLAG_DIR = flags.FLAG_DIR
 def _int_env(name: str, default: int) -> int:
     try:
         return int(os.getenv(name, str(default)))
@@ -46,10 +48,7 @@ STATS = {"hit": 0, "miss": 0, "skip": 0, "error": 0}
 
 
 def enabled() -> bool:
-    env = os.getenv("LAW_CACHE")
-    if env is not None and env.strip() != "":
-        return env.strip() == "1"
-    return os.path.exists(os.path.join(FLAG_DIR, "law_cache"))
+    return flags.on("law_cache", "LAW_CACHE")
 
 
 def _safe(s: str) -> str:

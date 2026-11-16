@@ -67,53 +67,8 @@ STATEFILE = os.path.join(OUTDIR, "_watch_state.json")
 _AUTH_COOKIE = ""
 
 
-def _env_value(name: str) -> str:
-    """.env 에서 값 하나를 읽습니다. (표준 라이브러리만 쓰므로 직접 파싱)"""
-    path = os.path.join(HERE, ".env")
-    if not os.path.exists(path):
-        return ""
-    try:
-        with open(path, encoding="utf-8", errors="ignore") as f:
-            for line in f:
-                line = line.strip()
-                if not line or line.startswith("#") or "=" not in line:
-                    continue
-                k, _, v = line.partition("=")
-                if k.strip() == name:
-                    return v.strip()
-    except OSError:
-        pass
-    return ""
+from evalkit import env_value as _env_value, login  # noqa: E402
 
-
-class _NoRedirect(urllib.request.HTTPRedirectHandler):
-    def redirect_request(self, *a, **kw):
-        return None
-
-
-def login(base: str) -> str:
-    """APP_PASSWORD 로 로그인해서 인증 쿠키 값을 얻습니다. 실패하면 빈 문자열."""
-    password = _env_value("APP_PASSWORD")
-    if not password:
-        return ""
-    opener = urllib.request.build_opener(_NoRedirect)
-    req = urllib.request.Request(
-        base.rstrip("/") + "/login",
-        data=urllib.parse.urlencode({"password": password}).encode("utf-8"),
-        headers={"Content-Type": "application/x-www-form-urlencoded"},
-        method="POST",
-    )
-    try:
-        with opener.open(req, timeout=10) as resp:
-            headers = resp.headers
-    except urllib.error.HTTPError as e:
-        headers = e.headers
-    except Exception:                             # noqa: BLE001
-        return ""
-    for raw in headers.get_all("Set-Cookie") or []:
-        if raw.startswith("lawfinder_auth="):
-            return raw.split(";", 1)[0].split("=", 1)[1]
-    return ""
 
 WATCH = [
     "main.py", "ai_client.py", "law_client.py", "pdf_maker.py", "intent.py",

@@ -47,6 +47,7 @@
 | `answer_cache.py` | 같은 질문 저장본 불러오기(되묻기 답이 같을 때만) — 기본 꺼짐 |
 | `applog.py` / `logpipe.py` | 질문 블록 로그(_runs) / llama-server·터널 창 로그에 서울 시간·저장 |
 | `eval_run.py` / `watch_and_test.py` | 평가 실행·채점 / 파일 감시 → 평가 → 커밋·푸시 |
+| `flags.py` / `rules.py` / `evalkit.py` | 스위치(플래그 파일·환경변수) 확인 / 여러 파일이 같이 쓰는 판정 규칙(CONCLUSION_Q) / 평가·감시용 로그인·.env 읽기 — 모두 표준 라이브러리만 |
 | `check_secrets.py` / `check_code_notes.py` | 커밋 전 비밀정보 검사 / 이 문서와 코드 이름 대조 |
 | `pdf_maker.py`, `dump_byeolpyo.py`, `test_law_client_patch.py` | PDF 내보내기, 별표 응답 진단 도구, law_client 파서 테스트 |
 | `test_regressions.py` | 회귀 테스트(LLM·법제처 없이 1초). 감시 프로그램이 평가 전에 `check_code_notes.py` 와 함께 돌림 |
@@ -191,6 +192,9 @@ extract_terms → ai_search(질문 원문, 비면 재시도 → 용어로) → �
 ### ai_client.py :: scope_split
 - SCOPE_PROMPT 호출. law_part 를 적어야 해서 출력 한도 80→200. law_part 는 `_scope_part_ok`(원문 글자 2-gram 85% 이상, 원문보다 확실히 짧음) 통과할 때만 사용.
 
+### ai_client.py :: SCOPE_PART_MIN_OVERLAP
+- `_scope_part_ok` 기준: 법령 부분의 글자 2-gram 이 원래 질문에 85% 이상(`SCOPE_PART_MIN_OVERLAP`), 길이는 원래 질문의 95% 미만(`SCOPE_PART_MAX_RATIO`, 거의 전부면 뗀 게 아님).
+
 ### ai_client.py :: CASE_PICK_PROMPT
 - 참고 해석례·판례 후보(제목) 중 같은 쟁점만 LLM 이 고름(v1.38, 불용어·점수 규칙 대체).
 
@@ -209,8 +213,11 @@ extract_terms → ai_search(질문 원문, 비면 재시도 → 용어로) → �
 ### ai_client.py :: extract_terms
 - 검색어 변환. JSON 먼저(v1.31), 실패하면 텍스트: ① 라벨 줄 ② 라벨 없으면 줄 단위 추정 ③ 용어 중 법령처럼 생긴 것은 법령명으로, 법령명 자리의 비법령은 용어로. 측면은 2개 이상일 때만 사용.
 
+### ai_client.py :: _split_terms
+- 쉼표·`/`·공백 2칸으로만 나눔, 가운뎃점(·)으로는 안 나눔(09-29: "소음·진동관리법" → "소음"/"진동관리법"). 번호·"(Wait" 꼬리 제거, 잡음(`_is_junk`) 제외.
+
 ### ai_client.py :: extract_terms.add
-- 쉼표·`/`·공백 2칸으로만 나눔, 가운뎃점(·)으로는 안 나눔(09-29: "소음·진동관리법" → "소음"/"진동관리법"). 번호·"(Wait" 꼬리 제거. (2단계에서 모듈 함수로 꺼내 테스트 예정)
+- `_split_terms` 결과를 법령명/용어 목록에 중복 없이 더함.
 
 ### ai_client.py :: answer
 - 답변 생성. kv_reuse ①: /completion 으로 생성 토큰을 기억(검토가 이어 쓰기용, flags/kv_chain_on 일 때만), 고정 지시문은 ② 로 복원. 안 되면 예전 방식.
@@ -247,9 +254,6 @@ extract_terms → ai_search(질문 원문, 비면 재시도 → 용어로) → �
 
 ### ai_client.py :: _OPT_SKIP
 - 내용 없는 보기(예/아니오·모름·기타·직접 입력)는 비교 제외.
-
-### ai_client.py :: CONCLUSION_Q
-- 결론을 질문자에게 되묻는 꼴: 기한·의무("…언제까지 받아야 합니까?"), 적용·보정·가산 여부, 계산·기산. 사실 질문("언제 설치했습니까?")은 안 걸림. `_finalize_clarify` 에서 버림. **eval_run.py 복사본은 첫 갈래만 있어 이미 어긋남**(2단계 A-1).
 
 ### ai_client.py :: _YESNO_RE
 - 예/아니오 질문 어미. "되었나요·했나요·인가?" 누락으로 부정 보기 없이 나간 적 있음(08-18). `_WH_RE`(의문사)가 있으면 예/아니오 질문 아님.
@@ -315,6 +319,9 @@ extract_terms → ai_search(질문 원문, 비면 재시도 → 용어로) → �
 - 되묻기 생성. JSON 성공 시 형식 보정 건너뛰고 `_finalize_clarify` 만. basis 가 조문에 실제로 있는 것만(v1.40). clarify_why 플래그면 '왜 묻는지' 표시(v1.41).
 - 텍스트 경로 순서(순서가 중요): "OK" = 더 물을 것 없음 → 한글 없는 줄(마크다운 표 정렬행) 버림 → 최소 3조각(2개로 완화하면 "예|아니오|모름"의 "예"가 질문이 됨) → 첫 조각이 보기 낱말이면 버림 → 질문 오염 먼저 정리 → "/" 펼치기 → 할 일 여러 개 줄은 여러 질문으로 → 질문·보기 둘 다 물음인 줄 먼저(_repair_a_or_b 보다 앞) → 보기 자리 질문 고치기 → 할 일이 남으면 내보내지 않음(루프 밖 마지막 그물, 08-19).
 
+### ai_client.py :: SELECT_ID_MAX_JSON
+- 선별 번호 상한: JSON 응답 9999, 텍스트 응답 999(`SELECT_ID_MAX_TEXT` — 텍스트엔 연도 같은 4자리 숫자가 섞임).
+
 ### ai_client.py :: select_articles
 - 선별 응답에서 숫자만 뽑되 조/항/호 앞뒤 숫자(조문 번호)는 제외.
 
@@ -335,6 +342,9 @@ extract_terms → ai_search(질문 원문, 비면 재시도 → 용어로) → �
 
 ### main.py :: BP_CTX_CHARS
 - 별표 본문 글자 상한. 표 테두리(─│┼)·정렬 공백을 걷어낸 **뒤** 기준(v1.32). 원문 2천 자 자르기는 테두리가 절반이라 소음 별표 8 의 비고(+5dB/−5dB 보정)가 잘려 68dB 를 65dB 와 비교해 "초과" 로 답했음.
+
+### main.py :: BP_FETCH_CHARS
+- 별표 글자 한도들: API 로 받은 별표 본문 최대 12,000(`BP_FETCH_CHARS`, v1.32 6천→1만2천 — 비고까지), 예산 초과 시 별표 축약 1,800(`BP_SHRINK_CHARS`), 되묻기 근거로 넘길 때 별표 2,500·조문 1,500(`CLARIFY_BP_CHARS`·`CLARIFY_ART_CHARS`, 별표는 비고가 보기를 가르므로 조금 길게).
 
 ### main.py :: _CELL_END
 - 표 줄에서 첫 칸이 끝나는 문자(│├┼┤).
@@ -364,7 +374,13 @@ extract_terms → ai_search(질문 원문, 비면 재시도 → 용어로) → �
 - 답변의 【결론】 블록만 다시 쓴 답의 【결론】으로 바꿈(어느 쪽이든 없으면 ""). 결론모순 지적으로 다시 쓴 답이 다른 이유(블록 빠짐·인용 감소)로 버려질 때 씀(v1.51: 11-16 평가 소음 5시간 — 【결론】 '초과했습니다' vs 【계산】 '초과하지 않았습니다' 를 검토가 잡았는데 다시 쓴 답이 버려져 모순된 답이 나감).
 
 ### main.py :: _SELF_CORR_RE
-- 답변 속 '고친 흔적'("수정된 결론:", "정정하면"). 있으면 【결론】과 뒤쪽 판정이 다를 수 있어 검토 문제로 봄(v1.46).
+- 답변 속 '고친 흔적'("수정된 결론:", "정정하면"). 있으면 【결론】과 뒤쪽 판정이 다를 수 있어 검토 문제로 봄(v1.46). v1.53: "잠깐, 다시 …", "다시 확인해 보겠습니다" 같은 생각 흔적도(11-16 평가 소음 일요일: 【설명】 안에 판정을 오락가락한 흔적이 남음).
+
+### main.py :: _VERDICT_WORDS
+- 판정 낱말(초과·해당·대상·위반·필요·가능). `_NEG_WORDS`(않·아니·아님·미달·미초과·없)와 함께 `_verdict_conflict` 가 씀.
+
+### main.py :: _verdict_conflict
+- 【결론】 첫 문장과 【계산】의 마지막 '판정' 줄이 같은 판정 낱말을 두고 긍정·부정이 반대면 그 결론 문장을 돌려줌. 검토 단계에서 결론모순으로 넣어 다시 쓰게 함(v1.53: 11-16 평가 소음 5시간 — 【결론】 "초과했습니다" / 판정 "초과 아님" 을 LLM 검토가 두 번 다 '문제 없음' 으로 넘김). 평가 답변 36개 중 그 1건만 걸림.
 
 ### main.py :: ANSWER_RESERVE
 - 답변 출력용으로 남길 토큰. 조문 예산 = llama-server 컨텍스트 − (지시문 + 이 값). 예전 "6만 자" 자르기는 16,384 컨텍스트에 안 맞아 400 오류(09-29).
@@ -954,13 +970,10 @@ extract_terms → ai_search(질문 원문, 비면 재시도 → 용어로) → �
 - 서브프로세스로 돌 때 stdout 인코딩 문제로 죽어(08-20), 시작 시 utf-8 로 reconfigure.
 
 ### eval_run.py :: _AUTH_COOKIE
-- 로그인 쿠키(APP_PASSWORD 도입 후 /api/ask 401, 08-20). watch_and_test 에도 같은 코드(REFACTOR_PLAN A-2).
+- 로그인 쿠키(APP_PASSWORD 도입 후 /api/ask 401, 08-20). 로그인·.env 읽기는 `evalkit.py`(watch_and_test 와 같이 씀).
 
 ### eval_run.py :: ask
 - 서버 호출.
-
-### eval_run.py :: CONCLUSION_Q
-- 결론 되묻기 판별. **ai_client.CONCLUSION_Q 와 다름**(첫 갈래만 복사됨, REFACTOR_PLAN A-1).
 
 ### eval_run.py :: pick_option
 - 되묻기 자동 응답. 질문에 든 **긴 키부터**(10-29: "지역" 키가 "재해취약지역" 에 걸림). 예/아니오 꼴('아니오' 보기 있음)인데 원하는 값이 보기에 없으면: 값이 질문에 있으면 '예'(긍정 보기가 용어면 그 보기), 아니면 그 키 건너뜀. 보기에 없으면 자유 입력값.
@@ -1075,11 +1088,32 @@ extract_terms → ai_search(질문 원문, 비면 재시도 → 용어로) → �
 ### test_law_client_patch.py :: dele_xml
 - 실측한 lsDelegated 응답 구조(3단 중첩, 08-18). 예전 픽스처는 매뉴얼만 보고 평평하게 지어내 틀렸었음.
 
+## flags.py
+
+### flags.py :: FLAG_DIR
+- `_cache/flags/`. 빈 파일 하나 = 스위치 하나(재시작 없이 바로 반영).
+
+### flags.py :: KNOWN
+- 쓰는 플래그 이름 전부(문서·점검용 목록). 켜는 쪽: answer_cache·clarify_why·law_cache·rag_*(기본 꺼짐), 끄는 쪽: kv_off·kv_prefix_off, kv_chain_on(기본 꺼짐), llm_restart_once(한 번 쓰고 지움).
+
+### flags.py :: on
+- 환경변수가 비어 있지 않으면 그 값('1' = 켬, 그 밖 = 끔), 없으면 파일이 있을 때 켬. rag_select·answer_cache·law_cache·clarify_why 가 씀. kv_reuse 는 `has` 로 각자 규칙.
+
+## rules.py
+
+### rules.py :: CONCLUSION_Q
+- 결론을 질문자에게 되묻는 꼴: 기한·의무("…언제까지 받아야 합니까?"), 적용·보정·가산 여부, 계산·기산. 사실 질문("언제 설치했습니까?")은 안 걸림. ai_client `_finalize_clarify` 가 버리고, eval_run 채점이 같은 규칙으로 잡음(v1.52 전엔 eval_run 사본이 첫 갈래만 있어 "보정 적용 여부는?" 을 못 잡았음).
+
+## evalkit.py
+
+### evalkit.py :: login
+- APP_PASSWORD 로 로그인해 쿠키 값을 직접 꺼냄 — 쿠키가 secure 라 urllib 자동 쿠키 처리가 로컬 http 에 다시 붙여 주지 않음. 리다이렉트는 따라가지 않음(`_NoRedirect`).
+
 ## test_regressions.py
 (실행: `python test_regressions.py`. 사고 하나 = 테스트 하나. 입력·기대값은 위 각 함수 항목의 사고 메모에서 가져옴)
 
 ### test_regressions.py :: ConclusionQuestion
-- `test_eval_run_same_rule` 은 `expectedFailure` — eval_run 사본이 ai_client 와 다름(REFACTOR_PLAN A-1). 규칙을 한 곳으로 모으면 이 표시를 지운다.
+- ai_client 와 eval_run 이 같은 규칙(rules.py)을 쓰는지 둘 다 확인.
 
 ### test_regressions.py :: TableCompact
 - 합친 첫 칸 → `▶ 묶음 이름`(가. 주거지역 공사장 65 / 나. 그 밖의 지역 공사장 70 이 각 묶음에 남는지), 합친 칸 없는 표는 그대로.

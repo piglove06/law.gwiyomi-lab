@@ -36,8 +36,10 @@ import httpx
 
 import applog
 
+import flags
+
 HERE = os.path.dirname(os.path.abspath(__file__))
-FLAG_DIR = os.path.join(HERE, "_cache", "flags")
+FLAG_DIR = flags.FLAG_DIR
 
 LOCK = threading.RLock()                 # ai_client._call_local 도 이 잠금을 씁니다
 PREFIX_STAGES = ("answer", "clarify")
@@ -57,17 +59,17 @@ def _chain_enabled() -> bool:
     """
     if os.getenv("KV_CHAIN") == "1":
         return True
-    return os.path.exists(os.path.join(FLAG_DIR, "kv_chain_on"))
+    return flags.has("kv_chain_on")
 
 
 def enabled() -> bool:
     if os.getenv("KV_REUSE", "1") == "0":
         return False
-    return not os.path.exists(os.path.join(FLAG_DIR, "kv_off"))
+    return not flags.has("kv_off")
 
 
 def _prefix_enabled() -> bool:
-    if os.path.exists(os.path.join(FLAG_DIR, "kv_prefix_off")):
+    if flags.has("kv_prefix_off"):
         return False
     if _STATE["slots_ok"] is False and time.time() - _STATE["slots_fail_t"] < 3600:
         return False

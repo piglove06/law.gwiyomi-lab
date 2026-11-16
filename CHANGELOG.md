@@ -11,6 +11,26 @@
 
 ---
 
+## v1.53 — 2026-11-17 — 결론과 계산이 반대인 답을 코드로 잡기 (v1.51 평가 14/18 분석)
+
+v1.51 평가 14/18(세부 152/159, 22:45 의 151 보다 1 많음). 시나리오 수가 준 건 주유소 설치신고가 위험물안전관리법 제6조·제9조를 인용(수집 안 한 법령 → 인용 검증 실패)한 LLM 흔들림.
+- **소음 5시간**: 다시 【결론】 "초과했습니다" ↔ 【계산】 판정 "초과 아님". LLM 검토가 '문제 없음' 이라 v1.51 의 결론 바꾸기가 작동할 기회가 없었음.
+  → `main._verdict_conflict`: 【결론】 첫 문장과 【계산】 '판정' 줄이 같은 판정 낱말(초과·해당·대상…)을 두고 긍정·부정이 반대면 결론모순으로 넣어 다시 쓰게 함(다시 쓴 답이 버려지면 v1.51 대로 【결론】만 반영). 두 평가의 답변 36개 중 이 건만 걸림.
+- **소음 일요일**: 12/16 → 14/16 으로 나아졌지만, 별표 8 이 묶음 이름까지 분명히 들어갔는데도 모델이 주거지역 공사장 주간을 70dB 로 읽음(모델 읽기 한계). 답 안에 "*잠깐, 다시 확인해 보겠습니다.*" 같은 생각 흔적이 남음.
+  → `_SELF_CORR_RE` 에 "잠깐, 다시 …", "다시 확인/계산해 보겠" 추가 → 결론모순으로 다시 쓰게 함.
+- **축사 악취**: 22:45 와 같음(해석례 덧붙임이 조문 예산을 줄여 제8조의2 빠짐).
+- 테스트 +3(39개).
+- 되돌리기: 검토 블록의 `_vc = _verdict_conflict(text)` 4줄 삭제, `_SELF_CORR_RE` 의 두 번째 줄 삭제.
+
+## v1.52 — 2026-11-16 — 2단계 A·B: 같은 코드 한 곳으로, 숫자에 이름 (동작 변화 없음, 평가 채점만 엄격해짐)
+
+- A-1 `rules.py`(새 파일): 결론 되묻기 규칙 `CONCLUSION_Q` 를 ai_client·eval_run 이 같이 씀. eval_run 사본은 첫 갈래(기한·의무)만 있어 "보정 적용 여부는?" 같은 결론 되묻기를 채점에서 못 잡았음 → **채점만 엄격해짐**(서버 동작은 같음).
+- A-2 `evalkit.py`(새 파일): eval_run·watch_and_test 에 똑같이 있던 `.env` 읽기·로그인 함수를 한 곳으로.
+- A-3 `flags.py`(새 파일): 플래그 파일 확인(rag_select·answer_cache·law_cache·clarify_why·kv_reuse)을 `flags.on/has` 로. 플래그 이름 목록 `flags.KNOWN`. 환경변수·파일 조합 50가지에서 예전과 같은 결과 확인.
+- B 이름 붙이기: main `BP_FETCH_CHARS`(12000)·`BP_SHRINK_CHARS`(1800)·`CLARIFY_BP_CHARS`(2500)·`CLARIFY_ART_CHARS`(1500), ai_client `SCOPE_PART_MIN_OVERLAP`(0.85)·`SCOPE_PART_MAX_RATIO`(0.95)·`SELECT_ID_MAX_JSON`(9999)·`SELECT_ID_MAX_TEXT`(999). `extract_terms` 안의 `add` 가 하던 쪼개기를 `_split_terms` 로 꺼냄.
+- 테스트 36개(+`_split_terms`, `flags.on`), eval_run 규칙 일치 테스트가 이제 통과.
+- 되돌리기: `git checkout <v1.51 커밋> -- ai_client.py main.py eval_run.py watch_and_test.py rag_select.py answer_cache.py law_cache.py kv_reuse.py test_regressions.py` 후 rules.py·evalkit.py·flags.py 삭제.
+
 ## v1.51 — 2026-11-16 — 별표 표의 합친 칸 읽기 + 결론모순 답 바로잡기 (11-16 평가 새 실패 3건 분석)
 
 11-16 평가 15/18(11-04: 15/17). 새로 실패한 3건 분석:

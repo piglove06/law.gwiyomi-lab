@@ -32,9 +32,11 @@ import re
 import threading
 import time
 
+import flags
+
 HERE = os.path.dirname(os.path.abspath(__file__))
 CACHE_DIR = os.path.join(HERE, "_cache")
-FLAG_DIR = os.path.join(CACHE_DIR, "flags")
+FLAG_DIR = flags.FLAG_DIR
 TTL_DAYS = 30
 
 MARK = "최근 같은 질문 결과 불러오기"
@@ -45,10 +47,7 @@ _LOCK = threading.Lock()
 
 
 def enabled() -> bool:
-    env = os.getenv("ANSWER_CACHE")
-    if env is not None and env.strip() != "":
-        return env.strip() == "1"
-    return os.path.exists(os.path.join(FLAG_DIR, "answer_cache"))
+    return flags.on("answer_cache", "ANSWER_CACHE")
 
 
 def _norm(s: str) -> str:

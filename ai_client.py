@@ -24,6 +24,8 @@ import httpx
 import applog
 import kv_reuse
 
+import flags
+
 # (llama-server 에서는 남은 컨텍스트보다 크면 자동으로 줄여서 보냅니다)
 MAXTOK_TERMS   = int(os.getenv("MAXTOK_TERMS",   "420"))
 MAXTOK_SELECT  = int(os.getenv("MAXTOK_SELECT",  "400"))
@@ -799,15 +801,19 @@ SCOPE_SCHEMA = {
 }
 
 
+SCOPE_PART_MIN_OVERLAP = 0.85
+SCOPE_PART_MAX_RATIO = 0.95
+
+
 def _scope_part_ok(part: str, question: str) -> bool:
     """★ v1.50 — law_part 가 원래 질문에서 떼어낸 것인지 확인(모델이 말을 지어 붙였으면 쓰지 않음).
     글자 2-gram 의 85% 이상이 원래 질문에 있고, 원래 질문보다 확실히 짧아야 함."""
     p = re.sub(r"\s+", "", part or "")
     q = re.sub(r"\s+", "", question or "")
-    if len(p) < 4 or len(p) >= len(q) * 0.95:
+    if len(p) < 4 or len(p) >= len(q) * SCOPE_PART_MAX_RATIO:
         return False
     grams = [p[i:i + 2] for i in range(len(p) - 1)]
-    return sum(1 for g in grams if g in q) >= 0.85 * len(grams)
+    return sum(1 for g in grams if g in q) >= SCOPE_PART_MIN_OVERLAP * len(grams)
 
 
 def scope_split(question: str) -> dict:
@@ -1029,6 +1035,19 @@ def pick_main_laws(question: str, cands: list, evidence: list | None = None) -> 
     return out[:2], other[:40], str(obj.get("subject") or "")[:80]
 
 
+def _split_terms(chunk: str) -> list:
+    """'용어: a, b / c' 의 값 부분을 낱개로. 가운뎃점은 나누지 않음(소음·진동관리법)."""
+    out = []
+    for item in re.split(r"[,、/]|\s{2,}", chunk):
+        item = item.strip().strip("\"'“”‘’[]()「」『』`.")
+        item = re.sub(r"^\d+[.)]\s*", "", item)
+        item = re.sub(r"\s*\(.*$", "", item)
+        item = item.strip()
+        if item and item not in out and not _is_junk(item):
+            out.append(item)
+    return out
+
+
 def extract_terms(question: str) -> dict:
     """
     질문 -> 검색어 후보. 반환: {"법령명": [...], "용어": [...]}
@@ -1054,12 +1073,8 @@ def extract_terms(question: str) -> dict:
                     temperature=0, max_tokens=MAXTOK_TERMS, stage="terms")
 
     def add(key: str, chunk: str):
-        for item in re.split(r"[,、/]|\s{2,}", chunk):
-            item = item.strip().strip("\"'“”‘’[]()「」『』`.")
-            item = re.sub(r"^\d+[.)]\s*", "", item)
-            item = re.sub(r"\s*\(.*$", "", item)
-            item = item.strip()
-            if item and item not in out[key] and not _is_junk(item):
+        for item in _split_terms(chunk):
+            if item not in out[key]:
                 out[key].append(item)
 
     for line in raw.splitlines():
@@ -1501,10 +1516,7 @@ def _option_in_question(question: str, options) -> str:
                 return o
     return ""
 
-# eval_run.py 에 같은 규칙이 복사돼 있습니다 (그쪽은 표준 라이브러리만 씀).
-CONCLUSION_Q = re.compile(r"언제까지|야\s*(합니|하나요|하는지|할까요|됩니|되나요|하는가)"
-                          r"|(적용|보정|가산|감경|면제)\s*(여부|대상인|되나요|됩니까|되는지)"
-                          r"|(계산|산정|기산)\s*(됩니까|되나요|하나요|합니까)")
+from rules import CONCLUSION_Q  # noqa: E402
 
 
 _YESNO_RE = re.compile(
@@ -2012,10 +2024,7 @@ def _finalize_clarify(items: list, question: str = "") -> list:
 
 def _clarify_why_on() -> bool:
     """v1.41 — 되묻기 '왜 묻는지' 표시 스위치(기본 꺼짐)."""
-    env = os.getenv("CLARIFY_WHY")
-    if env is not None and env.strip() != "":
-        return env.strip() == "1"
-    return os.path.exists(os.path.join(os.path.dirname(os.path.abspath(__file__)), "_cache", "flags", "clarify_why"))
+    return flags.on("clarify_why", "CLARIFY_WHY")
 
 
 def clarify(question: str, answered: str = "", catalog: str = "") -> list[dict]:
@@ -2180,6 +2189,10 @@ def select_prompt(question: str, catalog: str) -> str:
     return SELECT_PROMPT.format(question=question, catalog=catalog, output_rules=rules)
 
 
+SELECT_ID_MAX_JSON = 9999
+SELECT_ID_MAX_TEXT = 999
+
+
 def select_articles(question: str, catalog: str) -> list[int]:
     """
     조문 제목 목록을 보여주고 필요한 것만 고르게 합니다.
@@ -2197,7 +2210,7 @@ def select_articles(question: str, catalog: str) -> list[int]:
                 n = int(n)
             except (TypeError, ValueError):
                 continue
-            if 1 <= n <= 9999 and n not in nums:
+            if 1 <= n <= SELECT_ID_MAX_JSON and n not in nums:
                 nums.append(n)
         if len(nums) > SELECT_MAX:
             applog.step("조문 선별 상한", f"모델이 {len(nums)}개를 골라 앞 {SELECT_MAX}개만 씁니다")
@@ -2209,7 +2222,7 @@ def select_articles(question: str, catalog: str) -> list[int]:
     nums = []
     for tok in re.findall(r"\d+", cleaned):
         n = int(tok)
-        if 1 <= n <= 999 and n not in nums:
+        if 1 <= n <= SELECT_ID_MAX_TEXT and n not in nums:
             nums.append(n)
 
     if LLM_DEBUG:
