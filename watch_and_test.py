@@ -323,6 +323,26 @@ def python_exe() -> str:
     return venv if os.path.exists(venv) else sys.executable
 
 
+QUICK_CHECKS = ("test_regressions.py", "check_code_notes.py")
+
+
+def run_quick_checks() -> tuple[bool, str]:
+    """평가 전에 몇 초짜리 확인(회귀 테스트·문서 대조)을 돌립니다. (통과 여부, 실패 출력)"""
+    for name in QUICK_CHECKS:
+        if not os.path.exists(os.path.join(HERE, name)):
+            continue
+        try:
+            p = subprocess.run([python_exe(), name], cwd=HERE, capture_output=True,
+                               text=True, encoding="utf-8", errors="replace", timeout=300,
+                               env={**os.environ, "PYTHONIOENCODING": "utf-8"})
+        except subprocess.TimeoutExpired:
+            return False, f"{name} 가 5분을 넘겼습니다."
+        if p.returncode != 0:
+            return False, f"{name} 실패\n\n{((p.stdout or '') + (p.stderr or ''))[-3000:]}"
+        log(f"{name} 통과")
+    return True, ""
+
+
 def run_eval(base: str, extra: list | None = None) -> tuple[int, str, str]:
     """eval_run.py 를 돌리고 (종료코드, 최신 보고서 경로, 출력) 을 돌려줍니다.
     extra: eval_run.py 에 더 넘길 인자 (예: ["--cases", "eval_extra.json"], ["--only", "소음"])"""
@@ -449,6 +469,16 @@ def main() -> int:
                 continue
 
             log(f"── 실행 ({reason}) " + "─" * 30)
+            ok, why = run_quick_checks()
+            if not ok:
+                log("빠른 확인 실패 — 평가를 건너뜁니다. _eval\\latest.md 를 보세요.")
+                print("    " + why.replace("\n", "\n    "), flush=True)
+                _write_note(why)
+                if not args.no_commit:
+                    git_commit_push(push=not args.no_push, suffix="[테스트 실패: 평가 생략]")
+                prev = snapshot()
+                last_status, status_since = git_status(), time.time()
+                continue
             if not wait_for_server(args.base):
                 log("서버가 응답하지 않아 테스트는 건너뜁니다.")
                 _write_note("서버가 응답하지 않았습니다. start.bat 으로 서버를 켜 주세요.")

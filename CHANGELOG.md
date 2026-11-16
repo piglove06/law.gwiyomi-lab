@@ -11,6 +11,16 @@
 
 ---
 
+## v1.50e — 2026-11-16 — 2단계 시작: CODE_NOTES 4장 요약, 회귀 테스트, 평가 전 빠른 확인
+
+- `CODE_NOTES.md` 4장을 요약(함수마다 무엇을·왜·사고 번호 1~3줄). 3,233줄 → 약 1,070줄. 옮길 때의 원문은 `CODE_NOTES_원문.md`(고치지 않는 보관본)로.
+- `test_regressions.py` 추가 — 지난 사고 30개를 LLM·법제처 없이 고정(약 1초): 답변 정리, 법령명 판정, 예/아니오 보기, 되묻기 줄 쪼개기, 결론 되묻기 규칙, 섞인 질문 법령 부분, 의도 분류, 인용 패턴, 계산 검산, '아니오' 제외어, 재질문 판정, 불러오기 답, 평가 자동 응답, 법제처 엔티티·JO 코드·파서.
+  - 결론 되묻기 규칙이 ai_client(3갈래)와 eval_run(1갈래)에서 다름을 확인 → 테스트에 expectedFailure 로 표시, 다음 작업(A-1)에서 한 곳으로.
+- `watch_and_test.py`: 평가 전에 `test_regressions.py`·`check_code_notes.py` 를 돌리고, 실패하면 평가를 건너뛰고 latest.md 에 이유를 남김(감시 프로그램을 다시 켠 뒤부터 적용).
+- `CLAUDE.md`: 원문 보관본 안내, 테스트 통과·사고마다 테스트 추가 규칙.
+- 코드 동작 변화 없음(main·ai_client 등은 안 고침).
+- 되돌리기: `git checkout <v1.50d 커밋> -- CODE_NOTES.md watch_and_test.py CLAUDE.md` 후 `test_regressions.py`·`CODE_NOTES_원문.md` 삭제.
+
 ## v1.50d — 2026-11-16 — 주석 정리 1단계(나머지 파이썬 파일 15개) + CODE_NOTES 파일 지도
 
 - law_client(270개 중 213개 이동), eval_run(78), rag_select(32), intent(36), watch_and_test(15), kv_reuse(13), answer_cache(12), applog(11), check_secrets(17), pdf_maker(15), dump_byeolpyo(11), ctx_guard(3), logpipe(6), test_law_client_patch(5), law_cache(1)의 설명 주석을 `CODE_NOTES.md` 4장으로 옮김. 모든 파일 고치기 전후 `ast.dump` 동일(동작 변화 없음).
