@@ -29,11 +29,7 @@ from reportlab.platypus import (
     Spacer,
 )
 
-# ── 한글 폰트 ────────────────────────────────────────────────
-# 윈도우는 맑은 고딕, 리눅스(라즈베리파이)는 나눔고딕을 씁니다.
-# 라즈베리파이에 폰트가 없으면:  sudo apt install fonts-nanum
 _FONT_CANDIDATES = [
-    # (등록명, 보통, 굵게)  — 앞에서부터 존재하는 것을 씁니다.
     ("MalgunGothic", r"C:\Windows\Fonts\malgun.ttf",
      r"C:\Windows\Fonts\malgunbd.ttf"),
     ("NanumGothic", "/usr/share/fonts/truetype/nanum/NanumGothic.ttf",
@@ -47,7 +43,6 @@ _FONT_CANDIDATES = [
     #       reportlab 이 읽지 못합니다. 후보에서 제외했습니다.
 ]
 
-# TTC(여러 글꼴 묶음) 안에서 한국어 글꼴의 위치.
 # NotoSansCJK 는 SC/TC/JP/KR 이 한 파일에 들어 있어 번호로 골라야 합니다.
 _TTC_KR_INDEX = 2
 
@@ -81,7 +76,7 @@ def _setup_font():
                     pdfmetrics.registerFont(TTFont(bname, bold))
                 FONT_BOLD = bname
             else:
-                FONT_BOLD = name          # 굵은 글꼴이 없으면 같은 것을 씁니다
+                FONT_BOLD = name
             return FONT, FONT_BOLD
         except Exception:
             FONT = FONT_BOLD = None
@@ -95,7 +90,6 @@ def _setup_font():
     )
 
 
-# ── 스타일 ───────────────────────────────────────────────────
 def _styles():
     f, fb = _setup_font()
     ink, note, accent, seal = "#1a1c20", "#6f6d64", "#2c4a52", "#a8332c"
@@ -126,7 +120,6 @@ def _styles():
     }
 
 
-# ── 텍스트 변환 ──────────────────────────────────────────────
 _ESC = {"&": "&amp;", "<": "&lt;", ">": "&gt;"}
 
 
@@ -156,7 +149,6 @@ def _split_hang(text: str) -> list[str]:
     return [ln.strip() for ln in t.split("\n") if ln.strip()]
 
 
-# ── 본체 ─────────────────────────────────────────────────────
 def build(payload: dict) -> bytes:
     """
     조회 결과를 PDF 바이트로 만듭니다.
@@ -177,7 +169,6 @@ def build(payload: dict) -> bytes:
     story = []
     now = payload.get("generated_at") or datetime.now().strftime("%Y-%m-%d %H:%M")
 
-    # 머리말
     story.append(Paragraph("법령 조회 결과", st["title"]))
     story.append(Paragraph(
         f"국가법령정보 OPEN API · {_esc(now)} 조회", st["meta"]))
@@ -185,13 +176,11 @@ def build(payload: dict) -> bytes:
     story.append(HRFlowable(width="100%", thickness=1.1,
                             color=colors.HexColor("#1a1c20"), spaceAfter=6))
 
-    # 질문 / 조건
     if payload.get("question"):
         story.append(Paragraph(_esc(payload["question"]), st["q"]))
     if payload.get("answered"):
         story.append(Paragraph("확인된 조건 — " + _esc(payload["answered"]), st["cond"]))
 
-    # 근거 조문
     cites = payload.get("citations") or []
     if cites:
         story.append(Paragraph("근거 조문", st["h2"]))
@@ -211,7 +200,6 @@ def build(payload: dict) -> bytes:
                 block.append(Paragraph("⚠ " + _esc(c["mismatch"]), st["warn"]))
             story.append(KeepTogether(block))
 
-    # 답변
     if payload.get("answer"):
         story.append(Paragraph("답변", st["h2"]))
         for para in str(payload["answer"]).split("\n"):
@@ -225,7 +213,6 @@ def build(payload: dict) -> bytes:
             else:
                 story.append(Paragraph(_rich(p, fb), st["body"]))
 
-    # 조문 원문 (인용된 것만)
     laws = payload.get("laws") or []
     shown = [l for l in laws if l.get("articles")]
     if shown:
@@ -253,7 +240,6 @@ def build(payload: dict) -> bytes:
                     story.append(Paragraph(_esc(ln), st["art"]))
             story.append(Spacer(1, 3 * mm))
 
-    # 꼬리말
     story.append(Spacer(1, 6 * mm))
     story.append(HRFlowable(width="100%", thickness=0.5,
                             color=colors.HexColor("#d6d3c9"), spaceAfter=5))

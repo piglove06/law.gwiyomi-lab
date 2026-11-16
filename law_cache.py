@@ -115,13 +115,13 @@ def get_detail(target: str, law_id: str, mst: str, enforced: str, fetch):
                 STATS["hit"] += 1
                 return d
             os.remove(path)
-    except Exception:                       # noqa: BLE001 — 깨진 캐시는 버리고 새로 받습니다
+    except Exception:                       # noqa: BLE001
         STATS["error"] += 1
         try:
             os.remove(path)
         except OSError:
             pass
-    d = fetch()                             # 법제처 오류는 그대로 올립니다(기존 동작과 같음)
+    d = fetch()
     STATS["miss"] += 1
     if _good(d) and _version_ok(d, enforced):
         try:
@@ -132,7 +132,7 @@ def get_detail(target: str, law_id: str, mst: str, enforced: str, fetch):
                     json.dump(d, fp, ensure_ascii=False)
                 os.replace(tmp, path)
                 _prune(os.path.dirname(path))
-        except Exception:                   # noqa: BLE001 — 저장 실패해도 답은 냅니다
+        except Exception:                   # noqa: BLE001
             STATS["error"] += 1
     return d
 

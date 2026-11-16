@@ -46,7 +46,6 @@ LABEL = {
     OTHER: "일반 질문",
 }
 
-# 사용자 사실(용량·날짜·시설 등)이 결론을 가르는 의도 — 되묻기를 허용합니다.
 NEEDS_FACTS = {APPLICABILITY, DEADLINE, SANCTION, OTHER}
 
 
@@ -55,11 +54,11 @@ class Intent:
     kind: str
     label: str
     needs_facts: bool
-    signals: list = field(default_factory=list)   # 어떤 규칙이 걸렸는지 (로그·화면용)
-    law: str = ""                                 # ARTICLE_LOOKUP: 법령명 후보 (원문 그대로)
+    signals: list = field(default_factory=list)
+    law: str = ""
     law_candidates: list = field(default_factory=list)
-    jo: str = ""                                  # ARTICLE_LOOKUP: 조번호 "25"
-    gaji: str = ""                                # ARTICLE_LOOKUP: 가지번호 "2" (제25조의2)
+    jo: str = ""
+    gaji: str = ""
 
     def as_dict(self) -> dict:
         d = {"kind": self.kind, "label": self.label, "needs_facts": self.needs_facts,
@@ -69,19 +68,14 @@ class Intent:
         return d
 
 
-# ── 규칙 ─────────────────────────────────────────────────────
-# 조문 번호: "제25조", "제 25 조의 2", "25조의2"(제 생략)
 _ARTICLE_NO = re.compile(r"제?\s*(\d{1,4})\s*조(?:\s*의\s*(\d{1,3}))?(?![가-힣]*\s*관련)")
 
-# 법령명처럼 끝나는 말 (조문번호 바로 앞에서 찾음)
 _LAW_TAIL = re.compile(r"(법률|법|시행령|시행규칙|규칙|규정|령)$")
 
-# 1인칭·자기 사례
 _FIRST_PERSON = re.compile(
     r"(우리|저희|제가|내가|저는|나는|당사|본사|우리\s*회사|우리\s*공장|우리\s*사업장|우리\s*가게|"
     r"제\s*(가게|회사|공장|사업장|집|건물|땅|토지))")
 
-# 적용 여부를 묻는 꼴
 _APPLICABILITY = re.compile(
     r"(해당(되|하)(나요|는지|합니까|됩니까|나|니|는\s*건가요|는\s*거야)|"
     r"대상(인가요|인지|입니까|이야|이에요|인가|일까요|이\s*되나요)|"
@@ -91,17 +85,10 @@ _APPLICABILITY = re.compile(
     r"(가능한가요|가능합니까|가능한지|(해도|하면|안\s*해도|받으면)\s*되나요|"
     r"(할|될|받을|지정할|설치할|쓸|사용할)\s*수\s*(있나요|있습니까|있는지|있을까요|없나요)))")
 
-# 사례를 구체적으로 적은 질문 — 수량·단위·날짜가 있으면 "일반론" 이 아니라 그 사례의 판단을
-# 원하는 경우가 대부분입니다 (예: "68dB(A)였습니다", "15,000리터", "2010년 3월 15일").
 _CASE_FACTS = re.compile(
     r"(\d[\d,\.]*\s*(리터|ℓ|L|톤|kg|킬로그램|㎡|제곱미터|m2|㎥|세제곱미터|dB|데시벨|회|번|명|대|기|"
     r"시간|개월|년|평|마리|두)|\d{4}\s*[년.\-/]\s*\d{1,2}\s*[월.\-/]\s*\d{1,2})")
 
-# ★ v1.39 (C-20261017-4) — '소비기한·유통기한·사용기한·품질유지기한' 은 식품 표시 용어라 기한 질문이 아닙니다
-#   (L-20261017-1016-1: "소비기한 지난 원재료 보관 시 처분" 이 '기한·주기' 로 분류됨). '며칠 이내' 도 기한 질문.
-# ★ v1.42 (C-20261018-1, L-0552-1) — '투기한·제기한·포기한·방기한'(동사 '-기하다' 활용)도 기한으로 잡혀
-#   쓰레기 무단투기 과태료 질문이 '기한·주기' 로 분류됐습니다. 앞 글자가 투·포·방, 또는 '제'(면제·공제·해제 제외)면 제외.
-#   되돌리기: 아래 '(?<![투포방])(?<!(?<![면공해])제)' 삭제.
 _DEADLINE = re.compile(
     r"(언제까지|(?<!소비)(?<!유통)(?<!사용)(?<!유지)(?<![투포방])(?<!(?<![면공해])제)기한|유효기간|주기|몇\s*년\s*마다|몇\s*개월\s*마다|몇\s*년에\s*한\s*번|"
     r"며칠\s*(이내|안에|내에|까지)|몇\s*일\s*(이내|안에|내에|까지)|"
@@ -111,25 +98,19 @@ _SANCTION = re.compile(
     r"(과태료|과징금|벌금|벌칙|처벌|행정처분|영업정지|조업정지|허가\s*취소|등록\s*취소|"
     r"위반하면|위반\s*시|안\s*하면|하지\s*않으면|어기면)")
 
-# ★ v1.32 — 단어 끝에서만 잡습니다. "특정토양오염관리**대상**시설이 뭐야?" 처럼 복합명사
-#   안에 든 "대상" 까지 잡아 용어 정의 질문을 일반 기준 질문으로 분류하던 문제.
-#   뒤에 오는 것이 끝·공백·문장부호·조사일 때만 기준어로 봅니다.
 _GENERAL_WORDS = re.compile(
     r"(기준|요건|절차|서류|방법|조건|요령|범위|종류|의무|대상|구비|제출)"
     r"(?=$|[\s,.?!·/)」]|(?:이|가|은|는|을|를|과|와|도|에|의|만|으로|이란|란|이야|야|이에요|"
     r"인가요|입니까|에는|에서|부터|까지|별|상)(?![가-힣]))")
 _ASK_WORDS = re.compile(r"(뭐|무엇|어떻게|어떤|알려|설명|정리|궁금|나요|인가요|입니까|\?)")
 
-# ★ v1.39 — "○○법의 목적은?" 도 조문 하나(제1조)로 답하는 정의형 질문(L-20261016-2244-H: 불필요 되묻기 1회·117초)
 _DEFINITION = re.compile(
     r"(뜻|정의|의미|개념|이란|란\s*무엇|목적(은|이)?|"
     r"(이|가|은|는)?\s*(뭐야|뭐예요|뭔가요|뭐지|무엇인가요|무엇입니까|뭐에요|뭘\s*말하나요))\s*\??\s*$")
 
-# ★ v1.42 — 조문 조회 지름길을 막는 사례 판단 꼴(조문 조회 판단에서만 씀)
 _CAN_ASK = re.compile(r"[가-힣]\s*수\s*(있나요|있습니까|있는지|있을까요|있는\s*건가요|없나요|없습니까|없는지)")
 _SENT_END = re.compile(r"[.?!](?=\s|$)")
 
-# "법령명" 앞에 붙는 군더더기
 _FILLER = {"그럼", "그러면", "혹시", "근데", "그런데", "그리고", "또", "또한", "다시", "참고로",
            "질문", "궁금한데", "궁금합니다", "알려줘", "알려주세요"}
 
@@ -148,7 +129,6 @@ def _law_candidates_before(text: str) -> list[str]:
     words = [w for w in re.split(r"\s+", tail) if w]
     if not words or not _LAW_TAIL.search(words[-1]):
         return []
-    # 마지막 단어가 "시행령/시행규칙" 뿐이면 앞 단어와 붙여야 이름이 됩니다.
     out = []
     for i in range(max(0, len(words) - 6), len(words)):
         cand_words = words[i:]
@@ -167,17 +147,11 @@ def classify(question: str) -> Intent:
     q = re.sub(r"\s+", " ", str(question or "")).strip()
     signals = []
 
-    # 1) 조문 직접 조회 — 법령명 + 제N조 가 있고, 사례 판단을 묻지 않을 때
     for m in _ARTICLE_NO.finditer(q):
         before = q[:m.start()]
         cands = _law_candidates_before(before)
         if not cands:
             continue
-        # ★ v1.42 (2026-10-22, 해석24·33) — "…제21조제3항 단서에 따라 갱신해 **줄 수 있나요**?",
-        #   "…제68조로 감면해 **줄 수 있나요**?" 가 _APPLICABILITY('할|될|… 수 있나요')에 안 걸려 조문 조회 지름길
-        #   (검색·되묻기·검토 없이 그 조문 하나로 답)로 빠져 오답(해석24)이 났습니다.
-        #   조문 조회 판단에서만(전체 분류는 그대로) ① 어떤 동사든 '… 수 있나요/없나요' ② 사실을 적은 두 문장 이상의
-        #   긴 질문을 사례 판단으로 봅니다. 되돌리기: 아래 _case_like 줄과 'or _case_like' 를 지우면 됩니다.
         _case_like = bool(_CAN_ASK.search(q)) or (len(_SENT_END.findall(q)) >= 2 and len(q) >= 60)
         if _FIRST_PERSON.search(q) or _APPLICABILITY.search(q) or _DEADLINE.search(q) or _case_like:
             signals.append("조문번호 있음(사례 판단 질문이라 조회로 보지 않음)")
@@ -192,7 +166,6 @@ def classify(question: str) -> Intent:
     dl = _DEADLINE.search(q)
     sc = _SANCTION.search(q)
 
-    # 2) 사용자 사례 판단 — 1인칭이거나 적용 여부를 묻는 꼴
     if ap or (fp and (_GENERAL_WORDS.search(q) or _ASK_WORDS.search(q))):
         if fp:
             signals.append(f"1인칭: {fp.group(0)}")
@@ -203,27 +176,22 @@ def classify(question: str) -> Intent:
             signals.append(f"기한: {dl.group(0)}")
         return Intent(kind, LABEL[kind], True, signals=signals)
 
-    # 2-1) 수량·날짜 같은 사례 사실을 적은 질문 — 그 사례에 대한 판단을 원함
     cf = _CASE_FACTS.search(q)
     if cf and not dl and not sc:
         return Intent(APPLICABILITY, LABEL[APPLICABILITY], True,
                       signals=[f"사례 사실: {cf.group(0).strip()}"])
 
-    # 3) 기한·주기
     if dl:
         return Intent(DEADLINE, LABEL[DEADLINE], True, signals=[f"기한: {dl.group(0)}"])
 
-    # 4) 제재
     if sc:
         return Intent(SANCTION, LABEL[SANCTION], True, signals=[f"제재: {sc.group(0)}"])
 
-    # 5) 일반 기준·절차 (사례가 아니라 기준 자체를 물음)
     gw = _GENERAL_WORDS.search(q)
     if gw and (_ASK_WORDS.search(q) or re.search(r"(기준|요건|절차|서류|방법|조건|요령|범위|종류|의무)\s*$", q)):
         return Intent(GENERAL_RULE, LABEL[GENERAL_RULE], False,
                       signals=[f"일반 기준어: {gw.group(0)}"])
 
-    # 6) 용어 정의
     df = _DEFINITION.search(q)
     if df and len(q) <= 60:
         return Intent(DEFINITION, LABEL[DEFINITION], False,

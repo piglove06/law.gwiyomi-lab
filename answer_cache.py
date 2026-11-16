@@ -37,7 +37,7 @@ CACHE_DIR = os.path.join(HERE, "_cache")
 FLAG_DIR = os.path.join(CACHE_DIR, "flags")
 TTL_DAYS = 30
 
-MARK = "최근 같은 질문 결과 불러오기"          # 되묻기 질문 머리(답 문자열에서 이것으로 찾아 뗍니다)
+MARK = "최근 같은 질문 결과 불러오기"
 OPT_YES = "예 (지난 결과 불러오기)"
 OPT_NO = "아니오 (새로 검색)"
 
@@ -72,9 +72,6 @@ def _split_mark(answered: str):
     choice, rest = None, []
     for p in parts:
         if p.startswith(MARK):
-            # ★ v1.42 (2026-10-22 크롬 확인) — 되묻기 질문 자체에 ':' 가 있어("…불러오기: 10/22 02:36에 …")
-            #   split(":", 1) 로는 답이 아니라 질문 뒷부분을 읽어 '예' 를 골라도 항상 '아니오' 로 처리됐습니다.
-            #   답은 **마지막** ':' 뒤에 있습니다. 원래: p.split(":", 1)[-1].strip().startswith("예")
             choice = "yes" if (OPT_YES in p or p.rsplit(":", 1)[-1].strip().startswith("예")) else "no"
         else:
             rest.append(p)
@@ -118,7 +115,6 @@ def before(req, steps: list, version: str, max_rounds: int):
         state["mode"] = "fresh"
         data = _load(req)
         if choice is None:
-            # 새 질문 + 되묻기 생략 아님 + 끝까지 간 기록이 있을 때만 물어봅니다.
             if req.round == 0 and not req.skip_clarify and not (req.answered or "").strip() and data:
                 final = [v for v in (data.get("paths") or {}).values()
                          if _fresh(v, version) and not (v.get("result") or {}).get("clarify")]
@@ -129,11 +125,10 @@ def before(req, steps: list, version: str, max_rounds: int):
                                          "options": [OPT_YES, OPT_NO]}],
                             "round": 0, "max_rounds": max_rounds, "answered": "", "steps": steps}, state
             return None, state
-        # '불러오기' 응답이 붙은 요청
         req.answered = rest
         if choice == "no":
             if not rest.strip():
-                req.round = 0               # 새 질문과 똑같이(되묻기 횟수 손해 없게)
+                req.round = 0
             steps.append({"name": "지난 결과 불러오기", "detail": "아니오 — 새로 검색합니다"})
             return None, state
         entry = ((data or {}).get("paths") or {}).get(_path_key(rest, req.note))
@@ -153,7 +148,6 @@ def before(req, steps: list, version: str, max_rounds: int):
                                            + ("" if res.get("clarify") else " · 근거 법령 개정 없음 확인")}]
         steps[:] = res["steps"]
         if res.get("clarify"):
-            # 다음 되묻기에서도 '불러오기' 상태가 이어지도록 표시를 붙여 둡니다.
             res["answered"] = " / ".join(x for x in (f"{MARK}: {OPT_YES}", res.get("answered") or "") if x)
         else:
             res.setdefault("warnings", [])
@@ -162,7 +156,7 @@ def before(req, steps: list, version: str, max_rounds: int):
                 + list(res["warnings"])
         state["mode"] = "replay"
         return res, state
-    except Exception as e:                  # noqa: BLE001 — 캐시 문제로 답을 못 내면 안 됩니다
+    except Exception as e:                  # noqa: BLE001
         steps.append({"name": "지난 결과 불러오기 실패(새로 검색)", "detail": str(e)[:120]})
         state["mode"] = "fresh"
         return None, state
@@ -204,16 +198,13 @@ def after(req, result, state: dict, version: str) -> None:
         for f in result.get("laws") or []:
             if isinstance(f, dict) and f.get("mst") and f.get("name") and f.get("target"):
                 msts.append((f["target"], f["name"], str(f["mst"])))
-        # ★ v1.45 (C-20261028-16) — cited_keys 는 "법령명|조|가지" 꼴인데 " 제" 로 나눠 법령명 대조가 안 맞았습니다.
-        #   원래: str(k).split(" 제")[0]
         cited = {str(k).split("|")[0] for k in (result.get("cited_keys") or [])}
-        if cited:                           # 실제 인용한 법령을 먼저(확인 호출 수를 줄임)
+        if cited:
             msts.sort(key=lambda x: 0 if x[1] in cited else 1)
         entry = {"t": time.time(), "version": version, "result": result, "msts": msts[:8]}
         with _LOCK:
             data = _load(req) or {"question": _norm(req.question), "paths": {}}
             data["paths"][_path_key(req.answered, req.note)] = entry
-            # 오래된 기록 정리
             data["paths"] = {k: v for k, v in data["paths"].items()
                              if time.time() - float(v.get("t", 0)) < TTL_DAYS * 86400}
             p = _path(req)
@@ -222,5 +213,5 @@ def after(req, result, state: dict, version: str) -> None:
             with open(tmp, "w", encoding="utf-8") as fp:
                 json.dump(data, fp, ensure_ascii=False, default=str)
             os.replace(tmp, p)
-    except Exception:                       # noqa: BLE001 — 저장 실패해도 답은 이미 나갔습니다
+    except Exception:                       # noqa: BLE001
         pass

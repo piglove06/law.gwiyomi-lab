@@ -33,8 +33,8 @@ RUNS = os.path.join(HERE, "_runs")
 
 DEBUG = os.getenv("LLM_DEBUG", "0") not in ("0", "", "false", "False")
 
-CONSOLE_WIDTH = 150          # 콘솔 한 줄 최대 글자 수 (파일에는 줄이지 않고 남김)
-SESSION_TTL = 3600           # 되묻기 응답을 이 시간(초) 동안 안 하면 블록을 닫음
+CONSOLE_WIDTH = 150
+SESSION_TTL = 3600
 RULE = "─" * 78
 
 _lock = threading.Lock()
@@ -43,7 +43,6 @@ _sessions: dict = {}
 _counter = {"day": "", "n": 0}
 
 
-# ── 기본 출력 ────────────────────────────────────────────────
 def now() -> datetime:
     return datetime.now(KST)
 
@@ -89,7 +88,7 @@ def _fmt(detail) -> str:
         return " | ".join(parts)
     if isinstance(detail, (list, tuple)):
         return ", ".join(str(x) for x in detail)
-    return " ".join(str(detail).split())            # 줄바꿈·연속 공백 정리
+    return " ".join(str(detail).split())
 
 
 def _one_line(s: str, n: int = 80) -> str:
@@ -97,7 +96,6 @@ def _one_line(s: str, n: int = 80) -> str:
     return s if len(s) <= n else s[:n - 1] + "…"
 
 
-# ── 질문 블록 ────────────────────────────────────────────────
 class Session:
     def __init__(self, rid: str, key, question: str):
         self.rid = rid
@@ -105,8 +103,8 @@ class Session:
         self.question = question
         self.t0 = time.time()
         self.last_seen = self.t0
-        self.active = 0.0            # 서버가 실제로 일한 시간 (사용자 응답 대기 제외)
-        self.rounds = 0              # 되묻기 횟수
+        self.active = 0.0
+        self.rounds = 0
         self.llm_calls = 0
         self.tok_in = 0
         self.tok_out = 0
@@ -116,8 +114,6 @@ class Session:
 def _new_rid() -> str:
     day = f"{now():%m%d}"
     if _counter["day"] != day:
-        # 서버가 코드 수정으로 다시 뜨면 번호가 001 부터 다시 시작해 같은 번호가
-        # 겹쳤습니다. 오늘 로그 파일에서 마지막 번호를 찾아 이어서 씁니다.
         last = 0
         try:
             import re
@@ -154,7 +150,6 @@ def begin(key, question: str, round_no: int = 0, answered: str = "", note: str =
         if round_no > 0:
             emit(f"[{ts()}]  │ (서버 재시작 등으로 이전 기록이 없어 {round_no}차 되묻기부터 이어서 기록)")
     else:
-        # 이번 라운드에서 새로 고른 답만 보여줍니다 (answered 는 누적 문자열).
         new = answered[len(sess.prev_answered):] if answered.startswith(sess.prev_answered) \
             else answered
         new = new.strip(" /")
@@ -241,7 +236,6 @@ def clear() -> None:
     _tls.sess = None
 
 
-# ── LLM 원문 (파일 전용) ─────────────────────────────────────
 def debug(stage: str, text: str) -> None:
     """LLM_DEBUG=1 일 때만 파일에 남깁니다. 콘솔에는 찍지 않습니다."""
     if not DEBUG:

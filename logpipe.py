@@ -34,7 +34,6 @@ ANSI_RE = re.compile(r"\x1b\[[0-9;?]*[A-Za-z]")
 CF_TIME_RE = re.compile(r"^(\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2})(?:\.\d+)?Z\s*")
 LLAMA_ELAPSED_RE = re.compile(r"^\d+\.\d{2}\.\d{3}\.\d{3}\s+")      # 분.초.밀리초.마이크로초
 
-# llama-server 창에서 숨길 줄 (파일에는 남습니다)
 LLM_NOISE = (
     "graphs reused", "get_availabl", "launch_slot_", "stop processing",
     "unused tensor", "prompt processing, n_tokens", "n_gen =", "total time =",
@@ -72,10 +71,6 @@ def _print(text: str) -> None:
             pass
 
 
-# ★ v1.33 — 화면 출력은 별도 스레드로. 2026-10-08 새벽, 누군가 이 창을 클릭해 콘솔이 "빠른 편집"
-#   선택 상태가 되자 print 가 멈췄고 → 이 스크립트가 파이프를 안 비워서 → llama-server 가 로그를
-#   못 쓰고 멈췄습니다(요청이 300초씩 시간 초과). 이제 화면이 멈춰도 파이프 읽기·파일 저장은 계속하고,
-#   밀린 화면 줄은 일정량 넘으면 버립니다(파일에는 전부 남음).
 _OUT: "queue.Queue[str | None]" = queue.Queue(maxsize=2000)
 
 
@@ -116,7 +111,7 @@ def _disable_quick_edit() -> None:
         pass
 
 
-_pending: dict = {}      # task → 입력 요약 (출력 줄이 오면 합쳐서 한 줄로)
+_pending: dict = {}
 
 
 def format_line(kind: str, line: str) -> str | None:

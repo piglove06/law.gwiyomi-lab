@@ -18,27 +18,15 @@ import xml.etree.ElementTree as ET
 
 import httpx
 
-# --- 상수 -------------------------------------------------------------
 # 법제처는 http 입니다 (https 아님). 나중에 https 로 바뀌면 여기만 고치면 됩니다.
 SEARCH_URL = "http://www.law.go.kr/DRF/lawSearch.do"
 SERVICE_URL = "http://www.law.go.kr/DRF/lawService.do"
 
-# 환경변수에서 인증키를 읽습니다. 코드에 직접 쓰지 마세요.
-# C#의 appsettings.json / Java의 application.properties 자리라고 보시면 됩니다.
 OC = os.getenv("LAW_OC", "")
 
-# target 파라미터 값. 필요한 것만 추려놨습니다.
-# 브라우저에서 하나씩 눌러보고 실제로 뭐가 나오는지 확인하세요.
-# ── 법령 조회 기준 ────────────────────────────────────────────────
 # 법제처는 같은 법령을 두 가지 기준으로 제공합니다.
 #   law   : 현행법령(공포일) — lawSearch.do?target=law
 #   eflaw : 현행법령(시행일) — lawSearch.do?target=eflaw
-#
-# 공포일 기준은 "공포된 것" 이고, 시행일 기준은 "지금 효력이 있는 것" 입니다.
-# 개정법이 공포됐지만 시행일이 아직 안 온 경우 둘이 갈립니다.
-# 민원 안내는 오늘 효력 있는 조문으로 해야 하므로 시행일 기준을 기본으로 씁니다.
-#
-# 문제가 생기면 .env 에 LAW_TARGET=law 로 즉시 되돌릴 수 있습니다.
 LAW_TARGET = (os.getenv("LAW_TARGET", "eflaw").strip() or "eflaw")
 if LAW_TARGET not in ("law", "eflaw"):
     LAW_TARGET = "eflaw"
@@ -52,29 +40,20 @@ TARGETS = {
     "lsStmd": "법령체계도",
     "lsHistory": "법령 연혁",
     # ★ 별표·서식은 본문 조회에 딸려오지 않습니다. 별도 target 입니다.
-    #   dump_raw() 로 확인할 수 있게 여기에도 넣어둡니다.
     "licbyl": "법령 별표·서식 목록",
     "admbyl": "행정규칙 별표·서식 목록",
     "ordinbyl": "자치법규 별표·서식 목록",
 }
 
 # 본문 조회(lawService)에서 별표가 함께 오는지 여부.
-#   행정규칙 : <별표단위> 가 본문에 함께 옵니다.
-#   법령     : 오지 않습니다. "별표 4와 같다" 로 넘겨도 내용을 알 수 없어
-#              AI 가 검사주기 같은 수치를 지어내는 원인이 됩니다.
-#              그래서 아래 get_byeolpyo() 로 따로 가져옵니다.
 BYL_TARGET = {"law": "licbyl", "eflaw": "licbyl",
               "admrul": "admbyl", "ordin": "ordinbyl"}
 
-# target 별 ID 후보. 본문 조회(lawService)에 넘길 값입니다.
-# ★ 행정규칙은 "행정규칙ID"가 아니라 "행정규칙일련번호"를 써야 합니다.
 ID_KEYS = {
     "law": ["법령ID", "법령일련번호", "ID"],
     # 시행일 기준도 같은 키를 씁니다. 응답 필드 이름이 동일합니다.
     "eflaw": ["법령ID", "법령일련번호", "ID"],
     "admrul": ["행정규칙일련번호", "행정규칙ID"],
-    # ★ MST 파라미터는 자치법규ID 를 받습니다.
-    #   자치법규일련번호를 넣으면 에러 없이 "다른 지자체 조례"가 반환됩니다. 순서 주의.
     "ordin": ["자치법규ID", "자치법규일련번호"],
     "expc": ["법령해석례일련번호", "안건번호"],
     "lsStmd": ["법령일련번호", "법령ID"],
@@ -85,7 +64,6 @@ ID_KEYS = {
 DETAIL_PARAM = {"law": "ID", "eflaw": "ID", "admrul": "ID",
                 "ordin": "MST", "expc": "ID", "lsStmd": "MST"}
 
-# target 별 이름 후보
 NAME_KEYS = {
     "law": ["법령명_한글", "법령명한글", "법령명"],
     "eflaw": ["법령명_한글", "법령명한글", "법령명"],
@@ -98,7 +76,6 @@ NAME_KEYS = {
 # 요청 타임아웃(초). 법제처가 느릴 때가 있어 넉넉히 잡았습니다.
 TIMEOUT = 20.0
 
-# ── 목록 조회 파라미터 제약 (매뉴얼 대조 결과) ──────────────────────
 # display 는 매뉴얼상 max=100 입니다. 넘겨도 조용히 잘리거나 무시되므로
 # 호출 전에 우리가 잘라서 "몇 건 받았는지" 판정이 어긋나지 않게 합니다.
 MAX_DISPLAY = 100
@@ -152,18 +129,14 @@ def _safe_err(e: Exception) -> str:
     """★ v1.44 — httpx 오류를 URL 없이 짧게. 상태 오류면 'HTTP 500', 그 밖에는 예외 종류(+가린 문구)."""
     if isinstance(e, httpx.HTTPStatusError) and e.response is not None:
         return f"HTTP {e.response.status_code}"
-    return type(e).__name__          # 연결 오류 문구에도 URL 이 들어 있어 종류만 남깁니다
+    return type(e).__name__
 
 
 def _get(url: str, params: dict) -> str:
     """공통 GET 호출. 응답 본문(문자열)을 그대로 돌려줍니다."""
     params = {"OC": _require_oc(), "type": "XML", **params}
-    # ★ v1.32 — 한 번 실패하면 1초 쉬고 한 번 더 부릅니다.
-    #   실제 사례: 같은 "토양환경보전법" 체계도 조회가 21:14 에는 조용히 실패하고 8분 뒤에는 성공 →
-    #   첫 후보가 통째로 빠져 다른 법(석유사업법) 위에서 답했습니다.
     for attempt in (1, 2):
         try:
-            # httpx 는 requests 와 거의 같은데 async 를 지원해서 FastAPI 와 궁합이 좋습니다.
             resp = httpx.get(url, params=params, timeout=TIMEOUT)
             resp.raise_for_status()
             break
@@ -171,9 +144,6 @@ def _get(url: str, params: dict) -> str:
             if attempt == 1:
                 time.sleep(1.0)
                 continue
-            # ★ v1.44 (C-20261028-01, 보안) — httpx 오류 문구에는 요청 URL 전체(OC 인증키 포함)가 들어가고,
-            #   이 문구가 _err() 로 화면·로그에 그대로 나갔습니다(예: /api/detail?id= → 법제처 500).
-            #   상태 코드·예외 종류만 남기고, 혹시 남은 인증키는 가립니다. 원래: f"법제처 호출 실패(2회): {e}"
             raise LawApiError(f"법제처 호출 실패(2회): {_safe_err(e)}") from None
 
     # 법제처가 인증 실패 시에도 HTTP 200 에 에러 문구를 담아 보내는 경우가 있습니다.
@@ -217,14 +187,9 @@ def _parse_search_rows(root: ET.Element) -> tuple[list[dict], int]:
         if len(child) == 0:
             continue
         row = _elem_to_dict(child)
-        # 폐지·연혁본 제외. 이 필드가 없으면 통과시킵니다.
-        # ★ 실제 필드명은 "현행연혁코드" 입니다. "현행연혁구분" 은 실측 없이
-        #   넣었던 이름이라 지금까지 이 필터가 계속 no-op 이었습니다.
         #   (2026-08-18 /api/raw 실측: <현행연혁코드>현행</현행연혁코드> /
         #    <현행연혁코드>연혁</현행연혁코드> — 값도 정확히 이 두 문자열)
         #   eflaw 는 검색 시 nw=3 을 같이 보내 서버가 현행만 걸러주므로
-        #   증상이 안 보였지만, law 등 다른 target 은 연혁본이 섞여 들어갈
-        #   수 있었습니다.
         if row.get("현행연혁코드", "현행") != "현행":
             continue
         results.append(row)
@@ -268,8 +233,6 @@ def search(target: str, query: str, display: int = 20, scope: int = 1,
 
     if scope and int(scope) != 1:
         if target in NO_SCOPE_TARGETS:
-            # 스펙에 없는 파라미터입니다. 보내면 무시되거나 오동작하므로 뺍니다.
-            # (예: lsStmd 에 search=2 를 주면 검색범위가 아니라 잡음이 됩니다)
             pass
         else:
             params["search"] = str(int(scope))
@@ -281,8 +244,6 @@ def search(target: str, query: str, display: int = 20, scope: int = 1,
     if page_no > 1 and target not in NO_PAGE_TARGETS:
         params["page"] = str(page_no)
 
-    # 시행일 기준 목록만 nw 를 받습니다. 3 = 현행 (1 연혁, 2 시행예정).
-    # 서버가 걸러주므로 연혁본·시행예정본이 아예 안 넘어옵니다.
     if target == "eflaw":
         params["nw"] = "3"
 
@@ -307,7 +268,7 @@ def _fix_html_entities(text: str) -> str:
         if name in _XML_ENTS:
             return m.group(0)
         ch = html.unescape(m.group(0))
-        if ch == m.group(0):                       # 모르는 이름 — & 를 이스케이프
+        if ch == m.group(0):
             return "&amp;" + name + ";"
         return ch.replace("&", "&amp;").replace("<", "&lt;")
     return re.sub(r"&([A-Za-z][A-Za-z0-9]{1,31});", rep, str(text or ""))
@@ -368,13 +329,6 @@ def search_all(target: str, query: str, scope: int = 1,
     if target in NO_PAGE_TARGETS:
         return search(target, query, display=per_page, scope=scope)
 
-    # ★ 2026-08-19 — 종료 조건 세 개가 서로 어긋나 **무한 루프**가 났습니다.
-    #   while 은 필터 **후** 개수(out)를 보는데, (a) 는 필터 **전** 개수를 보고,
-    #   (b) 는 totalCnt 가 없으면 영원히 성립하지 않습니다.
-    #   그래서 "100건이 전부 연혁본" 인 페이지가 오면 out 이 하나도 안 늘어난 채
-    #   같은 요청을 끝없이 반복했습니다(실측: 501회 호출 후 강제 중단).
-    #   → 페이지 번호로 상한을 걸고, 한 페이지에서 한 건도 못 늘리면 멈춥니다.
-    #     서버가 page 를 무시하고 같은 결과를 줄 때를 대비해 중복도 거릅니다.
     per_page = _clamp_display(per_page)
     out: list[dict] = []
     total = None
@@ -397,7 +351,7 @@ def search_all(target: str, query: str, scope: int = 1,
             break
 
         rows, page_total = _parse_search_rows(root)
-        raw_count = sum(1 for c in root if len(c) > 0)   # 필터 전 개수
+        raw_count = sum(1 for c in root if len(c) > 0)
         if total is None and page_total:
             total = page_total
 
@@ -411,13 +365,13 @@ def search_all(target: str, query: str, scope: int = 1,
             out.append(r)
             added += 1
 
-        if raw_count == 0:                       # 빈 페이지
+        if raw_count == 0:
             break
-        if added == 0:                           # 새로 얻은 게 없으면 진전 없음
+        if added == 0:
             break
-        if raw_count < per_page:                 # 마지막 페이지
+        if raw_count < per_page:
             break
-        if total and page_no * per_page >= total:  # totalCnt 도달
+        if total and page_no * per_page >= total:
             break
         page_no += 1
 
@@ -449,7 +403,6 @@ def get_detail(target: str, law_id: str) -> dict:
         except LawApiError:
             return out
         if _has_real_articles(alt):
-            # 어느 기준으로 받았는지 남깁니다. 화면·로그에서 구분할 수 있어야 합니다.
             alt.setdefault("meta", {})["조회기준"] = "공포일(시행일 기준 조회가 비어 대체)"
             return alt
     elif target == "eflaw":
@@ -471,8 +424,6 @@ def _has_real_articles(d: dict) -> bool:
         return False
     if any(a.get("조문번호") for a in arts):
         return True
-    # 조문번호가 하나도 없으면 "(전문)" 통짜일 가능성이 큽니다.
-    # 그래도 내용이 충분히 길면 행정규칙 평문일 수 있으니 살립니다.
     return sum(len(a.get("조문내용", "")) for a in arts) >= 200
 
 
@@ -492,7 +443,6 @@ def _get_detail_once(target: str, law_id: str, key: str = "") -> dict:
     except ET.ParseError as e:
         raise LawApiError(f"XML 파싱 실패: {e}\n앞부분: {xml_text[:300]}") from e
 
-    # --- 기본정보 (여러 이름 대응) ---------------------------------
     meta = {}
     for tag in ("기본정보", "행정규칙기본정보", "자치법규기본정보", "조례기본정보", "해석례기본정보", "해석례정보"):
         basic = root.find(f".//{tag}")
@@ -502,7 +452,6 @@ def _get_detail_once(target: str, law_id: str, key: str = "") -> dict:
                 if t:
                     meta[c.tag] = t
             break
-    # 기본정보 묶음이 없으면 루트의 잎 노드를 메타로
     if not meta:
         for c in root:
             if len(c) == 0 and (c.text or "").strip():
@@ -512,7 +461,6 @@ def _get_detail_once(target: str, law_id: str, key: str = "") -> dict:
     return {"meta": meta, "articles": articles}
 
 
-# 평문 조문에서 "제3조의2(제목)" 을 뽑는 패턴
 _TITLE_RE = re.compile(r"^\s*제\s*\d+\s*조(?:\s*의\s*\d+)?\s*\(([^)]{1,60})\)")
 
 
@@ -526,11 +474,8 @@ def _clean_body(text: str) -> str:
     t = str(text or "")
     t = re.sub(r"<img[^>]*>(?:\s*</img>)?", "[그림·표 생략]", t, flags=re.I)
     t = re.sub(r"</?img[^>]*>", "", t, flags=re.I)
-    # ★ 2026-10-02 — 예전에는 공백·줄바꿈을 가리지 않고 3개 이상이면 한 칸으로
-    #   뭉갰습니다(\s{3,}). 목을 "줄바꿈 + 들여쓰기" 로 붙이면 그 줄바꿈까지 먹혀
-    #   가.·나.·다. 가 앞 호와 한 줄로 붙었습니다. 가로 공백만 줄이고 줄바꿈은 살립니다.
     t = re.sub(r"[ \t]{3,}", " ", t)
-    t = re.sub(r"[ \t]*\n[ \t]*\n[\s]*\n", "\n\n", t)    # 빈 줄은 최대 하나
+    t = re.sub(r"[ \t]*\n[ \t]*\n[\s]*\n", "\n\n", t)
     return t.strip()
 
 
@@ -554,7 +499,6 @@ def _extract_articles(root: ET.Element) -> list[dict]:
     """
     articles = []
 
-    # ---- (A) 법령 구조 ------------------------------------------
     for unit in root.findall(".//조문/조문단위"):
         def g(tag: str) -> str:
             el = unit.find(tag)
@@ -562,24 +506,14 @@ def _extract_articles(root: ET.Element) -> list[dict]:
 
         content = g("조문내용")
         # 조문제목 태그가 비어 있는 법령이 있습니다.
-        # 그때는 본문 첫머리의 "제64조(정기점검의 횟수)" 에서 제목을 뽑습니다.
         title = g("조문제목") or _title_from_body(content)
-        # 항 → 호 → 목 순서로 붙입니다.
-        # ★ 2026-10-02 — 예전 주석은 "<목> 은 <항> 바로 아래 호의 형제" 라고 했고 코드도
-        #   그렇게 짰는데, 실제 법제처 XML 은 **<항>/<호>/<목>** 으로 목이 호 **안**에
-        #   있습니다(_dump/01_eflaw_detail.xml 에서 목 12개 모두 부모가 <호>).
-        #   그래서 "다음 각 목의 어느 하나에 해당하는…" 뒤의 가.·나.·다. 가 **전부**
-        #   빠지고 있었습니다(9/29 테스트 수집 조문 175곳 중 174곳). 예) 악취방지법
-        #   제6조 지정요건 2호, 토양환경보전법 시행령 제8조 누출검사 사유.
-        #   → 중첩 깊이와 상관없이 문서 순서대로 항·호·목 내용을 모두 읽습니다.
-        #     항이 없이 조 바로 아래 호가 오는 조문도 같이 잡힙니다.
         for el in unit.iter():
             if el.tag not in ("항내용", "호내용", "목내용"):
                 continue
             t = "".join(el.itertext()).strip()
             if not t:
                 continue
-            content += ("\n  " if el.tag == "목내용" else "\n") + t   # 목은 한 단 들여씁니다
+            content += ("\n  " if el.tag == "목내용" else "\n") + t
         if not content:
             continue
         articles.append({
@@ -588,7 +522,6 @@ def _extract_articles(root: ET.Element) -> list[dict]:
             "시행일자": g("조문시행일자"), "조문내용": _clean_body(content), "구분": "조문",
         })
 
-    # ---- (A-2) 자치법규 구조 : <조문>/<조> --------------------
     if not articles:
         for jo in root.findall(".//조문/조"):
             def jg(tag: str) -> str:
@@ -597,7 +530,6 @@ def _extract_articles(root: ET.Element) -> list[dict]:
             body = jg("조내용")
             if not body:
                 continue
-            # 조문번호가 '000100' 처럼 0 패딩 6자리입니다. 앞 4자리가 조, 뒤 2자리가 가지번호.
             raw = jg("조문번호")
             no, gaji = "", ""
             if raw.isdigit() and len(raw) >= 5:
@@ -614,7 +546,6 @@ def _extract_articles(root: ET.Element) -> list[dict]:
                 "조문여부": "조문", "시행일자": "", "조문내용": _clean_body(body), "구분": "조문",
             })
 
-    # ---- (B) 행정규칙 평문 구조 ------------------------------
     if not articles:
         for el in root.findall("조문내용") or root.findall(".//조문내용"):
             text = (el.text or "").strip()
@@ -625,19 +556,16 @@ def _extract_articles(root: ET.Element) -> list[dict]:
                 no, gaji, title = m.group(1), m.group(2) or "", m.group(3) or ""
                 yn = "조문"
             else:
-                # "제1장 총칙" 같은 장·절 제목
                 no, gaji, title, yn = "", "", "", "전문"
             articles.append({
                 "조문번호": no, "조문가지번호": gaji, "조문제목": title,
                 "조문여부": yn, "시행일자": "", "조문내용": _clean_body(text), "구분": "조문",
             })
 
-    # ---- 별표·별지 (행정규칙은 본문 텍스트가 함께 옵니다) ---------
     for bp in root.findall(".//별표단위"):
         def bg(tag: str) -> str:
             el = bp.find(tag)
             return (el.text or "").strip() if el is not None and el.text else ""
-        # 별표내용은 CDATA 여러 조각으로 나뉘어 있어 itertext 로 합칩니다.
         body_el = bp.find("별표내용")
         body = " ".join(t.strip() for t in body_el.itertext() if t and t.strip()) if body_el is not None else ""
         title = bg("별표제목")
@@ -646,21 +574,9 @@ def _extract_articles(root: ET.Element) -> list[dict]:
         if not body:
             body = "(본문이 첨부파일로만 제공됩니다. 원본을 내려받아 확인하세요.)"
         kind = bg("별표구분") or "별표"
-        # ★ 2026-08-19 — 여기만 옛 방식(lstrip)이 남아 있었습니다. 같은 파일의
-        #   _byl_no() 는 6자리 0패딩(000400 = 별표 4)을 제대로 풀면서
-        #   "lstrip 으로 자르면 000400 이 400 이 된다" 고 경고까지 해 두었는데,
-        #   이 줄은 그 경고 그대로 밟고 있었습니다. 두 파서가 같은 필드를 다르게
-        #   읽으니 어느 형식이든 한쪽은 반드시 틀립니다.
-        #   실제 피해: 제목이 "[별표 400]" 이 되면 main.py 가 본문의 "별표 4" 와
-        #   못 맞춰서, **이미 받아 온 별표를 "못 받았다" 고 판정**하고
-        #   "수치를 확인할 수 없다" 경고를 띄웁니다. 정작 주기는 응답 안에
-        #   들어 있었는데 버려집니다.
-        #   가지번호도 함께 읽습니다 — 안 읽으면 별표 6 과 별표 6의3 이 둘 다
-        #   "[별표 6]" 이 되어 서로를 덮어씁니다.
         _bno, _bgaji = _byl_no(bg("별표번호"))
         # ★ 2026-10-02 — 법령 본문 조회 응답은 번호를 4자리(0003) + 별도 태그
         #   <별표가지번호>(02) 로 줍니다. 가지번호 태그를 안 읽어서 별표 3 과 별표 3의2 가
-        #   둘 다 "[별표 3]" 이 되어 서로 섞였습니다(토양환경보전법 시행규칙 실측).
         if not _bgaji:
             _gj = bg("별표가지번호")
             if _gj.isdigit() and int(_gj):
@@ -674,10 +590,7 @@ def _extract_articles(root: ET.Element) -> list[dict]:
             "파일링크": bg("별표서식PDF파일링크") or bg("별표서식파일링크") or bg("별표첨부파일명"),
         })
 
-    # ---- 그래도 비면 전체 텍스트 ---------------------------------
     if not articles:
-        # 구조를 못 읽은 경우. 담당부서·담당자 등 기본정보도 실무에 쓸모가 있으므로
-        # 전체 텍스트를 그대로 씁니다. (이미지 태그만 정리)
         blob = _clean_body(" ".join(t.strip() for t in root.itertext() if t and t.strip()))
         if blob:
             articles.append({"조문번호": "", "조문가지번호": "", "조문제목": "(전문)",
@@ -686,7 +599,6 @@ def _extract_articles(root: ET.Element) -> list[dict]:
     return articles
 
 
-# 「」 안의 다른 법령 이름을 뽑습니다. 환경↔토목 연결 지점 탐지용.
 _REF_RE = re.compile(r"「([^」]{2,60})」")
 
 
@@ -755,16 +667,10 @@ def get_byeolpyo(target: str, law_id: str = "", law_name: str = "") -> list[dict
             "target": byl, "query": law_name, "search": "2", "display": 100})
         root = ET.fromstring(xml_text)
     except (LawApiError, ET.ParseError):
-        # 별표는 있으면 좋고 없으면 마는 보조 정보입니다.
-        # 여기서 예외를 올리면 조회 전체가 실패하므로 조용히 넘어갑니다.
         return []
 
     rows = _parse_byeolpyo(root)
 
-    # ★ 반드시 법령명으로 한 번 더 거릅니다.
-    #   search=2 는 부분일치입니다. "토양환경보전법" 으로 찾으면
-    #   시행령·시행규칙 별표가 함께 돌아와, 법률 별표 자리에 시행규칙 별표가
-    #   들어가는 사고가 납니다. 조문 인용은 법령이 다르면 완전히 다른 규정입니다.
     want = _norm_name(law_name)
     exact = [r for r in rows if _norm_name(r.get("law", "")) == want]
     return exact if exact else []
@@ -778,29 +684,23 @@ def _parse_byeolpyo(root: ET.Element) -> list[dict]:
             continue
         row = _elem_to_dict(child)
         no, gaji = _byl_no(pick(row, "별표번호"))
-        # 응답 필드는 별표명·별표종류 입니다. 옛 이름도 후보로 남겨둡니다.
         title = pick(row, "별표명", "별표제목")
         if not (no or title):
             continue
-        # 삭제된 별표는 쓸모가 없습니다. ("삭제 <2005.6.30>")
         if title.startswith("삭제"):
             continue
-        # 내려받기용 첨부 (HWP/PDF)
         f_link = pick(row, "별표서식PDF파일링크", "별표서식파일링크")
         if f_link and f_link.startswith("/"):
             f_link = "https://www.law.go.kr" + f_link
 
-        # ★ 브라우저에서 표를 바로 볼 수 있는 주소.
         #   목록의 별표법령상세링크(lawService.do?…&type=HTML)를 열면
         #   iframe 껍데기만 옵니다. 실제 표는 그 안쪽 lsBylInfoP.do 에 있습니다.
         #   필요한 두 일련번호가 목록 응답에 이미 있으므로 직접 만듭니다.
-        #   (추가 호출도 스크래핑도 아닙니다. 사람이 눌러서 볼 주소만 만드는 것)
         seq = pick(row, "별표일련번호")
         lsi = pick(row, "관련법령일련번호")
         view = (f"https://www.law.go.kr/LSW/lsBylInfoP.do?bylSeq={seq}&lsiSeq={lsi}"
                 if seq and lsi else "")
 
-        # 본문 텍스트는 오지 않는 것으로 확인했습니다. 혹시 오면 씁니다.
         body_el = child.find("별표내용")
         body = ""
         if body_el is not None:
@@ -809,8 +709,6 @@ def _parse_byeolpyo(root: ET.Element) -> list[dict]:
             "kind": pick(row, "별표종류", "별표구분") or "별표",
             "no": no, "gaji": gaji, "title": title,
             "body": _clean_body(body),
-            # link 는 "사람에게 보여줄 대표 주소" 입니다.
-            # 화면에서 바로 읽히는 쪽을 우선합니다. 첨부는 내려받아야 열립니다.
             "link": view or f_link,
             "view": view, "file": f_link, "seq": seq,
             "law": pick(row, "관련법령명", "법령명", "법령명_한글"),
@@ -853,9 +751,6 @@ def pick(d: dict, *candidates: str, default: str = "") -> str:
     return default
 
 
-# =====================================================================
-# 법령체계도 — 법률/시행령/시행규칙 + 각 단계에 위임된 행정규칙
-# =====================================================================
 def get_hierarchy(law_mst: str) -> dict:
     """
     target=lsStmd 로 체계도를 조회합니다.
@@ -911,11 +806,10 @@ def get_hierarchy(law_mst: str) -> dict:
                 "promulgation_no": pick(d, "공포번호"),
             })
 
-    # 위임행정규칙 — 어느 단계 아래에 붙어 있는지 함께 기록합니다.
     for level in ("법률", "시행령", "시행규칙"):
         for parent in root.findall(f".//{level}"):
             for ar in parent.findall("행정규칙"):
-                for kind_node in ar:                    # <예규> / <고시> / <훈령> …
+                for kind_node in ar:
                     info = kind_node.find("기본정보")
                     if info is None:
                         continue
@@ -925,8 +819,8 @@ def get_hierarchy(law_mst: str) -> dict:
                         continue
                     seen.add(rid)
                     admruls.append({
-                        "level": level,                 # 어느 법령에 위임됐는지
-                        "kind": kind_node.tag,          # 고시 / 예규 …
+                        "level": level,
+                        "kind": kind_node.tag,
                         "id": rid,
                         "name": pick(d, "행정규칙명"),
                         "enforced": pick(d, "시행일자"),
@@ -936,58 +830,11 @@ def get_hierarchy(law_mst: str) -> dict:
     return {"laws": laws, "admruls": admruls}
 
 
-# =====================================================================
-# 위임법령 조회 — 법률 조문이 어느 시행령·시행규칙 조문에 위임됐는지
-# =====================================================================
-# ★ 2026-08-18 — 실제 응답을 실측했습니다.
-#   (/api/raw?target=lsDelegated&value=000160&mode=detail — 토양환경보전법)
-#   구조가 **3단 중첩**입니다. 예전 파서는 `조문번호` 와 위임 대상 필드가
-#   같은 엘리먼트의 직계 자식이라고 가정했는데, 실제로는 서로 다른 형제
-#   가지에 들어 있어서 **항상 빈 리스트를 돌려주고 있었습니다.**
-#
-#   <lsDelegated><법령>
-#     <법령정보>…</법령정보>
-#     <위임조문정보>                       ← 법률 조문 1개당 1블록
-#       <조정보>                           ← ★ 법률 쪽 조문번호는 여기
-#         <조문번호>4</조문번호>
-#         <조문가지번호>2</조문가지번호>    (가지조문일 때만 옵니다)
-#         <조문제목>토양오염의 우려기준</조문제목>
-#       </조정보>
-#       <위임정보>                          ← 여러 개 반복
-#         <위임구분>시행령</위임구분>
-#         <위임법령일련번호>284891</위임법령일련번호>
-#         <위임법령제목>토양환경보전법 시행령</위임법령제목>
-#         <위임법령조문정보>                ← 여러 개 반복. ★ 대상 조문번호는 여기
-#           <위임법령조문번호>6</위임법령조문번호>
-#           <위임법령조문가지번호>2</위임법령조문가지번호>   (있을 때만)
-#           <위임법령조문제목>…</위임법령조문제목>
-#           <링크텍스트>대통령령</링크텍스트>
-#           <라인텍스트>…</라인텍스트>
-#           <조항호목>제12조제1항</조항호목>  ← 법률 쪽 몇 항/호에서 위임했는지
-#         </위임법령조문정보>
-#       </위임정보>
-#       <위임정보>                          ← 위임행정규칙은 모양이 다릅니다
-#         <위임구분>위임행정규칙</위임구분>
-#         <위임행정규칙조문정보>            ← 제목·일련번호가 ★이 안에★ 있고
-#           <위임행정규칙일련번호>2100000072350</위임행정규칙일련번호>
-#           <위임행정규칙제목>토양지하수정보시스템 … 규정</위임행정규칙제목>
-#           <링크텍스트>기후에너지환경부장관이 정한다</링크텍스트>
-#           <조항호목>제4조의3제2항</조항호목>
-#         </위임행정규칙조문정보>            ← 조문번호는 아예 안 옵니다
-#       </위임정보>
-#     </위임조문정보>
-#   </법령></lsDelegated>
-#
-#   실측 분포(토양환경보전법 = 위임조문정보 55블록, 위임정보 102개):
-#     인용법령 38 · 시행령 28 · 시행규칙 25 · 위임행정규칙 5 · 위임구분없음 6
-#
 #   ※ `위임구분`·제목·일련번호가 **통째로 없는** <위임정보> 가 6건 있습니다.
 #     <위임법령조문정보> 만 덜렁 옵니다. 어느 법령의 조문인지 알 방법이
 #     없으므로 **버립니다.** 바로 앞 형제의 제목을 물려받게 하면
 #     "「토양환경보전법 시행규칙」 제4조의2" 처럼 실재하지 않는 인용을
 #     만들어 내서, 안 붙이느니만 못합니다.
-#
-# 종류별 (제목 필드, 일련번호 필드, 조문번호 필드, 우리 라벨, 본문 조회 target)
 DELEGATED_KINDS = (
     ("위임법령제목",     "위임법령일련번호",     "위임법령조문번호",     "법령",       "law"),
     ("위임행정규칙제목", "위임행정규칙일련번호", "위임행정규칙조문번호", "행정규칙",   "admrul"),
@@ -996,10 +843,6 @@ DELEGATED_KINDS = (
     ("조약제목",         "조약일련번호",         "조약조문번호",         "조약",       ""),
 )
 
-# 위임구분별 정렬 우선순위(작을수록 먼저).
-# `인용법령` 은 위임이 아니라 단순 상호참조인데 건수가 압도적입니다
-# (실측 455건 중 354건). 호출부는 조문당 앞에서 몇 개만 잘라 쓰므로,
-# 정렬을 안 해두면 정작 필요한 시행령·시행규칙이 밀려서 안 보입니다.
 _DELE_RANK = {"시행령": 0, "시행규칙": 1, "위임행정규칙": 2,
               "위임자치법규": 3, "인용법령": 8}
 
@@ -1056,15 +899,12 @@ def get_delegated(law_id: str) -> list[dict]:
         jo_title = (jo_info.findtext("조문제목") or "").strip()
 
         for wi in blk.findall("위임정보"):
-            # <위임정보> 직계의 스칼라 필드(위임구분·위임법령제목·일련번호).
-            # 위임행정규칙은 이게 `위임구분` 하나뿐이고 나머지는 아래 조문정보
-            # 안에 들어 있어서, 두 곳을 합쳐서 봅니다.
             head = {c.tag: (c.text or "").strip()
                     for c in wi if len(c) == 0 and (c.text or "").strip()}
             kind_raw = head.get("위임구분", "")
 
             for info in wi:
-                if len(info) == 0:          # 스칼라 필드는 건너뜁니다
+                if len(info) == 0:
                     continue
                 d = dict(head)
                 d.update({c.tag: (c.text or "").strip()
@@ -1081,8 +921,6 @@ def get_delegated(law_id: str) -> list[dict]:
                         kind_label, tgt = label, tg
                         break
                 if not title:
-                    # 제목이 없으면 어느 법령인지 특정할 수 없습니다.
-                    # (실측 6건. 위 주석 참고 — 물려받게 하면 오히려 위험)
                     continue
 
                 # ★ 조문번호가 `0` 으로 오는 경우가 있습니다(실측: 법 제12조 →
@@ -1100,7 +938,6 @@ def get_delegated(law_id: str) -> list[dict]:
                         "조문가지번호": jo_gaji,
                         "조문제목": jo_title,
                         "위임구분": kind_raw or kind_label,
-                        # ↓ 하위 호환용(예전 키 이름으로 읽는 코드가 있어도 동작)
                         "위임법령제목": title,
                         "위임법령조문번호": t_jo,
                         "위임법령조문가지번호": t_gaji,
@@ -1167,9 +1004,6 @@ def delegation_map(law_id: str) -> dict:
     return m
 
 
-# =====================================================================
-# JO 파라미터 — 법령 전체가 아니라 특정 조문 하나만 받기
-# =====================================================================
 def _jo_code(no, gaji="") -> str:
     """
     조문번호(+가지번호)를 JO 파라미터용 6자리 코드로 만듭니다.
@@ -1192,7 +1026,7 @@ def _jo_code(no, gaji="") -> str:
     if len(raw) >= 6:
         return raw[:6]
     if len(raw) == 5:
-        return raw.zfill(6)          # 앞자리 0 이 유실된 경우
+        return raw.zfill(6)
     g = re.sub(r"\D", "", str(gaji or "")) or "0"
     try:
         return f"{int(raw):04d}{int(g):02d}"
@@ -1326,7 +1160,6 @@ def get_delegated_articles(law_id: str, jo_no="", jo_gaji="",
             "출처": "위임법령", "articles": [], "note": "",
         }
 
-        # 조문번호가 오는 것은 법령(시행령·시행규칙·인용법령)뿐입니다.
         if not (tgt == "law" and jo):
             item["note"] = (f"{r['_kind']} 위임 — 법제처가 조문번호를 주지 않습니다. "
                             f"이름만 근거로 쓰세요.")
@@ -1362,11 +1195,7 @@ def get_delegated_articles(law_id: str, jo_no="", jo_gaji="",
     return out
 
 
-# =====================================================================
-# 법률명 약칭 조회 — "영"/"규칙" 축약 말고, 공식 약칭(예: 개인정보법 등)
-# =====================================================================
 # query 파라미터가 없는 API라 전체를 페이지로 받아야 합니다.
-# 프로세스 수명 동안 한 번만 받고 캐시합니다 (자주 안 바뀌는 데이터).
 _ABBR_CACHE: dict = {"data": None}
 
 
@@ -1394,16 +1223,9 @@ def get_abbreviations(max_pages: int = 30) -> dict:
         if not rows:
             break
         # ★ lsAbrv 는 요청변수 목록에 `page` 가 없습니다(매뉴얼 확인).
-        #   서버가 page 를 무시하면 1페이지를 30번 받게 되므로, 새로 들어온
-        #   항목이 하나도 없으면 거기서 끊습니다. page 를 지원하면 이 조건은
-        #   걸리지 않으니 양쪽 다 안전합니다.
         before = len(mapping)
         for row in rows:
             d = _elem_to_dict(row)
-            # ★ 2026-08-19 — 목록 응답의 법령명 태그는 밑줄 있는 "법령명_한글" 이
-            #   1순위입니다(NAME_KEYS 참고). 여기만 밑줄 없는 하나에 폴백 없이
-            #   걸려 있어서, 태그가 다르면 표가 통째로 비고 약칭 복구 단계
-            #   전체가 조용한 no-op 이 됩니다. 실측 못 한 필드라 넓게 받습니다.
             full = pick(d, "법령명_한글", "법령명한글", "법령명")
             abbr = pick(d, "법령약칭명", "약칭명", "법령약칭")
             if full and abbr:
@@ -1413,8 +1235,6 @@ def get_abbreviations(max_pages: int = 30) -> dict:
         if len(rows) < 100:
             break
 
-    # ★ 빈 표는 캐시하지 않습니다. 한 번의 일시적 실패가 프로세스 수명 내내
-    #   약칭 복구를 죽여 버립니다(재시작 전까지 복구 불가).
     if not mapping:
         return mapping
     _ABBR_CACHE["data"] = mapping
@@ -1434,16 +1254,8 @@ def resolve_abbrev(name: str) -> str:
     return table.get(_norm_name(name), name)
 
 
-# =====================================================================
-# v1.35 — 법령 연혁(개정 이력)과 개정 전 본문
-# =====================================================================
-# 실사용 2026-10-10: "불소 우려기준이 2024년 12월 12일에 바뀌었는데 몇에서 몇으로?" — 현행 본문만 보던 탓에
-# "변경되지 않았다" 고 답함. 개정 전 버전 본문을 받아 비교해야 답할 수 있습니다.
-#
-# [실측으로 확정한 것]
 #   · lawSearch target=law 는 nw·efYd 를 줘도 현행 1건만 돌려줍니다(연혁 목록 불가).
 #   · target=lsHistory 는 **HTML 만** 줍니다. 표 한 줄 = 한 버전이고, 링크에 MST(법령일련번호)·efYd(시행일)가 있습니다.
-#     예) 토양환경보전법 시행규칙: 41건 — 267141(2024.12.12 일부개정, 환경부령 제1134호) …
 #   · 검색어가 부분일치라 "토양환경보전법" 으로 찾으면 시행령 줄도 섞여 옵니다 → 법령명으로 한 번 더 거릅니다.
 #   · 개정 전 버전 본문은 lawService target=law 에 **MST** 로 조회합니다.
 _HIST_ROW = re.compile(r"<tr[\s\S]*?</tr>")
@@ -1484,17 +1296,7 @@ def get_detail_mst(mst: str) -> dict:
     return _get_detail_once("law", str(mst), key="MST")
 
 
-# =====================================================================
-# v1.36 — 참고 사례: 법제처 법령해석례(expc) · 중앙부처 1차 해석(…CgmExpc) · 판례(prec)
-#   답변 아래에 "비슷한 질의·판결" 을 참고로 보여줄 때 씁니다(LLM 에는 넣지 않음).
-#   실측(2026-10-13, /api/raw):
-#     목록  expc   : 법령해석례일련번호·안건명·안건번호·질의기관명·회신기관명·회신일자
-#           meCgmExpc: 법령해석일련번호·안건명·해석기관명·해석일자(빈 칸 많음)·데이터기준일시
-#           prec   : 판례일련번호·사건명·사건번호·선고일자·법원명·데이터출처명
-#     본문  expc/…CgmExpc: 안건명·질의요지·회답·이유 (부처 해석은 관련법령·해석일자 빈 칸 많음)
-#           prec   : 사건명·사건번호·선고일자·법원명·판시사항·판결요지·참조조문
 #   주의: 목록의 상세링크에는 인증키(OC)가 들어 있으므로 화면에 그대로 내보내지 않습니다.
-# =====================================================================
 # 소관부처 → 부처 해석 target. 본문을 주지 않는 재정경제부(moef)·국세청(nts)은 뺐습니다.
 CGM_TARGETS = {
     "기후에너지환경부": "meCgmExpc", "환경부": "meCgmExpc",
@@ -1518,7 +1320,7 @@ CGM_TARGETS = {
 def cgm_target(ministry: str) -> str:
     """소관부처 이름(여러 개면 쉼표 등으로 이어짐)에서 첫 번째로 맞는 부처 해석 target."""
     s = re.sub(r"\s+", "", str(ministry or ""))
-    for name in sorted(CGM_TARGETS, key=len, reverse=True):      # 긴 이름 먼저(기후에너지환경부 > 환경부)
+    for name in sorted(CGM_TARGETS, key=len, reverse=True):
         if name in s:
             return CGM_TARGETS[name]
     return ""

@@ -39,7 +39,6 @@ TIMEOUT = 30
 HERE = os.path.dirname(os.path.abspath(__file__))
 OUT_DIR = os.path.join(HERE, "_dump")
 
-# 별표 4(토양오염검사주기)를 인용하는 법령이라 확인용으로 딱 맞습니다.
 DEFAULT_LAW = "토양환경보전법 시행규칙"
 
 
@@ -115,7 +114,6 @@ def find_law(oc: str, name: str) -> dict:
     if not rows:
         sys.exit(f"[중단] '{name}' 검색 결과 0건.")
 
-    # 법령명이 정확히 일치하는 것을 우선합니다.
     for d in rows:
         nm = (d.get("법령명한글") or d.get("법령명_한글") or "").replace(" ", "")
         if nm == want:
@@ -138,13 +136,11 @@ def report(tag_label: str, xml_text: str, fname: str) -> None:
         print(f"  앞부분: {xml_text[:300]}")
         return
 
-    # --- 루트 바로 아래 구조 -------------------------------------
     print("  루트 <%s> 직계 자식: %s" % (
         root.tag,
         ", ".join(f"<{c.tag}>({len(c)})" for c in root) or "(없음)",
     ))
 
-    # --- 별표 관련 태그가 어디에 어떤 경로로 있는지 --------------
     def walk(node, path_parts):
         for c in node:
             cur = path_parts + [c.tag]
@@ -159,7 +155,6 @@ def report(tag_label: str, xml_text: str, fname: str) -> None:
         print("      → law_client.py:59-63 주석이 맞음. get_byeolpyo() 우회 유지 필요.")
         return
 
-    # 경로별로 몇 개인지
     counts = {}
     for p, _ in hits:
         counts[p] = counts.get(p, 0) + 1
@@ -167,13 +162,11 @@ def report(tag_label: str, xml_text: str, fname: str) -> None:
     for p, n in sorted(counts.items()):
         print(f"        {p}  x{n}")
 
-    # --- law_client.py 가 쓰는 XPath 가 맞는지 -------------------
     units = root.findall(".//별표단위")
     print(f"\n  law_client.py:403 의 XPath './/별표단위' → {len(units)} 건")
     if not units:
         print("      >>> XPath 불일치! 위 경로를 보고 findall 을 고쳐야 합니다.")
 
-    # --- 실제 값 확인 (앞 8건) ----------------------------------
     targets = units or [c for _, c in hits if len(c) > 0]
     if not targets:
         return
@@ -193,7 +186,6 @@ def report(tag_label: str, xml_text: str, fname: str) -> None:
             len(body), (g("별표제목") or "(제목없음)")[:34],
         ))
 
-    # --- 판정 --------------------------------------------------
     nos = []
     for u in targets:
         el = u.find("별표번호")
@@ -250,17 +242,14 @@ def main() -> None:
     if not law_id:
         sys.exit("[중단] 법령ID 를 못 얻었습니다. _dump\\00_search_eflaw.xml 확인하세요.")
 
-    # 시행일 기준 — 지금 코드가 기본으로 쓰는 경로입니다.
     report("target=eflaw  (ID=%s)" % law_id,
            get(SERVICE_URL, {"OC": oc, "target": "eflaw", "type": "XML", "ID": law_id}),
            "01_eflaw_detail.xml")
 
-    # 공포일 기준 — 되돌리기 경로.
     report("target=law  (ID=%s)" % law_id,
            get(SERVICE_URL, {"OC": oc, "target": "law", "type": "XML", "ID": law_id}),
            "02_law_detail.xml")
 
-    # 참고: 별표·서식 목록 조회(licbyl). get_byeolpyo() 가 쓰는 경로입니다.
     # 매뉴얼 PDF 가 없어 필드명이 전부 실측 추측이라 원본을 같이 떠 둡니다.
     try:
         report("target=licbyl  (query=%s, search=2)" % law_name,

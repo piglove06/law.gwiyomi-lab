@@ -40,13 +40,13 @@ HERE = os.path.dirname(os.path.abspath(__file__))
 FLAG_DIR = os.path.join(HERE, "_cache", "flags")
 
 LOCK = threading.RLock()                 # ai_client._call_local 도 이 잠금을 씁니다
-PREFIX_STAGES = ("answer", "clarify")    # 고정 앞부분이 큰 단계(답변 지시문 약 8천 자, 되묻기 약 2천 자)
+PREFIX_STAGES = ("answer", "clarify")
 MIN_PREFIX_CHARS = 1500
 CHAIN_TTL = 900.0
 
 _STATE = {"tpl": None, "tpl_fail_t": 0.0, "eog": None, "slots_ok": None, "slots_fail_t": 0.0}
-_PFX: dict = {}                          # stage → {"last", "text", "ids", "file"}
-_TL = threading.local()                  # 요청 스레드별 '방금 쓴 답변' 이어 쓰기 정보
+_PFX: dict = {}
+_TL = threading.local()
 
 
 def _chain_enabled() -> bool:
@@ -162,7 +162,6 @@ def complete(parts: list, temperature: float, max_tokens: int, stage: str, schem
     return str(d.get("content") or ""), list(d.get("tokens") or []), cache_n
 
 
-# ── ② 고정 앞부분 상태 저장·복원 ─────────────────────────────────
 def _prefix_parts(stage: str, full: str):
     """
     full(템플릿까지 씌운 프롬프트)의 고정 앞부분을 복원해 쓸 수 있으면 [앞부분 토큰들…, 나머지 글자] 와
@@ -187,7 +186,6 @@ def _prefix_parts(stage: str, full: str):
             st["ids"] = _tokenize(st["text"])
         name = f"pfx_{stage}_{hashlib.sha1(st['text'].encode('utf-8')).hexdigest()[:12]}.bin"
         if st["file"] != name:
-            # 처음: 앞부분만 처리해 저장(이 처리는 이번 호출이 어차피 해야 할 일 — 바로 이어서 씀)
             complete(list(st["ids"]), 0.0, 0, stage + "_pfx", slot=0)
             r = httpx.post(f"{_root()}/slots/0?action=save", json={"filename": name}, timeout=60)
             if r.status_code >= 400:
@@ -218,7 +216,7 @@ def prefix_call(prompt: str, temperature: float, max_tokens: int, stage: str, sc
     with LOCK:
         parts, restored = _prefix_parts(stage, head + prompt + tail)
         if not restored:
-            return None                                  # 저장된 앞부분이 없으면 예전 방식 그대로
+            return None
         try:
             text, _, _ = complete(parts, temperature, max_tokens, stage, schema=schema, slot=0)
             return text
@@ -227,7 +225,6 @@ def prefix_call(prompt: str, temperature: float, max_tokens: int, stage: str, sc
             return None
 
 
-# ── ① 답변 → 검토 이어 쓰기 ────────────────────────────────────
 def answer_call(prompt: str, temperature: float, max_tokens: int, stage: str = "answer"):
     """답변을 부르고 이어 쓰기 정보를 기억합니다. 실패하면 None(→ 예전 방식)."""
     if not enabled():
@@ -264,7 +261,7 @@ def chain_call(answer_text: str, user2: str, temperature: float, max_tokens: int
     answer_text 가 기억해 둔 답변과 다르거나(다시 쓴 답 등) 쓸 수 없으면 None(→ 예전 방식).
     """
     ch = getattr(_TL, "chain", None)
-    if not _chain_enabled():                 # ★ v1.49a — 기본 꺼짐(위 _chain_enabled 설명)
+    if not _chain_enabled():
         return None
     if not ch or not enabled() or time.time() - ch["t"] > CHAIN_TTL:
         return None
@@ -295,11 +292,6 @@ def chain_call(answer_text: str, user2: str, temperature: float, max_tokens: int
         return None
 
 
-# ── ★ v1.49a — llama-server 한 번 다시 띄우기(실행 옵션 반영용) ─────────────────
-# _cache\\flags\\llm_restart_once 파일이 있으면 서버(이 프로그램)가 그 파일을 지우고, 5초 뒤
-# ai_client.restart_local_llm()(워치독이 쓰는 것과 같은 재시작: LLM 창 정리 → _5_restart_llm.bat)을 한 번 부릅니다.
-# start.bat·_5_restart_llm.bat 의 --slot-save-path 같은 새 옵션을 사람이 창을 닫지 않고 반영하려고 넣었습니다.
-# 파일을 먼저 지우므로 한 번만 동작합니다. 되돌리기: 아래 함수와 호출 삭제.
 def _restart_once() -> None:
     p = os.path.join(FLAG_DIR, "llm_restart_once")
     if not os.path.exists(p):

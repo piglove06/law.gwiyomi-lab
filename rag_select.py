@@ -49,16 +49,15 @@ def _num_env(name: str, default):
         return default
 
 
-TOPK = _num_env("RAG_TOPK", 12)          # 유사도 상위 몇 개를 후보로 볼지
-MAX_ADD = _num_env("RAG_MAX_ADD", 6)    # 선별 결과에 최대 몇 개를 덧붙일지
-DOC_CHARS = _num_env("RAG_DOC_CHARS", 6000)   # 긴 별표는 앞부분만 색인(속도)
+TOPK = _num_env("RAG_TOPK", 12)
+MAX_ADD = _num_env("RAG_MAX_ADD", 6)
+DOC_CHARS = _num_env("RAG_DOC_CHARS", 6000)
 
-# (선택) 임베딩 — 비어 있으면 BM25 만 씁니다.
-EMBED_URL = os.getenv("EMBED_URL", "").strip()          # 예: http://127.0.0.1:8081/v1/embeddings
+EMBED_URL = os.getenv("EMBED_URL", "").strip()
 EMBED_MODEL = os.getenv("EMBED_MODEL", "embed").strip()
 EMBED_QPREFIX = os.getenv("EMBED_QPREFIX", "")         # e5 계열이면 "query: "
 EMBED_DPREFIX = os.getenv("EMBED_DPREFIX", "")         # e5 계열이면 "passage: "
-EMBED_BUDGET = _num_env("EMBED_BUDGET", 20.0)  # 한 질문에서 임베딩 계산에 쓸 최대 초
+EMBED_BUDGET = _num_env("EMBED_BUDGET", 20.0)
 RRF_K = 60
 
 
@@ -69,7 +68,6 @@ def enabled(name: str = "select") -> bool:
     return os.path.exists(os.path.join(FLAG_DIR, "rag_" + name))
 
 
-# ── 토큰화: 글자 2-gram ───────────────────────────────────────────
 _WORD = re.compile(r"[가-힣a-zA-Z0-9]+")
 
 
@@ -83,7 +81,6 @@ def _tok(text: str) -> list:
     return out
 
 
-# 되묻기 답에서 검색에 도움이 안 되는 말(보기 문구)
 _ANS_NOISE = re.compile(r"(모름|모르겠|해당\s*없음|기타|잘\s*모르)")
 
 
@@ -92,8 +89,6 @@ def query_text(question: str, answered: str = "") -> str:
     return (question or "") + ("\n" + a if a.strip() else "")
 
 
-# ── 질의 확장 ① 검색어 변환 결과(무료 — 이미 LLM 이 만든 법령 용어) ─────────────
-#   1라운드 검색 단계의 '검색어 변환' 용어를 질문별로 기억해 두었다가 2라운드부터도 씁니다.
 _TERMS_MEMO: dict = {}
 
 
@@ -106,10 +101,6 @@ def remember_terms(question: str, terms) -> list:
     return _TERMS_MEMO.get(q, [])
 
 
-# ── 질의 확장 ② 가상 조문(HyDE / KoBLEX PARSER 1단계) — 스위치 rag_hyde, LLM 1회(짧게) ──
-#   질문은 생활어, 조문은 법령어라 글자가 잘 안 겹칩니다. LLM 에게 "답이 될 조문이라면 어떤 문장일지"를
-#   법령 문체로 2~3문장 쓰게 하고 그 문장을 검색어에 더합니다. 조문 번호는 지어낼 수 있어 지웁니다.
-#   쓰는 곳은 **검색어뿐** — 답변·되묻기에는 들어가지 않습니다(틀린 내용이 근거로 쓰이지 않게).
 HYDE_PROMPT = """아래 질문에 답이 되는 한국 법령 조문이 있다면 어떤 문장일지, 법령 문체로 2~3문장만 써라.
 - 법령명과 조문 번호(제○조)는 쓰지 마라.
 - 대상·요건·행위·기준·처분·예외를 법령에서 쓰는 용어로 쓴다. 질문의 일상 표현은 법령 용어로 바꾼다(예: 가게 → 영업소).
@@ -127,7 +118,7 @@ def hyde(question: str, answered: str = "") -> str:
     key = ((question or "").strip(), (answered or "").strip())
     if key in _HYDE_MEMO:
         return _HYDE_MEMO[key]
-    import ai_client                        # 지연 import (순환 방지)
+    import ai_client
     q = query_text(question, answered)
     raw = ai_client._call(HYDE_PROMPT.format(q=q), temperature=0, max_tokens=HYDE_MAXTOK, stage="hyde")
     txt = _ART_NO.sub(" ", str(raw or "")).strip()[:600]
@@ -156,7 +147,6 @@ def _is_form(a: dict) -> bool:
     return a.get("구분") in ("별지", "서식") or t.startswith(("[별지", "[서식"))
 
 
-# 토큰화 결과 메모(같은 조문을 라운드마다 다시 자르지 않게). 텍스트 해시 → Counter
 _BAG_MEMO: dict = {}
 _BAG_LOCK = threading.Lock()
 
@@ -196,7 +186,6 @@ def bm25_scores(query: str, docs: list, k1: float = 1.2, b: float = 0.75) -> lis
     return out
 
 
-# ── (선택) 임베딩: llama-server /v1/embeddings + sqlite 캐시 ───────────
 _EMB_LOCK = threading.Lock()
 
 
@@ -208,7 +197,7 @@ def _emb_db():
 
 
 def _post_embed(texts: list, timeout: float) -> list:
-    import httpx  # requirements.txt 에 이미 있음
+    import httpx
     r = httpx.post(EMBED_URL, json={"model": EMBED_MODEL, "input": texts}, timeout=timeout)
     r.raise_for_status()
     data = sorted(r.json()["data"], key=lambda x: x.get("index", 0))
@@ -257,7 +246,7 @@ def embed_scores(query: str, docs: list) -> list | None:
     for i in range(0, len(missing), batch):
         left = EMBED_BUDGET - (time.time() - t0)
         if left <= 1:
-            _flush()                        # 이번 질문은 BM25 만. 계산해 둔 것은 저장해 다음에 씀
+            _flush()
             return None
         idx = missing[i:i + batch]
         embs = _post_embed([EMBED_DPREFIX + docs[j] for j in idx], timeout=left)
@@ -292,7 +281,7 @@ def rank(query: str, pairs: list) -> list:
     used = "BM25"
     try:
         em = embed_scores(query, docs)
-    except Exception:                       # noqa: BLE001 — 임베딩은 보조. 실패하면 BM25 만
+    except Exception:                       # noqa: BLE001
         em = None
     if em is not None:
         sc = _rrf(bm, em)
@@ -317,7 +306,7 @@ def augment(question: str, answered: str, flat: list, picked: list, keyfn, label
         if enabled("hyde"):
             try:
                 hy = hyde(question, answered)
-            except Exception:               # noqa: BLE001 — 확장 실패면 확장 없이
+            except Exception:               # noqa: BLE001
                 hy = ""
             if hy:
                 q += "\n" + hy
@@ -361,12 +350,6 @@ def order_for_clarify(question: str, answered: str, prim: list, bps: list):
         return None
 
 
-# ── v1.41 참조 조문 확장(스위치 rag_refs) ─────────────────────────────────────────
-#   기존(v1.32·v1.34): 하위법령의 '법/영 제N조' → 상위 조문, 법제처 위임 데이터 → 하위 조문.
-#   여기서 더하는 두 가지(둘 다 이미 받은 조문 목록 flat 안에서만 찾음 — 법제처 호출 없음):
-#     ① 같은 법령 안 참조: 본문의 "제75조제1항에 따른 …" → 같은 법령 제75조 (다른 법 이름이 바로 앞에 있으면 제외)
-#     ② 위임 데이터에 없을 때 글자로 찾는 하위 조문: 법률 제N조 → 시행령·시행규칙 중 "법 제N조" 를 적은 조문
-#   KoBLEX(2025): 법령 질문의 3/4이 조문 2~3개를 이어 봐야 풀림.
 _REF = re.compile(r"제\s*(\d+)\s*조(?:\s*의\s*(\d+))?")
 
 
@@ -388,14 +371,13 @@ def ref_expand(use: list, flat: list, have_k: set, max_add: int = 3, scan: int =
             nm = f.get("name", "")
             body = a.get("조문내용", "") or ""
             me = (nm, _nk(a.get("조문번호")), _nk(a.get("조문가지번호")))
-            # ① 같은 법령 안 참조 (조문 하나당 2개까지 — ② 하위 조문 자리를 남김)
             n_same = 0
             for m in _REF.finditer(body):
                 if n_same >= 2:
                     break
                 before = body[max(0, m.start() - 12):m.start()].rstrip()
                 if before.endswith(("」", "법", "영", "규칙", "령", "같은 법", "같은 영")):
-                    continue                # 다른 법령·상위/하위 법령 참조(기존 v1.32 가 처리)
+                    continue
                 k = (nm, m.group(1), _nk(m.group(2)))
                 if k == me or k in have_k or k not in idx:
                     continue
@@ -404,7 +386,6 @@ def ref_expand(use: list, flat: list, have_k: set, max_add: int = 3, scan: int =
                 n_same += 1
                 if len(out) >= max_add:
                     break
-            # ② 법률 조문 → 그 조문을 "법 제N조" 로 적은 하위 조문(위임 데이터가 비었을 때 보완)
             if len(out) < max_add and f.get("level") == "법률" and me[1]:
                 pat = re.compile(r"(?<![가-힣」])법\s*제\s*" + me[1] + r"\s*조" +
                                  (r"\s*의\s*" + me[2] if me[2] else r"(?!\s*의\s*\d)"))
@@ -416,21 +397,19 @@ def ref_expand(use: list, flat: list, have_k: set, max_add: int = 3, scan: int =
                     bb = b.get("조문내용", "") or ""
                     if pat.search(bb):
                         k = (gn, _nk(b.get("조문번호")), _nk(b.get("조문가지번호")))
-                        # 여러 조문을 나열하는 일반 조문(민감정보 처리·권한 위임·과태료 등)은 빼고,
-                        # 법 조문을 적게 언급할수록(그 조문 전용일수록) 앞에 둡니다.
                         nref = len(set(re.findall(r"법\s*제\s*(\d+)\s*조", bb)))
                         if k[1] and k not in have_k and nref <= 4:
                             cands.append((nref, len(cands), k, (g, b)))
                 if cands:
                     _n, _i, k, gb = min(cands)
                     have_k.add(k)
-                    out.append(gb)              # 조문 하나당 하위 1개만
+                    out.append(gb)
         return out
     except Exception:                       # noqa: BLE001
         return []
 
 
-if __name__ == "__main__":                  # 간단 자가 점검: python rag_select.py
+if __name__ == "__main__":
     f = {"name": "하천법"}
     flat = [(f, {"조문번호": "33", "조문제목": "하천의 점용허가 등",
                  "조문내용": "가축을 방목하거나 사육하는 행위(등록대상동물을 위한 운동ㆍ휴식 시설을 설치하는 경우는 제외한다)"}),

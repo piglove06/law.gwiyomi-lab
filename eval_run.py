@@ -38,10 +38,8 @@ import urllib.parse
 import urllib.request
 from datetime import datetime
 
-# ★ 2026-08-20 — watch_and_test.py 가 이 파일을 서브프로세스로 돌리면 stdout 이
 #   콘솔이 아니라 파이프로 리다이렉트됩니다. 그러면 Windows 에서 인코딩이
 #   cp949(콘솔 코드페이지)로 잡혀서 ✅/❌/✗ 같은 문자를 못 쓰고 UnicodeEncodeError 로
-#   죽었습니다 (5번째 시나리오에서 처음 실패 항목이 나오며 거기서 죽었습니다).
 #   출력 인코딩을 강제로 UTF-8 로 고정합니다.
 try:
     sys.stdout.reconfigure(encoding="utf-8", errors="replace")
@@ -52,8 +50,6 @@ except Exception:                                 # noqa: BLE001
 HERE = os.path.dirname(os.path.abspath(__file__))
 CASES = os.path.join(HERE, "eval_cases.json")
 
-# ★ 2026-08-20 — main.py 에 비밀번호 로그인(APP_PASSWORD)이 생긴 뒤로
-#   /api/ask 가 전부 401 을 냈습니다. 로그인해서 받은 쿠키를 붙여야 합니다.
 #   main.py 의 로그인 쿠키는 secure=True 라 urllib 의 자동 쿠키 처리(http.cookiejar)가
 #   로컬 http 접속에는 다시 안 붙여줍니다(문서화된 제약). 그래서 자동 처리에
 #   맡기지 않고, 로그인 응답의 Set-Cookie 값을 직접 읽어 매 요청에 수동으로 붙입니다.
@@ -112,9 +108,6 @@ def login(base: str) -> str:
 OUTDIR = os.path.join(HERE, "_eval")
 
 
-# =====================================================================
-# 서버 호출
-# =====================================================================
 def ask(base: str, payload: dict, timeout: float = 600.0) -> dict:
     """
     /api/ask 는 NDJSON 스트림입니다. 한 줄씩 오고 종류가 섞여 있습니다.
@@ -160,9 +153,6 @@ def ask(base: str, payload: dict, timeout: float = 600.0) -> dict:
     return out
 
 
-# =====================================================================
-# 되묻기 자동 응답
-# =====================================================================
 # 되묻기가 "결론"을 사용자에게 되묻는 꼴 — ai_client.CONCLUSION_Q 와 같은 규칙
 # (이 파일은 표준 라이브러리만 쓰려고 import 하지 않고 복사해 둡니다)
 CONCLUSION_Q = re.compile(r"언제까지|야\s*(합니|하나요|하는지|할까요|됩니|되나요|하는가)")
@@ -181,15 +171,6 @@ def pick_option(question: str, options: list, answers: dict, default: str) -> st
       "모름"  — 모름 계열 보기를 고릅니다 (없으면 마지막)
       "first" — 첫 보기
     """
-    # ★ 2026-10-29 (RAG 진단 해석30·34·37) — 자동 응답이 엉뚱한 값을 넣었습니다.
-    #   · "지역" 키가 "재해취약지역에 포함됩니까?(예/아니오)" 에 걸려 '관리지역' 을 자유 입력으로 넣음(해석30)
-    #   · "시설" 키가 "등록대상동물입니까?" 에 걸려 '반려견 운동·휴식시설' 을 넣음(해석37)
-    #   → ① 질문에 든 키 중 **긴(구체적인) 키부터** 봅니다.
-    #     ② 보기가 예/아니오 꼴인데 원하는 값이 보기와 안 맞으면: 그 값이 질문 문장에 들어 있으면 '예'
-    #        ("3년 이상입니까?" ← "3년 이상"), 아니면 그 키는 건너뜁니다(자유 입력으로 넣지 않음).
-    #   되돌리기: 아래를 예전 반복문(dict 순서, 무조건 자유 입력)으로.
-    #   ③ (10-30 보정) 예/아니오 꼴 = '아니오' 보기가 있는 문항. 긍정 보기는 '예' 가 아니라 용어일 수 있습니다
-    #     (["등록대상동물", "아니오", "모름"]) — '예' 를 원하면 그 긍정 보기를 고릅니다.
     _ns = lambda t: re.sub(r"\s+", "", str(t or ""))
     is_yn = any(re.match(r"^아니", str(o)) for o in options)
     neg = [o for o in options if re.match(r"^아니", str(o))]
@@ -212,7 +193,7 @@ def pick_option(question: str, options: list, answers: dict, default: str) -> st
             if pos and _ns(want) and _ns(want) in _ns(question):
                 return pos
             continue
-        return want                          # 보기에 없으면 자유 입력값으로
+        return want
     if default == "first" and options:
         return options[0]
     for o in options:
@@ -231,16 +212,16 @@ def run_case(base: str, case: dict, verbose: bool = True) -> dict:
 
     answered = ""
     rounds = []
-    clar_items = []          # 되묻기로 받은 질문·보기 원본 (채점용)
+    clar_items = []
     t0 = time.time()
-    laws = list(case.get("laws") or [])         # v1.33 — "참고할 법령" 지정 시나리오
-    laws_mode = case.get("laws_mode", "only")   # "only" 이 법령에서만 / "prefer" 우선 참고
-    prev = {"prev_question": case.get("prev_question", ""),          # v1.34 — 앞 질문에 이어서 묻기
+    laws = list(case.get("laws") or [])
+    laws_mode = case.get("laws_mode", "only")
+    prev = {"prev_question": case.get("prev_question", ""),
             "prev_laws": list(case.get("prev_laws") or []),
             "prev_conclusion": case.get("prev_conclusion", "")}
     data = ask(base, {"question": q, "target": case.get("target", "auto"),
                       "answered": "", "round": 0, "laws": laws, "laws_mode": laws_mode,
-                      "use_cache": False, **prev})   # v1.41 — 평가는 항상 새로 검색(저장본으로 통과하지 않게)
+                      "use_cache": False, **prev})
 
     r = 0
     while data.get("clarify") and r < max_rounds:
@@ -268,10 +249,6 @@ def run_case(base: str, case: dict, verbose: bool = True) -> dict:
     return data
 
 
-# =====================================================================
-# 채점
-# =====================================================================
-# ★ 2026-10-29 결론 중심 채점용
 _CONCL_RE = re.compile(r"【결론】(.*?)(?=【|\Z)", re.S)
 _COND_RE = re.compile(r"(경우|다면|라면|이면|으면|하면|되면|면\s*,|때에는|때는)")
 
@@ -327,8 +304,6 @@ def grade(case: dict, data: dict) -> dict:
         return {"checks": checks, "score": 0, "total": 1}
 
     answer = data.get("answer", "") or ""
-    # v1.39 (C-20261017-5) — 화면용 강조 표시(**굵게**, __밑줄__, !!강조!!)를 빼고 비교합니다.
-    #   "**85제곱미터 기준**이 아닌" 이 금지어 "85제곱미터 기준이 아닌" 에 안 걸려 통과하던 문제.
     answer = re.sub(r"\*\*|__|!!", "", answer)
     laws = [l.get("name", "") for l in (data.get("laws") or [])]
     cites = data.get("citations") or []
@@ -348,12 +323,6 @@ def grade(case: dict, data: dict) -> dict:
         alts = group if isinstance(group, list) else [group]
         ck(f"본문 포함(택1): {' | '.join(alts)}",
            any(re.sub(r"\s+", "", a) in flat for a in alts))
-    # ★ 2026-10-29 결론 중심 채점 — 판정은 【결론】 블록에서 봅니다.
-    #   expect_conclusion : [[대안…], …] 묶음마다 대안 하나가 【결론】에 있어야 함(공백 무시)
-    #   forbid_conclusion : 【결론】에 있으면 안 되는 말
-    #   그리고 expect_conclusion 이 모두 맞은 경우, forbid_text 가 **조건 문장**("~경우에는/~이면/~다면 …")에만
-    #   나오면 실패로 보지 않습니다 — '모름' 조건으로 경우를 나눈 답(해석30: "지구단위계획구역이면 허가")을
-    #   틀린 답으로 세던 문제. 판정이 결론과 다르면 expect_conclusion 에서 걸립니다.
     concl = _conclusion_block(answer)
     flat_c = re.sub(r"\s+", "", concl)
     ec_ok = None
@@ -371,8 +340,6 @@ def grade(case: dict, data: dict) -> dict:
             ck(f"본문 없어야: {bad}", True)
             continue
         sents = [x for x in re.split(r"(?<=[.。!?])\s+|\n", answer) if bad in x]
-        # ★ 2026-10-30 — 따옴표 안(옛 해석례를 옮겨 적은 말 등)도 같은 취급: 해석27 이 "법제처(2022)는 \"…명할 수 없습니다\"
-        #   라고 해석했으나 개정 전 조문 기준" 이라고 바르게 썼는데 금지어로 실패했습니다.
         def _quoted(x):
             head = x.split(bad)[0]
             return (head.count('"') % 2 == 1) or (head.count("“") > head.count("”"))
@@ -407,7 +374,6 @@ def grade(case: dict, data: dict) -> dict:
             if re.search(r"(방법|용법|기법|공법|수법|요법)$", t):
                 return False
             return bool(re.search(r"(법|법률|시행령|시행규칙)$", t)) and len(t) >= 4
-        # v1.33 — 서버가 일부러 묻는 "어느 법의 규정을 찾으시나요?" 는 법령명을 보기로 쓰는 것이 정상입니다.
         bad = [f"{it['question']} [{' / '.join(it.get('options') or [])}]"
                for it in (data.get("_clarify_items") or [])
                if not str(it.get("question", "")).startswith("어느 법의 규정")
@@ -415,19 +381,16 @@ def grade(case: dict, data: dict) -> dict:
         ck("되묻기에 법령 이름 없음", not bad, " | ".join(bad)[:200])
 
     if case.get("no_provision_in_clarify"):
-        # v1.34 — "별표 3 기준 이상/미만" 처럼 사용자가 알 수 없는 조문·별표를 보기로 내면 실패
         bad = [f"{it['question']} [{' / '.join(it.get('options') or [])}]"
                for it in (data.get("_clarify_items") or [])
                if any(re.search(r"(별표|별지|제\s*\d+\s*조)", o) for o in (it.get("options") or []))]
         ck("되묻기 보기에 조문·별표 없음", not bad, " | ".join(bad)[:200])
     if case.get("clarify_has_unknown"):
-        # v1.34 — 모든 되묻기 문항에 "모름" 보기가 있어야 함
         bad = [it["question"] for it in (data.get("_clarify_items") or [])
                if not any(str(o).startswith("모름") for o in (it.get("options") or []))]
         ck("되묻기마다 '모름' 보기 있음", not bad, " | ".join(bad)[:200])
 
     if case.get("forbid_clarify"):
-        # v1.35 — 질문에 이미 있는 사실(예: "기름" → 석유류)을 되묻기로 다시 물으면 실패
         bad = [f"{it['question']} [{' / '.join(it.get('options') or [])}]"
                for it in (data.get("_clarify_items") or [])
                for w in case["forbid_clarify"]
@@ -439,7 +402,6 @@ def grade(case: dict, data: dict) -> dict:
                if CONCLUSION_Q.search(it.get("question", "") or "")]
         ck("되묻기가 결론을 묻지 않음", not bad, " | ".join(bad)[:200])
 
-    # ── v1.31: 질문 유형 · 되묻기 없음 · 컨텍스트(검색 Recall) ──────────
     if case.get("expect_intent"):
         got = ((data.get("intent") or {}).get("kind")) or "(없음)"
         ck(f"질문 유형: {case['expect_intent']}", got == case["expect_intent"], f"실제 {got}")
@@ -461,7 +423,7 @@ def grade(case: dict, data: dict) -> dict:
             ck(f"컨텍스트 포함: {want}", hit,
                "토큰 예산으로 빠짐" if was_dropped else f"컨텍스트 {len(keys)}개 중 없음")
 
-    if not checks:                               # 기대값을 안 적었으면 최소 확인
+    if not checks:
         ck("답변이 비어 있지 않음", len(answer.strip()) > 20)
 
     return {"checks": checks,
@@ -469,9 +431,6 @@ def grade(case: dict, data: dict) -> dict:
             "total": len(checks)}
 
 
-# =====================================================================
-# 보고서
-# =====================================================================
 def write_report(results: list, base: str) -> str:
     os.makedirs(OUTDIR, exist_ok=True)
     stamp = datetime.now().strftime("%Y%m%d_%H%M%S")
@@ -488,7 +447,6 @@ def write_report(results: list, base: str) -> str:
     L.append(f"- 서버: {base}")
     L.append(f"- 시나리오: **{passed}/{len(results)} 통과**  "
              f"(세부 검사 {total_ok}/{total_all})")
-    # ── v1.31: 층별 지표 (어느 단계에서 틀리는지) ──────────────────
     def _layer(prefix):
         ok = tot = 0
         for r in results:
@@ -592,7 +550,6 @@ def write_report(results: list, base: str) -> str:
     return md_path
 
 
-# =====================================================================
 def main():
     ap = argparse.ArgumentParser()
     ap.add_argument("--base", default="http://127.0.0.1:8000")
@@ -603,13 +560,8 @@ def main():
     ap.add_argument("--probe-file", default="",
                     help="(진단용) 한 줄에 질문 하나. 서버 /api/raw 로 법제처 지능형 검색 원본 XML 을 "
                          "_eval/probe_ai_N.xml 로 저장하고 끝냅니다.")
-    # ★ v1.41b (2026-10-22) — 시나리오 동시 실행 개수. 기본 1 = 예전과 똑같이 하나씩.
-    #   되돌리기: 이 줄과 아래 "★ v1.41b" 블록을 지우고 "원래 반복문" 주석을 풀면 됩니다.
     ap.add_argument("--jobs", type=int, default=1,
                     help="v1.41b — 시나리오 N개를 동시에 돌립니다(최대 6). llama 슬롯이 1개면 3 정도가 적당")
-    # ★ v1.32 — `_eval\\ARGS` 파일이 있으면 그 내용을 인자로 한 번만 덧붙입니다(읽고 지움).
-    #   감시 프로그램을 다시 켜지 않아도 "다음 실행은 eval_extra.json 으로" 를 지정할 수 있습니다.
-    #   예) ARGS 내용: --cases eval_extra.json
     argv = sys.argv[1:]
     args_file = os.path.join(OUTDIR, "ARGS")
     if os.path.exists(args_file):
@@ -623,7 +575,6 @@ def main():
             print(f"_eval/ARGS 적용: {' '.join(extra)}")
             argv = argv + extra
     args = ap.parse_args(argv)
-    # 쉼표로 여러 파일을 이어 돌릴 수 있습니다: --cases eval_cases.json,eval_extra.json
     case_files = []
     for one in str(args.cases).split(","):
         one = one.strip().strip('"')
@@ -689,33 +640,13 @@ def main():
         with open(cf, encoding="utf-8") as f:
             cases += json.load(f)
     if args.only:
-        keys = [k for k in args.only.split("|") if k]       # "주유소|누출검사" 처럼 여러 개
+        keys = [k for k in args.only.split("|") if k]
         cases = [c for c in cases if any(k in c.get("name", "") for k in keys)]
     if not cases:
         print("실행할 시나리오가 없습니다.")
         return 2
 
-    # ── 원래 반복문(v1.41 까지) — 되돌릴 때 아래 ★ v1.41b 블록 대신 이 주석을 푸세요 ──
-    # results = []
-    # for i, case in enumerate(cases, 1):
-    #     name = case.get("name") or case["question"][:20]
-    #     print(f"[{i}/{len(cases)}] {name}")
-    #     data = run_case(args.base, case)
-    #     g = grade(case, data)
-    #     mark = "OK " if g["score"] == g["total"] else "FAIL"
-    #     print(f"    {mark}  {g['score']}/{g['total']}  ({data.get('_elapsed','?')}초)")
-    #     for c in g["checks"]:
-    #         if not c["ok"]:
-    #             print(f"      ✗ {c['name']}"
-    #                   + (f" — {c['detail'][:120]}" if c.get("detail") else ""))
-    #     results.append({"name": name, "case": case, "data": data, "grade": g})
 
-    # ★ v1.41b (2026-10-22) — --jobs N 이면 시나리오 N개를 동시에 돌립니다.
-    #   한 질문이 법제처 API 를 기다리는 동안 다른 질문이 LLM 을 쓰게 해서 전체 시간을 줄입니다.
-    #   (llama-server 슬롯이 1개면 LLM 호출은 서버에서 줄을 섭니다 — 너무 크면 LLM 시간 초과)
-    #   · jobs=1 이면 출력·순서·결과가 예전과 똑같습니다.
-    #   · 동시 실행 때는 되묻기 진행 줄을 찍지 않고(섞임 방지), 결과는 시나리오 **원래 순서대로** 찍습니다.
-    #   · 동시 실행 때 각 시나리오 시간(초)에는 줄 선 시간이 들어가 이전 기록과 비교할 수 없습니다.
     jobs = max(1, min(int(args.jobs or 1), 6))
 
     def _one(case: dict):
@@ -762,7 +693,6 @@ if __name__ == "__main__":
     try:
         sys.exit(main())
     except Exception:                             # noqa: BLE001
-        # ★ 2026-08-20 — 여기서 안 잡으면 파이썬 기본 종료코드가 1 이라,
         #   "일부 시나리오 실패"(return 1) 랑 "진짜 크래시" 를 구분할 수 없었습니다.
         #   watch_and_test.py 가 그 둘을 구분해서 크래시일 때만 stderr 를 보여주도록
         #   크래시는 3 으로 구분해서 종료합니다.

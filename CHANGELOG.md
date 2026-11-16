@@ -11,6 +11,33 @@
 
 ---
 
+## v1.50d — 2026-11-16 — 주석 정리 1단계(나머지 파이썬 파일 15개) + CODE_NOTES 파일 지도
+
+- law_client(270개 중 213개 이동), eval_run(78), rag_select(32), intent(36), watch_and_test(15), kv_reuse(13), answer_cache(12), applog(11), check_secrets(17), pdf_maker(15), dump_byeolpyo(11), ctx_guard(3), logpipe(6), test_law_client_patch(5), law_cache(1)의 설명 주석을 `CODE_NOTES.md` 4장으로 옮김. 모든 파일 고치기 전후 `ast.dump` 동일(동작 변화 없음).
+- 코드에 남긴 것: 법제처 API 동작(http 고정, display 최대 100, search·page 없는 target, HTML만 주는 target, 인증 실패도 200, 엔티티, 조문번호 0, 연혁 조회 방법, 상세링크의 OC), 외부 라이브러리 사실(reportlab·NotoSansCJK, e5 접두어, urllib 쿠키 제약, Windows 파이프 인코딩), 다른 파일과의 약속(eval_run 종료코드 3, CONCLUSION_Q 복사본), `# -*- coding -*-`, `# noqa`.
+- `# noqa: X — 설명` 의 설명 부분도 문서로 옮기고 지시어만 남김. 주석 처리돼 있던 옛 반복문(eval_run)도 문서로.
+- CODE_NOTES.md 에 '1-1 파일 지도' 추가. check_code_notes.py 가 다른 파일의 SyntaxWarning 을 숨기게 함.
+- 되돌리기: `git checkout <v1.50c 커밋> -- <파일>` (주석만 돌아옴).
+
+## v1.50c — 2026-11-16 — 시작 파일 하나로: start.bat (LLM·서버·터널·감시), LLM 설정은 llm_start.bat 한 곳
+
+- 이전: `_3_start_server.bat`(→ start.bat: LLM·서버·터널) + `_4_start_watcher.bat`(감시) 두 번 실행. LLM 설정(LLAMA_ARGS·GGML_CUDA_NO_PINNED)이 start.bat 과 `_5_restart_llm.bat` 에 똑같이 복사돼 있어 11-04 OOM 때 두 곳을 고쳐야 했음.
+- 이제: `start.bat` 하나가 ① `llm_start.bat` ② uvicorn :8000 ③ cloudflared ④ watch_and_test.py 를 켬. 이미 켜진 것은 건너뜀(포트 8000·cloudflared 프로세스·'watcher' 창 제목으로 확인) → 다시 눌러도 안전. `start.bat nowatch` 는 감시 제외.
+- `_5_restart_llm.bat` → `llm_start.bat`(LLM 설정 유일한 곳). `ai_client.restart_local_llm` 이 부르는 파일 이름도 바꿈.
+- 토큰 없을 때 없는 파일(`_0_fix_token.bat`) 안내하던 문구 고침, 토큰 없어도 감시는 켬.
+- `_3_start_server.bat`, `_4_start_watcher.bat`, `_5_restart_llm.bat` 은 `..\_삭제예정_20261116\` 로 이동. bat 안 버전 이력 주석은 이 CHANGELOG 로(외부 사실 2줄만 영어로 남김).
+- 문서: README 실행법, CODE_NOTES 1장, CLAUDE.md 8번, watch_and_test.py·kv_reuse.py 안내 문구.
+- 되돌리기: 위 폴더의 세 파일을 되돌리고 `git checkout <v1.50b 커밋> -- start.bat ai_client.py`.
+
+## v1.50b — 2026-11-16 — 주석 정리 1단계(main.py) + CLAUDE.md + 안 쓰는 파일 치움
+
+- main.py 주석 796개 중 750개를 `CODE_NOTES.md` 4장으로 옮김. 코드에는 외부 사실 8개와 `# noqa` 38개만(noqa 뒤 설명 13개도 문서로). 3,940줄 → 3,269줄. 고치기 전후 `ast.dump` 동일(동작 변화 없음).
+- `CLAUDE.md` 추가 — 작업 규칙(CODE_NOTES 먼저 읽기, 이력은 CHANGELOG, 코드 주석은 외부 사실만, 건별 if 금지, 비밀정보 금지).
+- 일회용·중복 파일 11개를 저장소 밖 `..\_삭제예정_20261116\` 로 옮김(어디서도 부르지 않음 확인):
+  `_0b_finish_merge.bat`, `_0c_repair_and_push.bat`, `commit.bat`, `dev_loop.bat`, `git_setup.bat`, `github_first_push.bat`,
+  `start_old.bat`(trycloudflare 임시 터널 백업), `watch.bat`(_4 와 중복), `repair_git.py`, `resolve_merge.py`, `적용방법.md`(v0.7).
+- 되돌리기: 주석은 `git checkout <v1.50a 커밋> -- main.py`, 파일은 위 폴더에서 다시 옮기거나 git 이력에서 복원.
+
 ## v1.50a — 2026-11-16 — 주석 정리 1단계(ai_client.py): 설명은 CODE_NOTES.md 로, 코드에는 외부 사실만
 
 - 코드 안 주석 315개 중 288개를 `CODE_NOTES.md` 4장(함수별 설명)으로 그대로 옮김. 코드에는 27개만 남김

@@ -28,7 +28,7 @@
 
 쓰는 법
     (1) 다른 창에서 start.bat 으로 서버를 켜 둡니다
-    (2) watch.bat 을 실행합니다 (또는 python watch_and_test.py)
+    (2) start.bat 이 이 감시 창도 같이 켭니다 (따로 켜려면 python watch_and_test.py)
     (3) 창을 그냥 열어 둡니다. Ctrl+C 로 멈춥니다.
 
 옵션
@@ -60,8 +60,6 @@ COMMITFILE = os.path.join(OUTDIR, "COMMIT")
 KST = timezone(timedelta(hours=9))
 STATEFILE = os.path.join(OUTDIR, "_watch_state.json")
 
-# ★ 2026-08-20 — main.py 에 비밀번호 로그인(APP_PASSWORD)이 생긴 뒤로
-#   /api/version 이 전부 401 을 내서 서버가 계속 "응답 없음"으로 보였습니다.
 #   로그인해서 받은 쿠키를 붙여야 합니다. main.py 의 로그인 쿠키는 secure=True 라
 #   urllib 의 자동 쿠키 처리(http.cookiejar)가 로컬 http 접속에는 다시 안 붙여줍니다
 #   (문서화된 제약). 그래서 자동 처리에 맡기지 않고, 로그인 응답의 Set-Cookie 값을
@@ -117,7 +115,6 @@ def login(base: str) -> str:
             return raw.split(";", 1)[0].split("=", 1)[1]
     return ""
 
-# 감시할 파일. 이것들이 바뀌면 테스트를 다시 돌립니다.
 WATCH = [
     "main.py", "ai_client.py", "law_client.py", "pdf_maker.py", "intent.py",
     "eval_cases.json", os.path.join("static", "index.html"),
@@ -125,7 +122,6 @@ WATCH = [
 
 
 def log(msg: str) -> None:
-    # 서버 로그와 같은 모양 — 서울 시간 [MM-DD HH:MM:SS]
     print(f"[{datetime.now(KST):%m-%d %H:%M:%S}] {msg}", flush=True)
 
 
@@ -154,7 +150,6 @@ def server_ready(base: str, timeout: float = 2.0) -> bool:
             return r.status == 200
     except urllib.error.HTTPError as e:
         if e.code == 401:
-            # 로그인이 안 됐거나(오토리로드로 서버가 막 켜짐) 쿠키가 만료됐을 수 있습니다.
             _AUTH_COOKIE = login(base)
         return False
     except Exception:                            # noqa: BLE001
@@ -267,7 +262,7 @@ def git_commit_push(push: bool = True, message: str = "", suffix: str = "") -> b
         r = subprocess.run(["git", "diff", "--cached", "--quiet"], cwd=HERE,
                            capture_output=True, timeout=60)
         if r.returncode == 0:
-            return False                         # 바뀐 것 없음
+            return False
 
         guard = os.path.join(HERE, "check_secrets.py")
         if os.path.exists(guard):
@@ -349,7 +344,6 @@ def run_eval(base: str, extra: list | None = None) -> tuple[int, str, str]:
         if p.stderr:
             print("    " + (p.stderr or "")[:2000], flush=True)
 
-    # 가장 최근 보고서를 latest 로 복사합니다. 늘 같은 경로를 보면 되도록.
     try:
         reps = sorted((f for f in os.listdir(OUTDIR)
                        if f.startswith("report_") and f.endswith(".md")),
@@ -401,7 +395,6 @@ def main() -> int:
         try:
             time.sleep(args.interval)
 
-            # ── (A) 커밋 요청 파일 ─────────────────────────────
             if os.path.exists(COMMITFILE) and not args.no_commit:
                 try:
                     with open(COMMITFILE, encoding="utf-8", errors="replace") as f:
@@ -419,10 +412,6 @@ def main() -> int:
 
             reason = ""
             if os.path.exists(RUNFILE):
-                # ★ 2026-10-07 — RUN 파일 내용이 "--" 로 시작하면 eval_run.py 인자로 넘깁니다.
-                #   예) --cases eval_extra.json      (다른 시나리오 파일)
-                #       --only 소음                  (이름에 '소음' 이 든 시나리오만)
-                #   전체 17개(약 35분)를 다 돌리지 않고 고친 부분만 빨리 확인할 때 씁니다.
                 run_text = ""
                 try:
                     with open(RUNFILE, encoding="utf-8", errors="replace") as f:
@@ -445,7 +434,6 @@ def main() -> int:
                     reason = "소스 변경"
                     pending_since = 0.0
 
-            # ── (C) 소스 외 파일만 바뀐 경우: 60초 동안 그대로면 커밋 ──
             if not reason and not pending_since and not args.no_commit \
                     and time.time() - last_status_check >= 30:
                 last_status_check = time.time()
@@ -460,7 +448,6 @@ def main() -> int:
             if not reason:
                 continue
 
-            # ── (B) 테스트 → 결과를 붙여 커밋 ──────────────────
             log(f"── 실행 ({reason}) " + "─" * 30)
             if not wait_for_server(args.base):
                 log("서버가 응답하지 않아 테스트는 건너뜁니다.")
@@ -474,7 +461,7 @@ def main() -> int:
             run_extra = []
             if not args.no_commit:
                 git_commit_push(push=not args.no_push, suffix=eval_score(out))
-            prev = snapshot()                    # 커밋이 mtime 을 건드려도 되돌립니다
+            prev = snapshot()
             last_status, status_since = git_status(), time.time()
             log(f"완료 (종료코드 {rc}) → _eval\\latest.md")
             log("─" * 46)

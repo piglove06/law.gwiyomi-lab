@@ -481,12 +481,12 @@ def _llm_health(ok: bool, why: str = "") -> None:
 
 
 def restart_local_llm(reason: str = "") -> bool:
-    """lawfinder-llm 창(과 그 안의 llama-server·logpipe)을 정리하고 _5_restart_llm.bat 으로 다시 켭니다."""
+    """lawfinder-llm 창(과 그 안의 llama-server·logpipe)을 정리하고 llm_start.bat 으로 다시 켭니다."""
     if os.name != "nt" or not LLM_AUTO_RESTART or LOCAL_SERVER != "llamacpp":
         return False
     import subprocess
     here = os.path.dirname(os.path.abspath(__file__))
-    bat = os.path.join(here, "_5_restart_llm.bat")
+    bat = os.path.join(here, "llm_start.bat")
     if not os.path.exists(bat):
         applog.warn(f"LLM 자동 재시작 불가 — {bat} 없음")
         return False

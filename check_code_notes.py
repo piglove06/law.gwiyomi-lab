@@ -4,7 +4,9 @@
   python check_code_notes.py           문서의 '### 파일 :: 이름' 이 코드에 없으면 실패(종료 코드 1)
   python check_code_notes.py --missing  설명이 없는 함수·클래스 목록도 보여 줌(실패로 치지 않음)
 """
-import ast, os, re, sys
+import ast, os, re, sys, warnings
+
+warnings.filterwarnings("ignore", category=SyntaxWarning)
 
 HERE = os.path.dirname(os.path.abspath(__file__))
 NOTES = os.path.join(HERE, "CODE_NOTES.md")

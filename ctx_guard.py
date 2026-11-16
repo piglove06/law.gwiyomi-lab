@@ -118,7 +118,6 @@ def cited_in_question(question: str, flat: list, limit: int = 4) -> list:
         for name, fs in forms.items():
             for fm in fs:
                 if len(fm) >= 3 and before.endswith(fm) and len(fm) > best_len:
-                    # 낱말 경계: "녹색건축법 제5조" 를 건축법 제5조로 보지 않게(검토 ⑥)
                     pat = r"(?:^|[^가-힣])" + r"\s*".join(map(re.escape, fm)) + r"(?:의|상|에\s*따른|에서)?$"
                     if not re.search(pat, raw_before):
                         continue
@@ -158,7 +157,6 @@ def refill(keep: list, dropped: list, prio: dict, pos: dict, assemble, count, bu
     keep = list(keep)
     dropped = list(dropped)
     back = []
-    # ★ v1.43 — 신청서·서식(별지)은 되돌려 넣지 않습니다(로그: 남는 예산이 서식으로 채워짐). 조문·별표만.
     def _is_form(u):
         a = u[1]
         return a.get("구분") in ("별지", "서식") or str(a.get("조문제목", "")).startswith(("[별지", "[서식"))
@@ -205,7 +203,6 @@ def named_by_abbr(prefix: str, laws: list) -> str:
             form = abn + tail
             if len(form) <= best_len or not p.endswith(form):
                 continue
-            # 원문(공백 유지)에서 약칭 앞이 낱말 경계인지 확인("…특별법" 안의 일부가 아니어야 함)
             pat = r"(?:^|[^가-힣])" + r"\s*".join(map(re.escape, abn)) + (r"\s*" + tail if tail else "") + r"$"
             if not re.search(pat, raw):
                 continue

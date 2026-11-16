@@ -1,91 +1,64 @@
 @echo off
 chcp 65001 >nul
 cd /d "%~dp0"
+title lawfinder - start
+rem ------------------------------------------------------------
+rem  start.bat - starts everything. Double-click this one file.
+rem    1 LLM (llm_start.bat)  2 web server :8000  3 Cloudflare tunnel  4 watcher (auto test + commit)
+rem  Already running parts are skipped (also an old "_4" watcher window), so running it again is safe.
+rem  start.bat nowatch  -> everything except the watcher
+rem  History: CHANGELOG.md, notes: CODE_NOTES.md
+rem ------------------------------------------------------------
+set "PY=.venv\Scripts\python.exe"
+if not exist "%PY%" set "PY=python"
 
-rem ------------------------------------------------------------
-rem  The Cloudflare tunnel token is read from .env
-rem  Never write it in this file - this file goes to a PUBLIC repo.
-rem ------------------------------------------------------------
+echo [1/4] LLM
+call llm_start.bat
+cd /d "%~dp0"
+
+echo [2/4] web server
+netstat -ano | findstr /r /c:":8000 .*LISTENING" >nul
+if not errorlevel 1 (
+  echo       already running on :8000 - skip
+) else (
+  start "lawfinder-server" cmd /k ".venv\Scripts\activate && uvicorn main:app --host 0.0.0.0 --port 8000 --reload"
+  timeout /t 4 >nul
+)
+
+echo [3/4] tunnel
+rem  The tunnel token is read from .env. Never write it here - this file goes to a PUBLIC repo.
 set "CFTOKEN="
-if exist "%~dp0.env" (
-  for /f "usebackq tokens=1,* delims==" %%a in ("%~dp0.env") do (
+if exist ".env" (
+  for /f "usebackq tokens=1,* delims==" %%a in (".env") do (
     if /i "%%a"=="CLOUDFLARE_TUNNEL_TOKEN" set "CFTOKEN=%%b"
   )
 )
-
-rem ------------------------------------------------------------
-rem  Local LLM (llama.cpp llama-server). Ollama started by itself,
-rem  llama-server does not - so start it here.
-rem  -hf uses the already-downloaded file in the cache (no re-download).
-rem  --cache-ram 2048 : prompt cache in system RAM capped at 2 GB (default 8 GB).
-rem    2026-10-08 the server died twice with "bad allocation" when RAM ran out.
-rem ------------------------------------------------------------
-set "LLAMA_DIR=C:\llama"
-set "LLAMA_MODEL=unsloth/Qwen3.6-35B-A3B-GGUF:Q4_K_M"
-rem  v1.49 (2026-10-30) --slot-save-path : kv_reuse.py saves/restores the fixed prompt-prefix state there
-rem    (answer/clarify instructions, ~3k tokens). Remove it to turn that off (kv_reuse skips by itself).
-rem    Relative path on purpose: an absolute path with Korean letters made llama-server fail to start
-rem    ("No mapping for the Unicode character ... code page", 2026-10-30 22:33). Runs from this folder.
-rem  v1.49b (2026-11-04) -fit off -ngl 99 -ncmoe 26 : explicit GPU/CPU placement instead of auto-fit.
-rem    Auto-fit hit CUDA out of memory on every start (2026-11-04 10:44~). draft_lab test (11-01):
-rem    auto-fit 51.8 tok/s, -ncmoe 24 57.6 tok/s (10.9 GB VRAM), -ncmoe 26 55.7 tok/s (more headroom).
-rem    Rollback: delete "-fit off -ngl 99 -ncmoe 26" (both here and in _5_restart_llm.bat).
-set "LLAMA_ARGS=-hf %LLAMA_MODEL% -lm none --no-mmproj -np 1 -c 16384 -ctk q8_0 -ctv q8_0 -fa on -t 6 --jinja --cache-ram 2048 --slot-save-path _cache\slots --port 8080 -fit off -ngl 99 -ncmoe 26"
-
-rem ------------------------------------------------------------
-rem  Log windows: logpipe.py adds Seoul time to each line, removes
-rem  color codes, hides noise, and saves the full log to _runs\
-rem  (llama-server prints elapsed time, cloudflared prints UTC).
-rem ------------------------------------------------------------
-set "PY=.venv\Scripts\python.exe"
-rem  v1.49b (2026-11-04) GGML_CUDA_NO_PINNED=1 : do not pin (page-lock) host RAM for the CPU-side experts.
-rem    With VRAM nearly free (1.1/12 GB) llama-server still died 2 s into loading with
-rem    "CUDA error: out of memory" -> the pinned host allocation (~13 GB) failed, not VRAM.
-rem    Decode speed is not affected; large prompt batches may be a bit slower. Rollback: delete this line.
-set "GGML_CUDA_NO_PINNED=1"
-
-rem  2026-10-15 - check the process too, not only the port. While the model is loading (~3 min)
-rem  port 8080 is not open yet, so running 3 right after 5 started a SECOND llama-server (RAM 95%%).
-set "LLM_UP="
-netstat -ano | findstr /r /c:":8080 .*LISTENING" >nul && set "LLM_UP=1"
-tasklist /FI "IMAGENAME eq llama-server.exe" 2>nul | find /i "llama-server.exe" >nul && set "LLM_UP=1"
-if defined LLM_UP (
-  echo [0/2] llama-server already running or still loading - skip
-) else if exist "%LLAMA_DIR%\llama-server.exe" (
-  echo [0/2] starting llama-server ^(%LLAMA_MODEL%^) ...
-  rem  llm_loop.bat restarts llama-server automatically if it crashes, e.g. out of memory.
-  start "lawfinder-llm" /min cmd /k call llm_loop.bat
+tasklist /FI "IMAGENAME eq cloudflared.exe" 2>nul | find /i "cloudflared.exe" >nul
+if not errorlevel 1 (
+  echo       already running - skip
+) else if not defined CFTOKEN (
+  echo       [SKIP] CLOUDFLARE_TUNNEL_TOKEN is not set in .env - local address still works: http://127.0.0.1:8000
 ) else (
-  echo [0/2] [SKIP] %LLAMA_DIR%\llama-server.exe not found - AI answers will fail
-)
-
-echo [1/2] starting server ...
-start "lawfinder-server" cmd /k ".venv\Scripts\activate && uvicorn main:app --host 0.0.0.0 --port 8000 --reload"
-timeout /t 4 >nul
-
-if not defined CFTOKEN (
-  echo.
-  echo  [SKIP] CLOUDFLARE_TUNNEL_TOKEN is not set in .env
-  echo         Local address still works: http://127.0.0.1:8000
-  echo         Run _0_fix_token.bat to move the token into .env
-  echo.
-  timeout /t 6 >nul
-  exit /b 0
-)
-
-echo [2/2] starting tunnel ...
-rem  The token is passed as an environment variable (TUNNEL_TOKEN), not on the
-rem  command line - otherwise it shows up in the window title.
-set "TUNNEL_TOKEN=%CFTOKEN%"
-if exist "%PY%" (
+  rem  Passed as TUNNEL_TOKEN env var, not on the command line - otherwise it shows in the window title.
+  set "TUNNEL_TOKEN=%CFTOKEN%"
   start "lawfinder-tunnel" /min cmd /k "cloudflared tunnel run 2>&1 | %PY% -u logpipe.py tunnel"
-) else (
-  start "lawfinder-tunnel" /min cmd /k "cloudflared tunnel run"
 )
 set "TUNNEL_TOKEN="
-timeout /t 3 >nul
+set "CFTOKEN="
+
+echo [4/4] watcher
+if /i "%~1"=="nowatch" (
+  echo       skipped ^(nowatch^)
+) else (
+  tasklist /V /FI "IMAGENAME eq cmd.exe" 2>nul | find /i "watcher" >nul
+  if not errorlevel 1 (
+    echo       already running - skip
+  ) else (
+    start "lawfinder-watcher" cmd /k "%PY% watch_and_test.py"
+  )
+)
 
 echo.
-echo   https://law.gwiyomi-lab.com
+echo   https://law.gwiyomi-lab.com   ^(LLM needs 1-3 min to load^)
 echo.
-timeout /t 3 >nul
+timeout /t 5 >nul

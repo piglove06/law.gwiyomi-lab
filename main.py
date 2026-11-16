@@ -20,9 +20,6 @@ import re
 import secrets
 import time
 
-# ── 서버 로그 형식 ──────────────────────────────────────────────
-# ★ 2026-09-29 — 시각을 서울 시간(KST) "[MM-DD HH:MM:SS]" 로 통일합니다.
-#   PC 시간대 설정과 무관하게 찍히고, 질문 블록 로그(applog.py)와 모양이 같습니다.
 logging.basicConfig(
     level=logging.INFO,
     format="[%(asctime)s] %(levelname)-7s %(message)s",
@@ -34,8 +31,8 @@ for _h in logging.getLogger().handlers:
         _h.formatter.converter = lambda secs: datetime.fromtimestamp(secs, _KST).timetuple()
 for _n in ("uvicorn", "uvicorn.access", "uvicorn.error"):
     _lg = logging.getLogger(_n)
-    _lg.handlers.clear()          # uvicorn 기본 포맷을 제거하고
-    _lg.propagate = True          # 위 설정을 따르게 합니다
+    _lg.handlers.clear()
+    _lg.propagate = True
 
 
 class _QuietAccess(logging.Filter):
@@ -57,13 +54,12 @@ class _QuietAccess(logging.Filter):
 
 
 logging.getLogger("uvicorn.access").addFilter(_QuietAccess())
-# LLM·법제처 호출마다 찍히던 "HTTP Request: POST …" 줄을 숨깁니다 (오류는 그대로 보임).
 for _n in ("httpx", "httpcore"):
     logging.getLogger(_n).setLevel(logging.WARNING)
 
 from dotenv import load_dotenv
 
-load_dotenv()  # .env 파일을 읽어 환경변수로 올립니다. import 순서 주의: 다른 모듈보다 먼저.
+load_dotenv()
 
 from fastapi import FastAPI, Form, Request  # noqa: E402
 from fastapi.responses import (  # noqa: E402
@@ -81,30 +77,16 @@ import applog  # noqa: E402
 import law_client  # noqa: E402
 import pdf_maker  # noqa: E402
 import intent as intent_mod  # noqa: E402
-# ★ v1.41 RAG — 새 모듈 3개(기본 꺼짐: _cache/flags/ 파일 또는 환경변수로 켬). 원복: 이 세 줄과 아래 '★ v1.41' 블록 삭제
-import law_cache  # noqa: E402  — 법령 본문 로컬 캐시(MST 버전 기준)
-import rag_select  # noqa: E402  — 조문 본문 유사도(BM25 2-gram [+임베딩]) 선별 보강
-import answer_cache  # noqa: E402  — 같은 질문 결과 불러오기(되묻기로 묻고, 답이 같을 때만 저장본)
-import ai_ext  # noqa: E402  — ★ v1.42 ① 지능형 검색 더 쓰기(되묻기 답 재검색·행정규칙·별표) [기본 꺼짐]
-import ctx_guard  # noqa: E402  — ★ v1.42 질문에 적힌 조문 보호·분량 조절 후 되돌려 넣기(해석35)
+import law_cache  # noqa: E402
+import rag_select  # noqa: E402
+import answer_cache  # noqa: E402
+import ai_ext  # noqa: E402
+import ctx_guard  # noqa: E402
 
-# 되묻기 최대 라운드. .env 의 CLARIFY_ROUNDS 로 조절합니다.
-# 라운드마다 LLM 호출이 1회 늘어납니다.
-# ★ v1.31 — 6 → 3. 되묻기는 결론을 가르는 사실만 묻도록 바뀌었고(본문 기반),
-#   의도별로 아예 안 묻는 질문도 생겨 6번까지 왕복할 일이 없습니다.
 CLARIFY_ROUNDS = int(os.getenv("CLARIFY_ROUNDS", "3"))
 
-# ★ v1.31 — 되묻기에 넘기는 **선별 조문 본문**의 토큰 상한.
-#   v1.30 까지는 조문 제목 60줄만 넘겼습니다. 본문을 넣어야 기준값(2만L·1년·3회)을
-#   보고 보기를 나눌 수 있습니다. 지시문(약 2.5천) + 이 값 + 출력(800) 이 컨텍스트 안에 듭니다.
 CLARIFY_CTX_TOKENS = int(os.getenv("CLARIFY_CTX_TOKENS", "5000"))
 
-# ★ v1.32 — 별표 본문을 AI 에 넘길 때의 글자 상한 (표 테두리·공백을 걷어낸 **뒤** 기준).
-#   v1.31 까지는 원문을 그대로 2,000자에서 잘랐습니다. 법제처 별표는 표 테두리(─│┼)와
-#   정렬용 공백이 절반 이상이라, 소음 규제기준(시행규칙 별표 8) 은 표만 들어가고
-#   **비고(작업시간 +5dB, 공휴일 −5dB 보정)** 가 통째로 잘렸습니다.
-#   → 68dB 을 65dB 와 비교해 "초과" 로 답한 원인.
-#   이제 테두리·공백을 걷어내고(같은 별표가 6천 → 2천 자), 그래도 길면 비고를 남깁니다.
 BP_CTX_CHARS = int(os.getenv("BP_CTX_CHARS", "3500"))
 _BOX_CHARS = re.compile(r"[─━┌┐└┘├┤┬┴┼┏┓┗┛┣┫┳┻╋═║╔╗╚╝╠╣╦╩╬]+")
 
@@ -116,7 +98,7 @@ def _compact_bp(text: str) -> str:
     lines = []
     for ln in t.split("\n"):
         ln = ln.strip()
-        if not ln.strip("│| "):            # 칸 구분자만 남은 줄
+        if not ln.strip("│| "):
             continue
         lines.append(re.sub(r"\s*│\s*", "│", ln))
     return "\n".join(lines)
@@ -131,14 +113,11 @@ def _bp_keywords(text: str) -> list:
     """긴 별표에서 질문과 관련된 줄을 고를 때 쓸 낱말(조사·어미를 뗀 2글자 이상)."""
     out = []
     for w in re.findall(r"[가-힣A-Za-z0-9]{2,}", str(text or "")):
-        # ★ v1.36 (예약 점검 C-20261012-1) — 조사·어미는 떼고 나서 **두 글자 이상 남을 때만** 뗍니다.
-        #   전에는 무조건 떼어 "도로→도", "신고→신", "평가→평", "속도→속" 이 되고 한 글자라 버려져,
-        #   긴 별표에서 질문과 관련된 줄을 고를 때 핵심 낱말이 빠졌습니다.
         m = re.match(r"(.+?)(으로|에서|에게|까지|부터|이나|이고|이며|입니까|합니까|하나요|인가요|"
                      r"은|는|이|가|을|를|에|의|로|와|과|도|만|야|요|고)$", w)
         if m and len(m.group(1)) >= 2:
             w = m.group(1)
-        m = re.match(r"(.+?)(에|에서)$", w)                   # "경우에는" → "경우에" → "경우"
+        m = re.match(r"(.+?)(에|에서)$", w)
         if m and len(m.group(1)) >= 2:
             w = m.group(1)
         if len(w) >= 2 and w not in _KW_STOP and not w.isdigit() and w not in out \
@@ -147,7 +126,6 @@ def _bp_keywords(text: str) -> list:
     return out[:20]
 
 
-# 별표의 비고 시작 줄 — 줄 첫머리(표 테두리 문자 뒤 포함)의 "비고" / "비 고"
 _NOTES_HEAD = re.compile(r"^[ \t┃│|]*비\s*고", re.M)
 
 
@@ -163,29 +141,21 @@ def _fit_keep_notes(text: str, limit: int, keywords=None) -> str:
         return t
     if keywords:
         lines = t.split("\n")
-        # 거의 모든 줄에 나오는 낱말("사업" 등)은 변별력이 없으니 뺍니다(줄의 25% 넘게 나오면).
         df = {k: sum(1 for ln in lines if k in ln) for k in keywords}
         kws = [k for k in keywords if 0 < df[k] <= max(3, len(lines) * 0.25)]
         score = [(sum(1 for k in kws if k in ln), i) for i, ln in enumerate(lines)]
         hit = [i for sc, i in sorted(score, key=lambda x: (-x[0], x[1])) if sc > 0]
         if hit:
-            # 제목·머리줄. v1.35 — 6줄 → 8줄 + 앞 15줄 안의 "1지역│2지역" 같은 열 이름 줄
-            #   (6줄만 남기면 별표 3 의 열 이름 줄(7번째)이 빠져, 불소 3개 값 중 어느 것이 어느 지역인지 모름)
             keep = set(range(min(8, len(lines))))
             keep |= {i for i, ln in enumerate(lines[:15]) if re.search(r"(\d\s*지역|구\s*분|항\s*목)", ln)}
             used0 = sum(len(lines[i]) + 1 for i in keep)
-            for i in hit:                                    # 많이 맞는 줄부터 주변 줄과 함께
+            for i in hit:
                 win = set(range(max(0, i - 2), min(len(lines), i + 5))) - keep
                 cost = sum(len(lines[j]) + 1 for j in win)
                 if used0 + cost > limit * 0.65:
-                    # v1.40 (C-20261016-2) — 큰 창 하나가 넘친다고 멈추지 않고, 뒤의 작은(겹쳐 싼) 창은 계속 봅니다
                     continue
                 keep |= win
                 used0 += cost
-            # ★ v1.45 (C-20261028-28) — 표가 여러 개인 별표(소음 표·진동 표)에서 **첫** 비고 이후 줄을 모두 버리고
-            #   첫 비고만 붙여, 진동 질문에 소음 표 비고가 들어갔습니다. 질문 낱말이 가장 많이 맞은 줄(hit[0]) 다음의
-            #   첫 비고(없으면 마지막 비고)를 쓰고, 그 비고 줄만 본문에서 건너뜁니다.
-            #   원래: ni = 첫 비고, 'if i >= ni: break'
             _heads = [i for i, ln in enumerate(lines) if _NOTES_HEAD.match(ln)]
             _after = [h for h in _heads if h >= hit[0]]
             ni = (_after[0] if _after else _heads[-1]) if _heads else None
@@ -207,43 +177,26 @@ def _fit_keep_notes(text: str, limit: int, keywords=None) -> str:
             if notes:
                 body += "\n…\n" + notes[:int(limit * 0.35)]
             return body + "\n…(질문과 관련된 줄만 발췌)"
-    # ★ v1.36 (예약 점검 C-20261012-2) — 문서에서 처음 나오는 "비고" 글자가 아니라 **줄 첫머리의 비고**를 찾습니다.
-    #   표 머리 칸 이름이 '비고' 인 별표에서 그 칸을 비고로 착각해, 표 아래 진짜 비고(보정 규정)를 잘라 낼 수 있었습니다.
     mt = _NOTES_HEAD.search(t)
     i = mt.start() if mt else -1
-    if i > limit * 0.4:                      # 비고가 상한 밖으로 밀려나는 경우만
+    if i > limit * 0.4:
         notes = t[i:i + int(limit * 0.5)]
         head = t[:max(200, limit - len(notes) - 30)]
         tail = "\n…(이하 생략)" if i + len(notes) < len(t) else ""
         return head + "\n…(표 일부 생략)…\n" + notes + tail
     return t[:limit] + "\n…(이하 생략)"
 
-# ★ v1.46 — 답변 속 '고친 흔적'(지시문 원칙 9 위반). 이게 있으면 【결론】과 뒤쪽 판정이 다를 수 있습니다.
 _SELF_CORR_RE = re.compile(r"(?m)(수정된|정정된|바로잡은|다시\s*정리한)\s*결론|^\s*\**\s*(수정|정정)\s*\**\s*[:：]|정정하면")
 _SELF_CORR_FIX = ("【결론】과 뒤쪽(【설명】 끝의 '수정된 결론' 등)의 판정이 다르다. 조문 원문으로 다시 따져 하나의 판정으로 정하고, "
                   "고친 흔적 없이 【결론】부터 처음부터 다시 쓴다")
 
-# 답변 생성 때 출력(답변)용으로 남겨 둘 토큰 수.
-# ★ 2026-09-29 — 예전에는 조문을 "6만 자" 로 잘랐습니다(CONTEXT_LIMIT, 클라우드 모델 시절 값).
-#   로컬 LLM 컨텍스트(16,384토큰)에는 처음부터 안 맞아 답변 단계가 400 으로 실패했습니다.
-#   이제 llama-server 의 컨텍스트 길이에서 [지시문 + 이 값] 을 뺀 만큼만 조문을 넣습니다.
-#   (MAXTOK_ANSWER 보다 크게 잡을 필요는 없습니다)
 ANSWER_RESERVE = int(os.getenv("ANSWER_RESERVE", "3000"))
-# ★ v1.45 (C-20261028-26) — 조문에 남길 최소 토큰. 덧붙임이 길어 이보다 작아지면 덧붙임을 줄입니다.
 MIN_CTX_BUDGET = int(os.getenv("MIN_CTX_BUDGET", "2500"))
 
-# ★ v1.32 — 체계도로 수집할 법령(법률 + 시행령·시행규칙 묶음) 수. 2 → 3.
-#   후보: 지능형 검색 1위 → AI 추측 중 지능형 검색에도 나온 것 → 지능형 검색 2위 → 나머지 AI 추측.
-#   늘리면 정답 법령을 잡을 확률은 오르고, 조문 목록이 길어져 선별이 느려집니다(질문당 약 10~20초).
 LAW_CANDIDATES = int(os.getenv("LAW_CANDIDATES", "3"))
 
-# ★ v1.33 — 법령이 애매하면 사용자에게 "어느 법" 인지 묻습니다(공무원 사용자는 큰 틀의 법을 압니다).
-#   애매 = 지능형 검색 1위 법령의 점수 비중이 LAW_ASK_SHARE 미만 **이고** AI 추측 법령과 1위가 다를 때.
-#   (2026-10-08 평가 25개 기준: 누출검사 2건만 해당, 나머지 21건은 해당 없음·법령 전부 정답)
 LAW_ASK_SHARE = float(os.getenv("LAW_ASK_SHARE", "0.5"))
-# v1.37 — 지능형 1위 비중이 이보다 낮고 AI 추측 법령(실재)이 지능형 상위 5개에 없으면 지능형을 믿지 않음
 WEAK_AI_SHARE = float(os.getenv("WEAK_AI_SHARE", "0.4"))
-# v1.37 — 체계도 하나에서 가져올 법령 수 상한(법률·같은 이름 시행령·시행규칙은 항상), 조문을 받을 법령 수 상한
 TREE_MAX_LAWS = int(os.getenv("TREE_MAX_LAWS", "4"))
 FETCH_MAX_LAWS = int(os.getenv("FETCH_MAX_LAWS", "7"))
 LAW_Q = "어느 법의 규정을 찾으시나요?"
@@ -285,10 +238,9 @@ def _user_laws(req) -> list:
     out = []
     for x in (getattr(req, "laws", None) or []):
         x = str(x).strip().strip("「」『』\"' ")
-        # "대기환경보전법 제23조제1항" 처럼 조문까지 적어도 법령 이름만 씁니다(조문은 질문에 적는 칸).
         x = re.sub(r"\s*제\s*\d+\s*조.*$", "", x).strip().strip("「」『』\"' ")
         if x:
-            out.extend(_split_law_names(x))     # ★ v1.45 (C-31) 원래: out.append(x)
+            out.extend(_split_law_names(x))
     ans = str(getattr(req, "answered", "") or "")
     m = re.search(re.escape(LAW_Q) + r"\s*:\s*([^/]+)", ans)
     if m:
@@ -309,31 +261,21 @@ def _user_laws(req) -> list:
             uniq.append(x)
     return uniq[:3]
 
-# 조문 선별 사용 여부. 0 이면 예전처럼 전체 조문을 넣습니다.
 SELECT_ARTICLES = os.getenv("SELECT_ARTICLES", "1") not in ("0", "false", "False")
 
-# 자치법규(조례·규칙)를 찾을 지자체.
 # 법제처 조례 검색은 다른 지자체 결과까지 섞어 돌려주므로,
 # 조회 후 지자체기관명으로 한 번 더 걸러냅니다.
 LOCAL_GOV = os.getenv("LOCAL_GOV", "성남시").strip()
 
-VERSION = "1.50"  # ★ v1.50 섞인 질문 법령 부분만 (원래 "1.49")
+VERSION = "1.50"
 
 app = FastAPI(title="법령 조회 도우미", version=VERSION)
 
-# static 폴더를 /static 경로로 서비스합니다.
 app.mount("/static", StaticFiles(directory="static"), name="static")
 
 
-# =====================================================================
-# 로그인
-# =====================================================================
-# 비밀번호는 .env 의 APP_PASSWORD 값입니다. 바꾸려면 .env 만 고치면 됩니다.
-# 비워두면 로그인 기능 자체가 꺼집니다(집 안 테스트용).
 APP_PASSWORD = os.getenv("APP_PASSWORD", "")
 
-# 쿠키 위조 방지용 서버 비밀값.
-# .env 에 SECRET_KEY 가 없으면 서버 재시작마다 새로 생기고, 그때 다시 로그인해야 합니다.
 SECRET_KEY = os.getenv("SECRET_KEY") or secrets.token_hex(32)
 
 COOKIE_NAME = "lawfinder_auth"
@@ -350,10 +292,6 @@ def _is_logged_in(request: Request) -> bool:
     if not APP_PASSWORD:
         return True
     token = request.cookies.get(COOKIE_NAME, "")
-    # compare_digest 는 타이밍 공격을 막습니다. == 대신 이걸 쓰는 게 정석입니다.
-    # ★ v1.44 (C-20261028-02) — 문자열끼리 비교하면 쿠키에 비ASCII 글자(é 등)가 있을 때 TypeError →
-    #   로그인 안 한 사람도 모든 경로를 500 으로 만들 수 있었습니다(login_submit 은 2026-08-19 에 고침).
-    #   원래: return hmac.compare_digest(token, _make_token())
     return hmac.compare_digest(token.encode("utf-8", "replace"), _make_token().encode("utf-8"))
 
 
@@ -414,10 +352,6 @@ def login_page(request: Request):
 
 @app.post("/login")
 def login_submit(password: str = Form(...)):
-    # ★ 2026-08-19 — compare_digest 는 비ASCII 문자열을 받으면 TypeError 를 냅니다
-    #   ("comparing strings with non-ASCII characters is not supported").
-    #   한글 앱이라 사용자가 한글로 입력하거나 한글 비밀번호를 설정하면
-    #   "비밀번호가 맞지 않습니다" 대신 500 이 났습니다. 바이트로 비교합니다.
     if APP_PASSWORD and hmac.compare_digest(
             str(password or "").encode("utf-8"), APP_PASSWORD.encode("utf-8")):
         resp = RedirectResponse("/", status_code=302)
@@ -425,9 +359,9 @@ def login_submit(password: str = Form(...)):
             COOKIE_NAME,
             _make_token(),
             max_age=COOKIE_DAYS * 24 * 3600,
-            httponly=True,   # 자바스크립트에서 못 읽게 막습니다
+            httponly=True,
             samesite="lax",
-            secure=True,     # HTTPS 전용 쿠키. 로컬(http) 접속 시 로그인 안 됩니다
+            secure=True,
         )
         return resp
     err = '<div class="err">비밀번호가 맞지 않습니다.</div>'
@@ -441,51 +375,31 @@ def logout():
     return resp
 
 
-# --- 요청 모델 -------------------------------------------------------
-# C# 의 DTO 클래스와 같습니다. 타입 검증을 pydantic 이 자동으로 해줍니다.
 class AskRequest(BaseModel):
     question: str
-    target: str = "auto"        # auto = 전 계층 자동 검색
-    skip_clarify: bool = False  # true 면 되묻지 않고 바로 검색
-    answered: str = ""          # 이전 라운드에서 고른 조건
-    round: int = 0              # 되묻기 라운드 (0부터)
-    note: str = ""              # 사용자가 직접 적은 추가 설명
-    laws: list[str] = []        # v1.33 — 사용자가 지정한 "참고할 법령" (선택, 최대 3개)
-    laws_mode: str = "only"     # v1.33 — "only": 이 법령에서만 찾기 / "prefer": 우선 참고(다른 법령도 함께)
-    # v1.34 — "앞 질문에 이어서 묻기"(화면 체크박스). 앞 질문·그 답의 주 법령·결론 요약.
+    target: str = "auto"
+    skip_clarify: bool = False
+    answered: str = ""
+    round: int = 0
+    note: str = ""
+    laws: list[str] = []
+    laws_mode: str = "only"
     prev_question: str = ""
     prev_laws: list[str] = []
     prev_conclusion: str = ""
     use_cache: bool = True      # v1.41 — false 면 '같은 질문 결과 불러오기'를 묻지 않음(eval_run 이 씀)
 
 
-# =====================================================================
-# 인용 검증
-# =====================================================================
-
-# "제14조의2제1항제3호" 같은 패턴을 뽑습니다.
-# "토양환경보전법 시행령 제3조제1항제4호" 처럼 법령명이 앞에 붙는 경우가 많습니다.
-# 법률과 시행령은 조문 번호가 겹치므로(둘 다 제3조가 있음) 법령명을 같이 봐야 합니다.
 CITE_RE = re.compile(
-    # ★ 「」와 [] 를 넣어야 합니다.
-    #   답변은 법령명을 "[토양환경보전법 시행규칙] 제12조제2항" 처럼 씁니다.
-    #   괄호를 빼두면 "]" 에서 끊겨 법령명이 통째로 안 잡히고, 그러면
-    #   아래 _guess_law 가 default(법률)로 떨어뜨립니다.
-    #   실제로 시행규칙 제12조제2항 인용이 법률 제12조제2항으로 표시됐습니다.
-    # ★ v1.44 (C-20261028-03) — 법령명 자리에 '제+숫자' 가 들어가 앞 인용을 삼켰습니다
-    #   ("(제3조 및 제4조)" → 제4조만, "제54조·제55조제1항·제63조" → 제54조 사라짐). '제\s*숫자' 로 시작하는 글자는 못 들어가게.
-    #   원래: r"(?:([가-힣A-Za-z0-9·ㆍ\s「」\[\]]{2,40}?)\s*)?"
-    r"(?:((?:(?!제\s*\d)[가-힣A-Za-z0-9·ㆍ\s「」\[\]]){2,40}?)\s*)?"   # 앞에 붙은 법령명(선택)
-    r"제\s*(\d+)\s*조(?:\s*의\s*(\d+))?"                          # 제○조(의○)
-    r"(?:\s*제\s*(\d+)\s*항)?(?:\s*제\s*(\d+)\s*호)?"            # 제○항 제○호
+    r"(?:((?:(?!제\s*\d)[가-힣A-Za-z0-9·ㆍ\s「」\[\]]){2,40}?)\s*)?"
+    r"제\s*(\d+)\s*조(?:\s*의\s*(\d+))?"
+    r"(?:\s*제\s*(\d+)\s*항)?(?:\s*제\s*(\d+)\s*호)?"
 )
 
-# 법령명 뒤에 붙는 단계 표시. 긴 것부터 확인해야 "시행규칙"이 "규칙"으로 잘리지 않습니다.
 _SUFFIX = ["시행규칙", "시행령"]
 
 
 def _norm(name: str) -> str:
-    # 괄호류는 이름의 일부가 아닙니다. 떼고 비교합니다.
     return re.sub(r"[\s「」『』\[\]()]+", "", name or "")
 
 
@@ -498,8 +412,6 @@ def _named_law(prefix: str, laws: list[dict]) -> str:
         nm = _norm(law.get("name", ""))
         if nm and p.endswith(nm):
             return law["name"]
-    # ★ v1.42 ctx_guard (해석35) — 공식 약칭("지방계약법 시행령")도 법령 이름으로 봅니다.
-    #   되돌리기: 아래 try 블록 삭제(.env CTX_GUARD_ABBR=0 이면 끔).
     try:
         return ctx_guard.named_by_abbr(prefix, laws)
     except Exception:                                    # noqa: BLE001
@@ -536,28 +448,16 @@ def _guess_law(prefix: str, laws: list[dict], default: str) -> str:
     p = _norm(prefix)
     if not p:
         return default
-    # 이름이 긴 것부터 맞춰야 "시행령"이 "법률"에 먼저 걸리지 않습니다. (v1.40 C-20261017-3 — _named_law 재사용)
     n = _named_law(prefix, laws)
     if n:
         return n
-    # ★ v1.44 (C-20261028-04) — 답변이 법령명을 **직접 밝혔는데**(「건축법」 제3조, 대기환경보전법 시행령 제3조)
-    #   수집한 법령에 없으면, 아래 단계 표시·기본값 경로로 떨어져 직전 법령의 같은 번호 조문이 '확인' 으로 찍혔습니다.
-    #   밝힌 이름을 그대로 돌려줘 '수집한 조문에 없음' 으로 표시되게 합니다. 되돌리기: 이 블록 삭제.
     _ex = _explicit_law_name(prefix)
     if _ex:
-        _kx = re.sub(r"[\s「」『』\[\]()·ㆍ・]+", "", _ex)       # 가운뎃점 표기 차이(소음·진동 / 소음ㆍ진동)는 같은 법
+        _kx = re.sub(r"[\s「」『』\[\]()·ㆍ・]+", "", _ex)
         for law in laws:
             if re.sub(r"[\s「」『』\[\]()·ㆍ・]+", "", law.get("name", "")) == _kx:
                 return law["name"]
         return _ex
-    # "시행령 제3조" 처럼 법령명 없이 단계만 쓴 경우
-    # ★ 2026-08-19 — default(= 직전에 이름이 명시된 법령)가 이미 하위법령이면
-    #   여기서 단계 이름을 **덧붙이기만** 해서 "…시행규칙시행령" 이라는 없는
-    #   이름을 찾다가 실패하고, 결국 default(시행규칙)를 그대로 돌려줬습니다.
-    #   실측: 근거에 「…시행규칙」 제12조제2항 을 쓴 뒤 설명에서
-    #        "시행령 제8조에서 정합니다" → 시행규칙 제8조(검사기관)가 근거로 붙음.
-    #   아래 축약형("영 제8조") 경로는 이미 접미사를 떼고 있었는데, 정작
-    #   풀어 쓴 형태가 더 나빴습니다. 같은 방식으로 떼어냅니다.
     for suf in _SUFFIX:
         if p.endswith(suf):
             base = _norm(default)
@@ -569,25 +469,10 @@ def _guess_law(prefix: str, laws: list[dict], default: str) -> str:
                 if _norm(law.get("name", "")) == base + suf:
                     return law["name"]
 
-    # ── 법령 문언의 축약형 ──────────────────────────────────
-    # 법령은 자기들끼리 줄여 부릅니다.
-    #   시행령 → "영",  시행규칙 → "규칙",  상위 법률 → "법"
-    # 별표 4 의 "영 제8조제1항제2호" 는 시행령 제8조입니다.
-    # 이것을 법률 제8조로 잡으면 "타인 토지에의 출입 등" 이라는
-    # 전혀 다른 조문이 근거로 붙습니다. 실제로 그렇게 표시됐습니다.
-    #
-    # ★ 앞 글자가 한글이면 낱말의 일부입니다. "토양환경보전법" 의 "법" 을
-    #   축약형으로 오인하면 안 되므로 앞이 한글이 아닐 때만 인정합니다.
-    #
-    # ★★ 반드시 **공백을 지우지 않은 원본** 으로 봐야 합니다.
-    #    _norm() 은 공백을 없애므로 "따른 영" 이 "따른영" 이 되어,
-    #    "영" 앞이 한글이 되어버려 축약형으로 인정되지 않습니다.
-    #    실제로 "해당하면 영 제8조제1항제1호" 가 법률 제8조(타인 토지에의 출입)로
-    #    잘못 붙었습니다. 문장 안에 있는 인용은 대부분 이 꼴입니다.
     m = re.search(r"(?:^|[^가-힣])(영|규칙|법)\s*$", (prefix or "").strip())
     if m:
         base = _norm(default)
-        for suf in _SUFFIX:            # default 가 하위법령이면 법률 이름만 남깁니다
+        for suf in _SUFFIX:
             if base.endswith(suf):
                 base = base[: -len(suf)]
                 break
@@ -598,7 +483,7 @@ def _guess_law(prefix: str, laws: list[dict], default: str) -> str:
     return default
 
 
-_HANG_MARKS = "①②③④⑤⑥⑦⑧⑨⑩⑪⑫⑬⑭⑮⑯⑰⑱⑲⑳"     # ★ v1.45 (C-23) ⑯~⑳ 추가
+_HANG_MARKS = "①②③④⑤⑥⑦⑧⑨⑩⑪⑫⑬⑭⑮⑯⑰⑱⑲⑳"
 
 
 def extract_hang(body: str, hang: str = "", ho: str = "") -> str:
@@ -613,7 +498,6 @@ def extract_hang(body: str, hang: str = "", ho: str = "") -> str:
         return ""
 
     text = body
-    # 항 추출
     if hang:
         try:
             n = int(hang)
@@ -627,9 +511,6 @@ def extract_hang(body: str, hang: str = "", ho: str = "") -> str:
                 j = text.find(nxt, i) if nxt else -1
                 text = text[i:j] if j > i else text[i:]
 
-    # 호 추출 — 항 안에서 "4." 부터 "5." 직전까지
-    # ★ v1.45 (C-20261028-23) — "<개정 2015. 3. 1.>" 의 "3." 을 3호로 읽었습니다. 호는 줄 첫머리에서 먼저 찾고
-    #   (law_client 가 호마다 줄을 바꿈), 줄 머리에서 못 찾을 때만 예전처럼 아무 데서나 찾습니다.
     if ho:
         pat = re.compile(r"(?m)^\s*" + re.escape(ho) + r"\.\s")
         line_mode = bool(pat.search(text))
@@ -649,15 +530,8 @@ def extract_hang(body: str, hang: str = "", ho: str = "") -> str:
     return text.strip()
 
 
-# ── 별표 경고 판정 ──────────────────────────────────────────────
-# 별표 이름이 나왔다고 다 경고할 일이 아닙니다. 경고해야 하는 것은
-# **본문을 못 받은 별표의 수치를 답변이 말한 경우** 뿐입니다.
 _BP_RE = re.compile(r"(별표|별지)\s*제?\s*(\d+)")
-# ★ v1.45 (C-20261028-13) — 가지번호(별표 3의2)와 바로 앞 「법령명」 까지 읽는 판정용 패턴.
-#   _BP_RE 는 "별표 3의2" 를 별표 3 으로 읽어 없는 별표 경고를 놓치거나(3의2) 엉뚱하게 띄웠습니다(3).
 _BP_FULL_RE = re.compile(r"(별표|별지)\s*제?\s*(\d+)(?:\s*의\s*(\d+))?")
-# ★ v1.45 (C-20261028-25) — 연도·날짜("2024년", "2024. 3. 1.")는 별표 수치가 아닙니다. 수치 판정 전에 지웁니다.
-#   (부정문 "2024년 개정된 별표 4 원문은 확인할 수 없습니다" 에 경고가 뜨던 문제)
 _BP_DATE_RE = re.compile(r"(?<!\d)(?:19|20)\d{2}\s*(?:년(?:\s*\d{1,2}\s*월(?:\s*\d{1,2}\s*일)?)?"
                          r"|[.\-/]\s*\d{1,2}\s*[.\-/]\s*\d{1,2}\.?)")
 
@@ -676,23 +550,15 @@ def _bp_found(sent: str) -> list:
         out.append((m.group(1), no, lm.group(1).strip() if lm else ""))
     return out
 
-# 수치 — 이게 없으면 담당자가 잘못 안내할 숫자 자체가 없습니다.
-# ★ 2026-08-19 — 한 글자 단위(원·일·분·배·주…)는 **다른 낱말의 첫 글자**이기도
-#   합니다. 예전 패턴은 "별표 4 원문이" 의 `4 원` 을 금액으로 읽어서, 수치가
-#   전혀 없는 부정문에까지 경고를 띄웠습니다.
-#   → 여러 글자 단위는 그대로 두고, 한 글자 단위는 **뒤가 한글이 아니거나
-#     조사·수식어로 이어질 때만** 단위로 인정합니다.
 _NUM_RE = re.compile(
     r"\d[\d,\.]*\s*(?:"
     r"제곱미터|킬로그램|퍼센트|주일|개월|시간|리터|만원|킬로|그램|미터|%"
     r"|(?:년|월|일|주|분|초|회|차|건|명|배|톤|원)"
     r"(?:(?![가-힣])"
     r"|(?=마다|이내|이상|이하|미만|초과|간|째|씩|동안|부터|까지)"
-    r"|(?=[입이은는을를에의과와로만도및]))"       # 조사·서술격 조사 (8년입니다, 30일에 …)
+    r"|(?=[입이은는을를에의과와로만도및]))"
     r")")
 
-# 부정·유보 문맥. 이런 문장은 "근거로 썼다" 가 아니라
-# "근거가 없어서 말할 수 없다" 는 **경고와 같은 편** 의 문장입니다.
 _BP_NEGATIVE = (
     "제공되지", "제공되어", "확인되지", "확인할 수 없", "확인이 어렵",
     "확정할 수 없", "판단할 수 없", "알 수 없", "가져오지 못", "받지 못",
@@ -721,29 +587,18 @@ def _bp_used_as_basis(text: str) -> set:
     있을 때만 경고합니다.
     """
     out = set()
-    # 줄바꿈과 문장 끝(다./요./음.)으로 자릅니다.
     sents = re.split(r"\n|(?<=다\.)\s|(?<=요\.)\s|(?<=음\.)\s", str(text or ""))
     for i, sent in enumerate(sents):
-        # ★ v1.45 (C-20261028-13) — (구분, 번호, 앞 법령명) 으로 돌려줍니다. 원래: found = _BP_RE.findall(sent)
         found = _bp_found(sent)
         if not found:
             continue
 
-        # ★ 2026-08-19 — 순서를 뒤집었습니다. 예전에는 부정어가 하나라도 있으면
-        #   무조건 넘어갔는데, 우리가 프롬프트로 "원문을 확인해야 한다" 고
-        #   시켜 놓았기 때문에 모델이 **수치와 유보를 한 문장에** 같이 씁니다.
-        #     "별표 4에 따라 5년마다 실시하나, 정확한 주기는 원문을 확인하십시오."
-        #   이러면 경고가 안 뜨는데, 정작 위험한 "5년" 은 화면에 남습니다.
-        #   → 수치가 있으면 유보 문구가 있어도 경고합니다.
-        #     유보만 있고 수치가 없을 때만 넘어갑니다.
-        if _bp_num(sent):                    # ★ v1.45 (C-25) 원래: _NUM_RE.search(sent)
+        if _bp_num(sent):
             out.update(found)
             continue
         if any(w in sent for w in _BP_NEGATIVE):
             continue
 
-        # 수치가 다음 문장으로 넘어간 경우도 봅니다.
-        #   "검사주기는 별표 4에서 정합니다. 그 주기는 8년입니다."
         nxt = sents[i + 1] if i + 1 < len(sents) else ""
         if nxt and not _BP_RE.search(nxt) and _bp_num(nxt) \
                 and not any(w in nxt for w in _BP_NEGATIVE):
@@ -751,16 +606,6 @@ def _bp_used_as_basis(text: str) -> set:
     return out
 
 
-# ── 【계산】 블록 검산 ────────────────────────────────────────────
-# ★ 2026-08-19 실사용 사고 —
-#   답변이 이렇게 나왔습니다.
-#       기준일: 2010년 9월 23일   + 주기: 8년   = 다음 검사: 2038년 9월 23일
-#   2010 + 8 = 2018 입니다. **20년이 틀렸습니다.**
-#   게다가 사용자는 "설치 15년 경과" 라고만 했지 날짜를 준 적이 없습니다.
-#   2010년 9월 23일은 모델이 지어낸 날짜입니다.
-#
-#   산수는 프롬프트로 고쳐지지 않습니다. 로컬 모델에게 연도 덧셈을 정확히
-#   시키는 것보다, **나온 답을 코드가 검산**하는 편이 확실합니다.
 _CALC_BLOCK_RE = re.compile(r"【계산】(.*?)(?=【|\Z)", re.S)
 _CALC_DATE_RE = re.compile(r"(\d{4})\s*[년\-\.\/]\s*(\d{1,2})\s*[월\-\.\/]\s*(\d{1,2})\s*일?")
 _CALC_PERIOD_RE = re.compile(r"(\d+)\s*(년|개월|달|주|일)")
@@ -783,7 +628,6 @@ def _add_period(y: int, m: int, d: int, n: int, unit: str) -> tuple:
             return t.year, t.month, t.day
         except ValueError:
             return y, m, d
-    # ★ v1.45 (C-20261028-22) — 답변 속 "0000년 00월 00일" 같은 날짜면 monthrange 예외로 질문 전체가 실패했습니다.
     try:
         d = min(d, calendar.monthrange(y, m)[1])
     except (ValueError, calendar.IllegalMonthError):
@@ -807,16 +651,11 @@ def verify_calc(answer_text: str, user_text: str) -> list[str]:
     block = mb.group(1)
 
     dates = _CALC_DATE_RE.findall(block)
-    # ★ 주기를 찾을 때는 **날짜를 먼저 지웁니다.** 안 그러면 "2010년 9월" 의
-    #   "2010년" 이 주기로 잡혀 "+ 2010년" 이라는 엉뚱한 경고가 나갑니다.
     periods = [(n, u) for n, u in _CALC_PERIOD_RE.findall(_CALC_DATE_RE.sub(" ", block))
                if len(n) <= 3]
     if len(dates) < 2 or not periods:
-        return out                               # 계산 형태가 아니면 넘어갑니다
+        return out
 
-    # ★ v1.45 (C-20261028-24) — 결과 날짜를 블록의 **마지막 날짜**로 잡아, 결과 뒤에 "그다음 2025-04-01" 같은
-    #   다른 날짜가 있으면 맞는 계산에 '틀림' 경고가 떴습니다. '=' 로 시작하는 줄(없으면 '다음·기한' 줄)의 첫 날짜를 씁니다.
-    #   출발 후보는 그 앞에 나온 날짜들. 되돌리기: _ri 계산을 빼고 dates[-1]·dates[:-1] 로.
     _ri = len(dates) - 1
     _pos = [m_.start() for m_ in _CALC_DATE_RE.finditer(block)]
     _lines_at = [block.rfind("\n", 0, p_) + 1 for p_ in _pos]
@@ -832,11 +671,6 @@ def verify_calc(answer_text: str, user_text: str) -> list[str]:
     except ValueError:
         return out
 
-    # ★ 2026-10-02 — 기준일이 "설치일 + 10년" 처럼 한 번 더 계산된 날이고,
-    #   결과도 "+ 8년 이후 90일" 처럼 여러 단계를 거칩니다. 주기 하나만
-    #   더해 보면 맞는 계산도 틀렸다고 경고했습니다. 블록에 적힌 주기들의
-    #   **조합**(순서대로 일부를 골라 더한 것)까지 맞춰 봅니다.
-    #   2010 + 8 = 2038 같은 산수 실수는 어느 조합으로도 안 나오므로 여전히 잡힙니다.
     plist = []
     for n_s, unit in periods[:6]:
         try:
@@ -855,9 +689,8 @@ def verify_calc(answer_text: str, user_text: str) -> list[str]:
             seen.add(t)
         return seen
 
-    # (1) 산수 검산 — 블록 안 어떤 날짜에서 출발해 주기 조합으로 결과가 나오면 통과
     ok = False
-    for ds in dates[:_ri]:                       # ★ v1.45 (C-24) 원래: dates[:-1]
+    for ds in dates[:_ri]:
         try:
             start = tuple(int(x) for x in ds)
         except ValueError:
@@ -866,8 +699,6 @@ def verify_calc(answer_text: str, user_text: str) -> list[str]:
             ok = True
             break
     if not ok:
-        # 경고 문구에 쓸 주기는 "주기" 라고 적힌 줄의 것을 우선합니다.
-        # (그냥 첫 번째를 쓰면 "설치 후 10년 경과일" 의 10년을 집습니다)
         pick = periods[0]
         for line in block.splitlines():
             if "주기" in line:
@@ -885,9 +716,6 @@ def verify_calc(answer_text: str, user_text: str) -> list[str]:
             f"날짜를 그대로 쓰지 마시고 직접 확인하세요."
         )
 
-    # (2) 기준일이 사용자가 준 날짜인지
-    # v1.40 (C-20261017-1) — 사용자 글의 숫자를 모두 이어 붙여 찾으면 "30,000리터 … 2020년" → "300002020" 처럼
-    #   서로 다른 숫자의 경계를 넘어 우연히 맞았습니다. 날짜는 날짜끼리, 연도는 낱말 경계가 있는 4자리끼리 비교합니다.
     _udates = set()
     for ds in _CALC_DATE_RE.findall(user_text or ""):
         try:
@@ -895,7 +723,6 @@ def verify_calc(answer_text: str, user_text: str) -> list[str]:
         except ValueError:
             pass
     _uyears = {int(y) for y in re.findall(r"(?<!\d)((?:19|20)\d{2})(?!\d)", user_text or "")}
-    # ★ 2026-10-02 — 기준일이 사용자가 준 날짜에서 계산된 날(설치일 + 10년)이면 정상입니다.
     derived = False
     for ds in _CALC_DATE_RE.findall(user_text or ""):
         try:
@@ -922,7 +749,6 @@ def verify_citations(answer_text: str, laws: list[dict]) -> list[dict]:
       법률 제3조와 시행령 제3조가 둘 다 있으므로, 인용문 앞의 법령명까지 봐야
       "시행령 제3조"를 법률 제3조로 오인하지 않습니다.
     """
-    # (법령명, 조문번호, 가지번호) -> (제목, 본문, 계층)
     index = {}
     for law in laws:
         for art in law.get("articles", []):
@@ -931,7 +757,6 @@ def verify_citations(answer_text: str, laws: list[dict]) -> list[dict]:
                 index[key] = (art.get("조문제목", ""), art.get("조문내용", ""),
                               law.get("level") or law.get("kind", ""))
 
-    # 기본 법령 = 가장 상위(법률). 법령명 없이 "제14조"만 쓴 경우에 씁니다.
     base_law = ""
     for lv in ("법률", "법령"):
         for law in laws:
@@ -945,20 +770,10 @@ def verify_citations(answer_text: str, laws: list[dict]) -> list[dict]:
 
     seen = set()
     out = []
-    # ★ 법령명 없이 "(제12조제2항)" 만 쓴 인용의 기준.
-    #   답변은 【근거】에서 「…시행규칙」 제12조제2항 처럼 이름을 밝히고,
-    #   【설명】에서는 문장 끝에 (제12조제2항) 만 붙입니다.
-    #   기본값(법률)으로 떨어뜨리면 시행규칙 제12조가 법률 제12조로 붙습니다.
-    #   (실제로 "신고수리 여부 통지" 조문이 검사주기 근거로 표시됐습니다)
-    #   그래서 **마지막으로 이름이 명시된 법령**을 기준으로 삼습니다.
-    #   축약형("영"·"규칙")은 기준을 바꾸지 않습니다. 그때그때 가리키는 것이라
-    #   기준으로 삼으면 뒤따르는 인용이 줄줄이 끌려갑니다.
     ctx_law = ""
     for prefix, jo, gaji, hang, ho in CITE_RE.findall(answer_text):
         gaji = gaji or ""
         named = _named_law(prefix, laws)
-        # ★ v1.42 — 약칭으로 찾은 이름이 수집한 법령이 아니면 기준 법령(ctx_law)으로 삼지 않습니다
-        #   (뒤따르는 '(제N조)' 인용이 수집 안 된 법령으로 끌려가 엉뚱한 불일치 경고가 붙지 않게). 원래: if named:
         if named and any(_norm(l.get("name", "")) == _norm(named) for l in laws):
             ctx_law = named
         law_name = _guess_law(prefix, laws, ctx_law or base_law)
@@ -969,15 +784,11 @@ def verify_citations(answer_text: str, laws: list[dict]) -> list[dict]:
         if ho:
             label += f"제{ho}호"
 
-        # 답변의 【근거】 블록과 【설명】에서 같은 조문이 두 번 인용되므로
-        # 법령명·조·가지·항·호를 모두 합친 키로 중복을 걸러냅니다.
         key = (_norm(law_name), jo, gaji, hang or "", ho or "")
         if key in seen:
             continue
         seen.add(key)
 
-        # AI 가 "시행령"/"시행규칙" 이라고 적었는데 실제로 찾은 법령이
-        # 그 단계가 아니면, 조문을 잘못 짚은 것입니다. 화면에 경고를 띄웁니다.
         want = ""
         for suf in _SUFFIX:
             if _norm(prefix).endswith(suf):
@@ -990,11 +801,6 @@ def verify_citations(answer_text: str, laws: list[dict]) -> list[dict]:
             mismatch = (f"답변은 '{want}' 이라고 했으나 실제로는 "
                         f"'{law_name}' 의 조문입니다 — 원문을 반드시 확인하세요")
         if hit is None:
-            # 법령명 추정이 빗나갔을 수 있으니, 번호만으로 한 번 더 찾아봅니다.
-            # ★ v1.40 (C-20261017-2) — 답변이 법령명을 **직접 밝힌** 인용(「…시행규칙」 제16조)인데 그 법령에
-            #   그 조문이 없으면, 같은 번호의 다른 법령 조문(법률 제16조 '협약의 체결')을 '확인'으로 붙이지 않습니다.
-            #   예전에는 ok=True 로 집계돼 '인용 검증 n/n 확인' 이 실제보다 좋게 나왔습니다(U-20261017-21).
-            #   법령명 없이 "제16조" 만 쓴 인용은 추정이 빗나갔을 수 있으니 예전처럼 번호로 찾습니다.
             explicit = bool(named) or bool(re.search(
                 r"(「[^」]+」|\[[^\]]+\]|[가-힣ㆍ·]+(법|법률|시행령|시행규칙|규칙|규정))\s*$", (prefix or "").strip()))
             for (nm, j, g), v in index.items():
@@ -1004,7 +810,6 @@ def verify_citations(answer_text: str, laws: list[dict]) -> list[dict]:
                             mismatch = (f"답변이 든 '{law_name}' {label} 은 수집한 조문에 없습니다"
                                         f"(같은 번호는 '{nm}' 에만 있음) — 근거를 원문에서 확인하세요")
                             break
-                        # AI 가 적은 법령명과 실제 조문이 있는 법령이 다릅니다.
                         mismatch = f"답변은 '{law_name}' 이라고 했으나 실제로는 '{nm}' 조문입니다"
                     law_name, hit = nm, v
                     break
@@ -1016,8 +821,6 @@ def verify_citations(answer_text: str, laws: list[dict]) -> list[dict]:
                 "ok": hit is not None,
                 "law": law_name if hit else "",
                 "title": hit[0] if hit else "",
-                # 인용한 항·호만 잘라 보여줍니다. 조문 전체를 넣으면
-                # 제2항제4호와 제2항제5호가 똑같은 내용으로 보입니다.
                 "text": (extract_hang(hit[1], hang, ho)[:1200] if hit else ""),
                 "full": (hit[1][:4000] if hit else ""),
                 "level": hit[2] if hit else "",
@@ -1027,12 +830,8 @@ def verify_citations(answer_text: str, laws: list[dict]) -> list[dict]:
     return out
 
 
-# ── 되묻기 라운드 사이 재사용 캐시 ────────────────────────────
-# 되묻기는 조문을 확보한 뒤에 하므로(v1.7), 라운드가 넘어갈 때마다
-# 용어 변환과 법제처 조회가 처음부터 다시 실행되고 있었습니다.
-# 질문과 검색 대상이 같으면 그 결과를 재사용합니다.
 _SEARCH_CACHE: dict = {}
-_CACHE_TTL = 600.0          # 초. 이보다 오래된 것은 버립니다.
+_CACHE_TTL = 600.0
 
 
 def _cache_get(key):
@@ -1046,19 +845,12 @@ def _cache_get(key):
 
 
 def _cache_put(key, value):
-    # 오래된 항목을 정리해 무한정 쌓이지 않게 합니다.
-    # v1.40 (C-20261017-7) — 여러 요청 스레드가 함께 쓰므로 순회 전에 복사합니다
-    #   (다른 스레드가 동시에 넣으면 'dictionary changed size during iteration').
     now = time.time()
     for k in [k for k, v in list(_SEARCH_CACHE.items()) if now - v[0] > _CACHE_TTL]:
         _SEARCH_CACHE.pop(k, None)
     _SEARCH_CACHE[key] = (now, value)
 
 
-# ── 부정 조건 ────────────────────────────────────────────────
-# 되묻기에서 "아니오" 로 답한 항목은 검색 범위를 좁히는 중요한 조건입니다.
-# 자연어로 프롬프트에 넣기만 하면 검색 단계에는 반영되지 않아,
-# "방사성폐기물이 아니다" 라고 답했는데 방사성폐기물관리법이 조회되는 일이 생깁니다.
 _NO_ANSWER_RE = re.compile(
     r"([^/]{2,60}?)\s*[:：]\s*(아니오|아니요|아니다|해당없음|해당하지\s*않음|없음|아님)")
 
@@ -1070,18 +862,11 @@ def _excluded_terms(answered: str) -> list:
     """
     out = []
     for q, _ in _NO_ANSWER_RE.findall(answered or ""):
-        # v1.40 (C-20261017-6) — '…에 해당하나요/…인가요' 처럼 **대상·종류**를 묻는 질문만 주제 배제로 봅니다.
-        #   "허가를 받았나요?: 아니오", "신고를 했나요?: 아니오" 같은 사실 질문까지 '허가'·'신고' 를
-        #   검색 제외어로 뽑아 핵심어가 검색에서 빠질 수 있었습니다.
         if not re.search(r"(에\s*해당하나요|에\s*해당합니까|에\s*해당되나요|인가요|입니까|맞나요|인지요)\s*\??\s*$",
                          q.strip()):
             continue
-        # 질문에서 핵심 명사만 남깁니다.
-        # ★ v1.44 (C-20261028-09) — 위 통과 조건에 있는 '에 해당되나요'·'인지요' 꼬리를 여기서 못 떼어
-        #   "방사성폐기물에 해당되나요?: 아니오" → 제외어 '해당되나요?' 가 되어 법령 제외가 안 됐습니다. 두 꼬리 추가.
         t = re.sub(r"(에\s*해당하나요|에\s*해당합니까|에\s*해당되나요|인가요|입니까|맞나요|인지요|있나요|"
                    r"하나요|받았나요|였나요)\s*\??$", "", q.strip())
-        # "배출하는 폐기물이 방사성폐기물" 처럼 앞말이 붙으면 마지막 명사구만 씁니다.
         t = t.split()[-1] if t.split() else ""
         t = re.sub(r"(를|을|이|가|은|는|의)$", "", t).strip()
         if len(t) >= 2:
@@ -1141,12 +926,6 @@ def _is_repeat_question(q: str, already: set) -> bool:
     for a in already:
         if len(a) >= 8 and (n.startswith(a) or a.startswith(n)):
             return True
-    # ★ 2026-09-29 — 표현만 조금 바꿔 다시 묻는 경우가 3~4라운드 이어졌습니다.
-    #     "누출검사를 언제 받았습니까?" → "마지막 누출검사를 언제 받았습니까?"
-    #     → "주유소 지하 저장시설 누출검사를 언제 받았습니까?"
-    #     "시설 규모는 어떻게 됩니까" → "세차장 규모는 어떻게 됩니까"
-    #   한쪽이 다른 쪽을 통째로 품거나, 글자 유사도가 0.72 이상이면 같은 질문으로 봅니다.
-    #   (실측: 서로 다른 질문끼리는 0.3~0.65, 표현만 바꾼 질문은 0.78 이상)
     from difflib import SequenceMatcher
     for a in already:
         if len(a) >= 6 and len(n) >= 6:
@@ -1195,7 +974,7 @@ def api_pdf(req: PdfRequest):
     from fastapi.responses import Response
     try:
         data = pdf_maker.build(req.model_dump())
-    except RuntimeError as e:          # 폰트 없음
+    except RuntimeError as e:
         return _err(str(e))
     except Exception as e:
         return _err(f"PDF 생성 실패: {e}")
@@ -1227,13 +1006,11 @@ def api_version():
     }
 
 
-# --- 화면 -----------------------------------------------------------
 @app.get("/")
 def index():
     return FileResponse("static/index.html")
 
 
-# --- API ------------------------------------------------------------
 @app.get("/api/search")
 def api_search(q: str, target: str = "law"):
     """법령명으로 목록 검색."""
@@ -1254,7 +1031,6 @@ def api_search(q: str, target: str = "law"):
                 "enforced": law_client.pick(r, "시행일자"),
                 "promulgated": law_client.pick(r, "공포일자"),
                 "promulgation_no": law_client.pick(r, "공포번호"),
-                # v1.40 (C-20261017-9) — 태그 확인용 원본 행(_raw) 삭제: 화면에서 안 쓰고 응답만 커짐
             }
         )
     return {"count": len(items), "items": items}
@@ -1283,10 +1059,8 @@ def api_raw(request: Request, target: str, value: str, mode: str = "search"):
       예) /api/raw?target=licbyl&value=토양환경보전법 시행규칙&search=2
           /api/raw?target=licbyl&value=x&MST=281911
     """
-    # ★ v1.40 (C-20261017-8) — 이 PC 에서 직접 부른 요청만 받습니다(자동 테스트 --raw-file 용).
     #   공개 주소(Cloudflare 터널)로 들어온 요청은 cloudflared 가 같은 PC 에서 넘겨주므로 접속 주소만으로는
     #   구분이 안 돼, 터널이 붙이는 머리글(Cf-Connecting-Ip / X-Forwarded-For)이 있으면 막습니다.
-    #   누구나 이 서버를 통해 인증키(OC) 사용량으로 법제처를 부를 수 있던 문제. .env RAW_API_PUBLIC=1 이면 예전처럼 엽니다.
     if os.getenv("RAW_API_PUBLIC", "0") != "1":
         host = (request.client.host if request.client else "") or ""
         fwd = request.headers.get("cf-connecting-ip") or request.headers.get("x-forwarded-for")
@@ -1311,7 +1085,7 @@ async def api_ask(req: AskRequest):
     """
     from fastapi.responses import StreamingResponse
 
-    progress = _LoggedSteps()    # _ask_sync 가 단계마다 채웁니다 (서버 로그에도 자동 기록)
+    progress = _LoggedSteps()
 
     async def gen():
         loop = asyncio.get_running_loop()
@@ -1321,14 +1095,14 @@ async def api_ask(req: AskRequest):
         while not task.done():
             await asyncio.sleep(1.0)
             if sent < len(progress):
-                while sent < len(progress):      # 새로 생긴 단계를 흘려보냄
+                while sent < len(progress):
                     yield json.dumps({"progress": progress[sent]},
                                      ensure_ascii=False) + "\n"
                     sent += 1
                 idle = 0
             else:
                 idle += 1
-                if idle >= 5:                    # 5초간 진전이 없으면 신호만 보냄
+                if idle >= 5:
                     idle = 0
                     yield '{"ping":1}' + "\n"
         try:
@@ -1341,14 +1115,6 @@ async def api_ask(req: AskRequest):
             yield json.dumps({"progress": progress[sent]}, ensure_ascii=False) + "\n"
             sent += 1
 
-        # ★ 2026-08-19 — _ask_sync 는 오류 경로에서 JSONResponse **객체**를
-        #   돌려줍니다(_err). 이 엔드포인트는 예전에는 그것을
-        #   그대로 반환했지만 지금은 NDJSON 으로 직렬화하므로,
-        #   "TypeError: Object of type JSONResponse is not JSON serializable" 가
-        #   여기서 터집니다. 그것도 try 밖이라 스트림이 중간에 끊기고, 화면에는
-        #   원인 대신 "서버 응답이 중간에 끊겼습니다" 만 뜹니다.
-        #   → 로컬 LLM 이 죽었거나 한도를 넘긴 **모든 경우**가 "연결 끊김" 으로
-        #     보였고, 한도 팝업은 한 번도 뜰 수 없었습니다.
         if isinstance(result, JSONResponse):
             try:
                 result = json.loads(bytes(result.body).decode("utf-8"))
@@ -1365,7 +1131,6 @@ async def api_ask(req: AskRequest):
     return StreamingResponse(gen(), media_type="application/x-ndjson")
 
 
-# ── 법령명 비교·체계도 검색 도우미 ─────────────────────────────
 _DOTS_RE = re.compile(r"[·ㆍ・‧∙]")
 
 
@@ -1454,12 +1219,7 @@ def _ctx_key(f: dict, a: dict) -> str:
     return f"{f.get('name', '')} {str(a.get('조문제목', ''))[:40]}".strip()
 
 
-# ── v1.35 — 개정 전후 비교 ─────────────────────────────────────────
-# 실사용 2026-10-10: "불소 우려기준이 2024년 12월 12일에 바뀌었는데 몇에서 몇으로?" → 현행 본문만 봐서
-# "변경되지 않았다" 고 답함. 질문이 개정·변경을 물으면 법제처 연혁에서 그 개정 **직전 버전** 본문을 받아
-# 지금 컨텍스트의 같은 조문·별표와 줄 단위로 비교해 [개정 이력] 블록으로 붙입니다.
 HISTORY_COMPARE = os.getenv("HISTORY_COMPARE", "1") != "0"
-# v1.40 (C-20261017-10) — '변경신고·변경허가' 처럼 개정과 무관한 '변경' 은 빼고 봅니다
 _CHANGE_RE = re.compile(r"(바뀌|바꼈|바뀐|변경(?!\s*(신고|허가|등록|승인|사항|계약|하려|하면|할\s))|개정|달라졌|달라진|신구|전후|예전에는|이전에는|원래는|몇에서\s*몇|올랐|내렸|완화|강화)")
 _QDATE_RE = re.compile(r"(\d{4})\s*[년.\-/]\s*(\d{1,2})\s*[월.\-/]\s*(\d{1,2})")
 _HIST_CACHE: dict = {}
@@ -1471,8 +1231,6 @@ def _hist_cached(kind: str, key: str, fn):
     if hit and time.time() - hit[0] < 3600:
         return hit[1]
     val = fn()
-    # ★ v1.45 (C-20261028-20) — 법제처 오류면 law_client 가 [] 를 돌려주는데 그걸 1시간 기억해 개정 비교가 계속 빠졌습니다.
-    #   빈 결과는 기억하지 않습니다. 원래: 항상 저장
     if val:
         _HIST_CACHE[k] = (time.time(), val)
     return val
@@ -1498,7 +1256,6 @@ def _diff_lines(old: str, new: str, keywords, limit: int = 12):
         return out
 
     def _norm(ln):
-        # 개정 표시·부처 이름 바뀜(환경부 → 기후에너지환경부)·띄어쓰기는 내용 변경이 아니므로 무시하고 비교
         ln = re.sub(r"<\s*(개정|신설|삭제|본조신설|전문개정|제목개정)[^>]*>", "", ln)
         ln = re.sub(r"[■\s]+", "", ln.replace("기후에너지환경부", "환경부"))
         return ln
@@ -1511,7 +1268,7 @@ def _diff_lines(old: str, new: str, keywords, limit: int = 12):
     def _rank(lst):
         hit = [ln for ln in lst if any(k in ln for k in kws)]
         rest = [ln for ln in lst if ln not in hit]
-        return (hit + rest[:2 if hit else limit])[:limit]     # 질문 낱말이 든 줄이 있으면 나머지는 2줄만
+        return (hit + rest[:2 if hit else limit])[:limit]
     return _rank(gone), _rank(came)
 
 
@@ -1522,8 +1279,6 @@ def _history_block(question: str, use: list, prio: dict, keywords, steps: list, 
       · 날짜가 없으면 현행에서 한 버전씩 거슬러 올라가며(최대 6개) 지금 근거로 쓰는 조문·별표가
         **처음으로 달라지는 버전**을 찾습니다. 그 바로 다음 개정이 바꾼 것입니다.
     """
-    # v1.40 (C-20261017-10) — 개정을 묻는지는 **질문 원문**으로만 판단합니다(되묻기 질문 문장의 '변경·강화' 에 걸리던 문제).
-    #   날짜는 질문에 없으면 되묻기 **답** 쪽에서만 찾습니다(되묻기 질문 문장·설치일 같은 다른 날짜 제외는 어렵지만, 질문이 개정을 물을 때만 씀).
     if not HISTORY_COMPARE or not _CHANGE_RE.search(question or ""):
         return ""
     _ans_only = " ".join(re.split(r"[:：]", seg, 1)[1] for seg in (answered or "").split(" / ") if re.search(r"[:：]", seg))
@@ -1538,9 +1293,6 @@ def _history_block(question: str, use: list, prio: dict, keywords, steps: list, 
     def _d(x):
         return f"{x[:4]}.{int(x[4:6])}.{int(x[6:8])}" if len(x) == 8 else x
 
-    # 날짜 없이 거슬러 올라갈 때는 "질문의 알맹이 낱말"(예: 불소)이 바뀐 줄에 들어 있어야 그 개정으로 봅니다.
-    #   (실측: 법률의 장 제목·부처명 같은 다른 변경에 먼저 걸려 엉뚱한 개정을 답함)
-    #   알맹이 = 지금 근거 조문 중 3개 이하에만 나오는 낱말(흔한 "기준"·"토양오염도" 는 제외), 변경을 묻는 말 제외.
     texts = [str(a.get("조문내용", "")) for _, a in ordered]
     core_kw = [k for k in (keywords or []) if len(k) >= 2 and not _CHANGE_RE.search(k)
                and 0 < sum(1 for t in texts if k in t) <= 3]
@@ -1589,14 +1341,13 @@ def _history_block(question: str, use: list, prio: dict, keywords, steps: list, 
         out.sort(key=lambda x: -x[5])
         return [x[:5] for x in out[:4]]
 
-    # 알맹이 낱말이 근거 조문에 많이 든 법령부터 봅니다(불소 → 별표 3·7 이 있는 시행규칙 먼저).
     if core_kw:
         def _kwn(nm):
             return sum(1 for f, a in ordered if f.get("name") == nm
                        for k in core_kw if k in str(a.get("조문내용", "")))
         laws.sort(key=lambda nm: -_kwn(nm))
-    found_change = None                          # (법령명, 개정 행, 직전 행, 비교 결과)
-    _later_chg = False                           # ★ v1.45 (C-21) 찾은 개정 뒤에 다른 줄이 바뀐 버전이 있었는지
+    found_change = None
+    _later_chg = False
     checked = []
     for nm in laws[:3]:
         try:
@@ -1608,22 +1359,18 @@ def _history_block(question: str, use: list, prio: dict, keywords, steps: list, 
         if want_date:
             for i, h in enumerate(hist[:-1]):
                 if want_date in (h["prom"], h["ef"]):
-                    # 그 개정 버전 자체와 직전 버전을 비교(현행과 비교하면 이후 개정까지 섞임)
                     new_arts = None if i == 0 else (_old(h).get("articles") or [])
                     diffs = _compare(nm, _old(hist[i + 1]), new_arts)
                     found_change = (nm, h, hist[i + 1], diffs)
                     break
         else:
-            # v1.40 (C-20261017-11) — 앞쪽 과거 버전 3개는 본문을 동시에 받아 둡니다(순차 호출 대기 줄임, 캐시에 남음)
             try:
                 from concurrent.futures import ThreadPoolExecutor
                 with ThreadPoolExecutor(max_workers=3) as _ex:
                     list(_ex.map(_old, hist[1:min(len(hist), 4)]))
-            except Exception:                    # noqa: BLE001 — 미리 받기 실패는 아래 순차 호출이 다시 시도
+            except Exception:                    # noqa: BLE001
                 pass
             for j in range(1, min(len(hist), 7)):
-                # ★ v1.45 (C-20261028-21) — j≥2 에서 '현행 ↔ hist[j]' 를 비교해 그 뒤 다른 개정의 변경까지 섞였습니다.
-                #   바로 다음 버전(hist[j-1]) 본문과 비교합니다(j=1 은 현행 컨텍스트). 원래: _compare(nm, _old(hist[j]))
                 _newer = None if j == 1 else (_old(hist[j - 1]).get("articles") or [])
                 diffs = _compare(nm, _old(hist[j]), _newer)
                 checked.append(f"{nm} 시행 {_d(hist[j]['ef'])}")
@@ -1656,7 +1403,6 @@ def _history_block(question: str, use: list, prio: dict, keywords, steps: list, 
         lines += [f"    개정 전: {ln[:160]}" for ln in gone]
         lines += [f"    개정 후: {ln[:160]}" for ln in came]
     if not want_date:
-        # ★ v1.45 (C-21) — 그 뒤 버전에서 다른 줄이 바뀌었으면 "더 바뀌지 않았다" 고 하지 않습니다.
         lines.append("(이 개정 이후 이 조문·별표의 다른 줄도 바뀌었습니다. 현행 값은 [조문 원문] 기준)" if _later_chg else
                      "(이 개정 이후 현행까지 이 조문·별표는 더 바뀌지 않았습니다. 현행 값은 [조문 원문] 기준)")
     steps.append({"name": "개정 이력 비교",
@@ -1664,38 +1410,23 @@ def _history_block(question: str, use: list, prio: dict, keywords, steps: list, 
     return "\n\n[개정 이력 — 법제처 연혁 본문 비교]\n" + "\n".join(lines)
 
 
-# v1.35 — 질문에 제목이 그대로 나온 조문을 맨 앞에 둘지 (.env NAMED_FIRST=0 이면 끔)
 NAMED_FIRST = os.getenv("NAMED_FIRST", "1") != "0"
 
 _NEG_RE = re.compile(r"([가-힣A-Za-z0-9·ㆍ]{4,30}?)\s*(?:이|가)\s*아(?:니|닌|님)")
 
 
-# ── v1.36 — 참고 사례(법령해석례·중앙부처 해석·판례) ─────────────────────────
-# 답변 아래에 "비슷한 질의·판결" 을 참고로 보여 줍니다.
-# v1.38 — 제목 검색으로 후보를 넓게 모으고 LLM 이 같은 쟁점만 고름(최대 3건).
-# v1.40 — 답변 **전에** 고르고 본문(질의요지·회답)으로 한 번 더 확인한 것만 답변 지시에 참고로 넣음(CASE_IN_ANSWER).
 RELATED_CASES = os.getenv("RELATED_CASES", "1") != "0"
-# v1.38 — 참고 사례 후보 중 LLM 에 보일 개수
 CASE_LLM_POOL = int(os.getenv("CASE_LLM_POOL", "10"))
-# v1.37 — 법령과 무관한 질문 거르기(ai_client.scope_check). 0 이면 끔
 SCOPE_CHECK = os.getenv("SCOPE_CHECK", "1") != "0"
-# ★ v1.50 — 법령 질문 + 무관한 부탁(점심 메뉴 등)이 섞인 질문: 법령 부분만 검색·답변하고 나머지는 답하지 않았다고 알림.
-#   실사용 2026-11-04 #1104-020: "9급 응시 자격 조문 + 점심 뭐 먹지" → 검색어 변환이 '점심 식사 시 금연 의무'라는
-#   묻지 않은 측면을 지어내 국민건강증진법으로 답함. 원래 질문 → (시각, 법령 부분, 뺀 부분). 되묻기 라운드에도 같은 질문으로 씀.
-#   되돌리기: SCOPE_TRIM=0 (.env) — 예전처럼 원래 질문 그대로.
 SCOPE_TRIM = os.getenv("SCOPE_TRIM", "1") != "0"
 _SCOPE_TRIM: dict = {}
-_SCOPE_TRIM_TTL = 3600.0     # 되묻기 응답이 늦어도(applog 블록과 같은 1시간) 같은 법령 부분을 씀
-# ★ v1.40 — 주 법령 LLM 선택(법령 추측과 지능형 1위가 엇갈릴 때). .env LAW_PICK=0 이면 예전 규칙.
+_SCOPE_TRIM_TTL = 3600.0
 LAW_PICK = os.getenv("LAW_PICK", "1") != "0"
-# ★ v1.40 — 참고 해석례를 답변 전에 골라 답변 지시에 넣음(약 5~10초 추가). 0 이면 예전처럼 답변 뒤에 화면에만.
 CASE_IN_ANSWER = os.getenv("CASE_IN_ANSWER", "1") != "0"
-# ★ v1.40 — 답변 검토(오류 찾기 → 한 번 다시 쓰기). LLM 1~2회 추가(약 15~40초). .env ANSWER_REVIEW=0 이면 끕니다.
 ANSWER_REVIEW = os.getenv("ANSWER_REVIEW", "1") != "0"
 _CASE_LABEL = {"expc": "법제처 법령해석", "prec": "판례"}
 _CASE_URL = {"expc": "https://www.law.go.kr/LSW/expcInfoP.do?expcSeq={id}",
              "prec": "https://www.law.go.kr/LSW/precInfoP.do?precSeq={id}"}
-# v1.38 — 검색어로 쓰기엔 너무 넓은 말(제목 검색 결과가 수백 건). 관련성 판단은 LLM 이 하므로 목록은 짧게 둡니다.
 _CASE_WIDE = {"경우", "여부", "관련", "대상", "기준", "절차", "방법", "신고", "규정", "해당", "의무", "처분", "허가"}
 
 
@@ -1705,7 +1436,7 @@ def _case_search_cached(target: str, query: str) -> list:
     if hit is not None:
         return hit
     rows = law_client.case_search(target, query, display=50)
-    if rows:                      # ★ v1.45 (C-20261028-20) 오류·0건([])은 캐시하지 않음. 원래: 항상 _cache_put
+    if rows:
         _cache_put(key, rows)
     return rows
 
@@ -1747,7 +1478,6 @@ def _case_candidates(question: str, terms_words: list, found: list) -> list:
             seen.add((t, r["id"]))
             seen.add(tk)
             title = re.sub(r"\s+", "", r["title"])
-            # 넓게 거른 뒤(용어가 제목에 있거나 질문과 겹치는 조각이 여럿) 상위 몇 건만 LLM 에 보입니다
             sc = 2 * sum(1 for q in queries if q in title) + 0.2 * sum(1 for fr in qfr if fr in title)
             if sc >= 1:
                 cands.append({**r, "score": sc})
@@ -1766,7 +1496,6 @@ def _case_finalize(question: str, cands: list) -> dict:
     if not picked:
         return {"items": [], "detail": f"후보 {len(cands)}건 — 같은 쟁점 없음(LLM 판단)"}
     def _detail(c):
-        # v1.40 (C-20261017-12) — 한 건이 실패해도 나머지 사례는 보여 줍니다
         try:
             return law_client.case_detail(c["target"], c["id"])
         except Exception:                               # noqa: BLE001
@@ -1825,10 +1554,8 @@ def _named_in_question(question: str, flat: list, limit: int = 4) -> list:
     hits = []
     for f, a in flat:
         if re.match(r"\s*\[(별지|서식)", str(a.get("조문제목", ""))):
-            continue                                   # 신고서·신청서 서식은 제외
+            continue
         core = _title_core(a.get("조문제목", ""))
-        # v1.35 3차 — **기준(수치표)** 조문만. "대기오염물질"·"폐기물처리업" 같은 일반 명칭까지 넣었더니
-        #   컨텍스트가 커져 되묻기가 3번으로 늘었음(대기 배출시설 시나리오). 값이 든 기준 조문이 빠지는 게 원래 문제.
         if len(core.replace("의", "")) < 6 or not core.endswith("기준"):
             continue
         if core in qn or core.replace("의", "") in qn2:
@@ -1868,8 +1595,6 @@ def _resolve_law_exact(cands: list):
             full = law_client.resolve_abbrev(cand)
             if full and full != cand:
                 names.append(full)
-            # ★ v1.45 (C-20261028-30) — "산안법 시행령" 처럼 약칭 + 단계는 약칭표에 없어 못 풀었습니다.
-            #   꼬리를 떼고 약칭을 푼 뒤 다시 붙입니다. 되돌리기: 아래 4줄 삭제.
             _mt = re.match(r"^(.+?)\s*(시행령|시행규칙)$", str(cand).strip())
             if _mt:
                 _fb = law_client.resolve_abbrev(_mt.group(1).strip())
@@ -1908,7 +1633,7 @@ def _ask_article(req, steps, it):
     rid = law_client.row_id(LAW_T, row)
     try:
         detail = law_client.get_detail(LAW_T, rid)
-    except Exception as e:                              # noqa: BLE001 — v1.40 (C-20261017-15) 시간초과 등도 일반 경로로
+    except Exception as e:                              # noqa: BLE001
         steps.append({"name": "조문 조회 실패", "detail": str(e)[:120]})
         return None
 
@@ -1953,8 +1678,6 @@ def _ask_article(req, steps, it):
         text = ai_client.answer(q, context)
     except ai_client.AiError as e:
         return _err(str(e))
-    # ★ v1.32 — 가지조문 번호가 빠지는 오타 보정: "제39조의제1항" → "제39조의3제1항".
-    #   (실제 사례: 시행령 제39조의3 조회 답변의 【근거】 네 줄이 모두 "제39조의제N항")
     if it.gaji:
         text = re.sub(rf"제{it.jo}조의(?=\s*제\d|\s*\||\s*$)", f"제{it.jo}조의{it.gaji}", text, flags=re.M)
     cites = verify_citations(text, [f])
@@ -2007,19 +1730,14 @@ def _ask_logged(req: AskRequest, progress: list):
     sess = applog.begin((req.question.strip(), req.target), req.question.strip(),
                         req.round, req.answered or "", req.note or "")
     try:
-        # ★ v1.41 답변 캐시 — 같은 질문 기록이 있으면 검색 전에 "불러올까요?"를 묻고, 되묻기 답이 그때와 같으면
-        #   저장본(최종 답은 근거 법령 MST 재확인 후), 다르면 그 단계부터 새로 검색. 기본 꺼짐(_cache/flags/answer_cache).
-        #   원복: 아래 4줄을 'result = _ask_sync(req, progress)' 한 줄로 되돌림
         _ac_res, _ac_state = answer_cache.before(req, progress, VERSION, CLARIFY_ROUNDS)
-        # ★ v1.45 (C-20261028-17) — '이어서 묻기'에서 _ask_sync 가 req.laws 를 앞 답의 법령으로 바꿔,
-        #   저장 키(바뀐 laws)와 조회 키(빈 laws)가 달라 캐시가 영영 맞지 않았습니다. 저장 전에 되돌립니다.
         _laws0, _mode0 = list(getattr(req, "laws", None) or []), getattr(req, "laws_mode", "")
-        _q0 = req.question               # ★ v1.50 — _ask_sync 가 법령 부분만 남기면 req.question 이 바뀜. 저장 전에 되돌림
+        _q0 = req.question
         result = _ac_res if _ac_res is not None else _ask_sync(req, progress)
         if _ac_res is None:
             req.laws, req.laws_mode = _laws0, _mode0
             req.question = _q0
-            _scope_note(req, result)     # ★ v1.50
+            _scope_note(req, result)
             answer_cache.after(req, result, _ac_state, VERSION)
     except Exception as e:
         applog.end(sess, error=f"{type(e).__name__}: {e}")
@@ -2054,11 +1772,8 @@ def _ask_sync(req: AskRequest, progress: list):
     """
     질문 → (갈래 판단) → 용어변환 → 체계도 기반 계층 검색 → 조문 → 답변 → 검증
     """
-    steps = progress          # 화면으로 실시간 전달되는 목록
+    steps = progress
 
-    # ★ v1.34 — 앞 질문에 이어서 묻기. "이 경우에는 …", "그게 법률에 직접 있나요?" 처럼 앞 질문을 전제로 한 질문은
-    #   혼자서는 뜻이 없어 엉뚱한 법(하천법)을 찾았습니다. 앞 질문·결론을 조건으로 붙이고,
-    #   참고 법령을 따로 안 적었으면 앞 답의 주 법령을 "우선 참고" 로 씁니다.
     prev_note = ""
     if (req.prev_question or "").strip():
         prev_note = f"앞 질문: {req.prev_question.strip()[:200]}"
@@ -2073,18 +1788,13 @@ def _ask_sync(req: AskRequest, progress: list):
                           "detail": req.prev_question.strip()[:80]
                                     + (f" · 앞 답의 법령 우선 참고: {', '.join(req.laws)}" if req.laws else "")})
 
-    # 사용자가 직접 적은 내용을 조건에 합칩니다.
     answered = " / ".join(x for x in (prev_note, req.answered, req.note.strip()) if x)
 
-    # ★ v1.50 — 되묻기 라운드: 첫 라운드에서 법령 부분만 남긴 질문이면 같은 법령 부분으로 이어 갑니다
-    #   (화면은 원래 질문을 다시 보냄). 검색 캐시 키·답변 지시가 첫 라운드와 같아집니다.
     if SCOPE_TRIM and req.round > 0:
         _tr = _SCOPE_TRIM.get(req.question.strip())
         if _tr and time.time() - _tr[0] <= _SCOPE_TRIM_TTL:
             req.question = _tr[1]
 
-    # ★ v1.31 — 질문 의도(Intent). 규칙 기반이라 LLM 호출이 없습니다(intent.py).
-    #   경로가 갈립니다: 조문 조회는 그 조문만, 정의·일반 기준은 되묻기 없이 답변.
     it = intent_mod.classify(req.question)
     if req.round == 0:
         steps.append({"name": "질문 유형",
@@ -2097,11 +1807,8 @@ def _ask_sync(req: AskRequest, progress: list):
         it = intent_mod.Intent(intent_mod.OTHER, intent_mod.LABEL[intent_mod.OTHER], True,
                                signals=["조문 직접 조회 실패"])
 
-    # ★ v1.37 — 법령과 무관한 질문(학원·업체 추천, 잡담 등)은 검색 전에 거릅니다.
-    #   참고 법령을 직접 고른 경우·앞 질문에 이어 묻는 경우는 법령 질문으로 보고 건너뜁니다.
     if (SCOPE_CHECK and req.round == 0 and not req.answered and not req.laws
             and not (req.prev_question or "").strip()):
-        # ★ v1.50 — scope_check → scope_split(섞인 질문이면 법령 부분 law_part 도 돌려줌). 원래: ok, why = ai_client.scope_check(req.question)
         _sc = ai_client.scope_split(req.question)
         ok, why = _sc["legal"], _sc["reason"]
         if ok and SCOPE_TRIM and _sc["law_part"]:
@@ -2114,7 +1821,7 @@ def _ask_sync(req: AskRequest, progress: list):
             steps.append({"name": "법령 외 부분 제외",
                           "detail": f"법령 부분만 찾습니다: {_sc['law_part'][:80]} · 뺀 부분: {_sc['other']}"})
             _it2 = intent_mod.classify(req.question)
-            if _it2.kind != intent_mod.ARTICLE_LOOKUP:     # 조문 직접 조회 경로는 이미 지났으므로 그대로 둠
+            if _it2.kind != intent_mod.ARTICLE_LOOKUP:
                 it = _it2
         if not ok:
             steps.append({"name": "법령 질문 아님", "detail": why or "법령과 무관한 질문"})
@@ -2128,61 +1835,43 @@ def _ask_sync(req: AskRequest, progress: list):
                            "예) \"9급 공무원 시험 응시 자격(나이·학력) 기준이 어떻게 되나요?\""),
             }
 
-    # 되묻기 라운드가 넘어갈 때마다 아래 1~3단계를 다시 실행하고 있었습니다.
-    # 검색 결과는 되묻기 답변과 무관하게 같으므로(질문·대상이 같으면 같은 법령),
-    # 조건은 키에서 뺍니다. 조건은 답변 생성에만 쓰입니다.
     user_laws = _user_laws(req)
     cache_key = (req.question.strip(), req.target, tuple(user_laws), _laws_mode(req) if user_laws else "",
                  (req.prev_question or "").strip()[:200])
-    # ★ 새 질문(round=0)이면 캐시를 쓰지 않고 반드시 새로 검색합니다.
-    #   되묻기 라운드 중(round>0)에만 재사용합니다.
-    #   이것이 없으면 이전 질문의 법령이 그대로 남아 엉뚱한 답이 나옵니다.
     cached = _cache_get(cache_key) if req.round > 0 else None
     if req.round == 0:
         _SEARCH_CACHE.pop(cache_key, None)
-        _SEARCH_CACHE.pop(("sel",) + cache_key, None)       # v1.31 조문 선별 캐시
-        _SEARCH_CACHE.pop(("terms",) + cache_key, None)     # ★ v1.45 (C-15) 검색어 변환 결과
+        _SEARCH_CACHE.pop(("sel",) + cache_key, None)
+        _SEARCH_CACHE.pop(("terms",) + cache_key, None)
     if cached:
         found, flat, catalog, refs, ai_hits = cached
         steps.append({"name": "이전 검색 재사용",
                       "detail": f"{len(found)}개 법령 / 조문 {len(flat)}개"})
-        # ★ v1.45 (C-20261028-15) — 되묻기 라운드에는 '검색어 변환' 단계가 없어 참고 해석례 검색어가
-        #   질문 어절(조사 붙음)뿐이었고 최종 답에서 해석례가 빠졌습니다. 첫 라운드 용어를 다시 붙입니다.
-        #   되돌리기: 아래 3줄과 '_cache_put(("terms",) …' 줄 삭제.
         _t_old = _cache_get(("terms",) + cache_key)
         if isinstance(_t_old, dict):
             steps.append({"name": "검색어 변환", "detail": _t_old})
         return _ask_after_search(req, steps, answered, found, flat, catalog, refs, it, ai_hits)
 
-    # --- 1단계: 법령 용어로 변환 ----------------------------------
     try:
         terms = ai_client.extract_terms(req.question + (f"\n(조건: {answered})" if answered else ""))
     except ai_client.AiError as e:
         return _err(str(e))
     steps.append({"name": "검색어 변환", "detail": terms})
-    _cache_put(("terms",) + cache_key, terms)               # ★ v1.45 (C-15)
+    _cache_put(("terms",) + cache_key, terms)
 
     names = terms.get("법령명", [])
     words = terms.get("용어", [])
 
-    # ★ v1.31 — 법제처 지능형 검색: 질문 **원문**을 넣어 관련 조문을 관련도 순으로 받습니다.
-    #   로컬 LLM 의 법령명 추측(가끔 없는 법을 지어냄)과 가나다순 본문검색을 보완합니다.
-    #   실패하거나 비어 있으면 예전 방식 그대로 갑니다.
     ai_hits, ai_laws, ai_score = [], [], {}
-    n_err = n_empty = 0           # ★ v1.45 (C-19)
-    ai_titles: dict = {}          # v1.40 — 법령(본법 기준) → 지능형 검색이 집은 조문 제목들(주 법령 고르기 근거)
+    n_err = n_empty = 0
+    ai_titles: dict = {}
     if req.target in ("auto", "law"):
         ai_rows = []
-        # ★ v1.32 — 같은 질문이 어떤 때는 결과 0건으로 옵니다(실측: 21:18 20건 → 22:04 0건).
-        #   비어 있으면 1초 뒤 한 번 더 부릅니다.
-        # ★ v1.33 — 그래도 비면 3초 뒤 한 번 더, 마지막으로 추출한 용어로 한 번 더 찾습니다.
         tries = [(req.question, 0.0), (req.question, 1.0), (req.question, 3.0)]
         if words:
             tries.append((" ".join(words[:3]), 0.0))
-        # v1.40 (C-20261017-16) — 오류 없이 **빈 결과**가 두 번 오면 같은 질문을 또 부르지 않고 용어 검색으로 넘어갑니다
-        #   (범위 밖 질문에서 4번 호출 + 4초 대기). 연결 오류일 때만 3차 재시도.
         n_empty = 0
-        n_err = 0                 # ★ v1.45 (C-19) 지능형 검색 호출 오류 수
+        n_err = 0
         for attempt, (aq, wait) in enumerate(tries, 1):
             if aq == req.question and n_empty >= 2:
                 continue
@@ -2200,10 +1889,6 @@ def _ask_sync(req: AskRequest, progress: list):
                 if aq != req.question:
                     steps.append({"name": "지능형 검색(용어)", "detail": f"질문 원문으로 결과가 없어 '{aq}' 로 찾음"})
                 break
-        # ★ v1.32 — 법령 순위 = 그 법령(시행령·시행규칙 포함) 조문들의 **순위 역수 합** Σ 1/(1+순위).
-        #   "처음 나온 순서" 는 1위 조문 하나에 좌우되고, "조문 개수" 는 하위권에 잔뜩 걸린 법이 이깁니다.
-        #   실측(_eval/probe_ai_1.xml, "주유소 지하 저장시설 누출검사 주기"):
-        #     토양환경보전법 1·6위 → 1.17 / 액화석유가스법 4·7·14·18·19위 → 0.57 (개수로는 5 대 2 로 역전됐던 것)
         score, first = {}, {}
         for i, r in enumerate(ai_rows):
             nm = (r.get("법령명") or "").strip()
@@ -2228,37 +1913,22 @@ def _ask_sync(req: AskRequest, progress: list):
         elif ai_rows == []:
             steps.append({"name": "지능형 검색", "detail": "결과 없음"})
 
-    # ★ v1.37 — 지능형 검색이 약하고(1위 비중 낮음) AI 가 추측한 법령이 **실제로 있는데** 지능형 상위 5개에
-    #   하나도 없으면, 지능형 결과는 질문의 낱말(징계·촬영 등)에 걸린 엉뚱한 법일 가능성이 큽니다.
-    #   실사용 2026-10-13 "공무원이 동료를 불법촬영 … 징계·민형사 책임" → 지능형 1위 변호사법(28%)·5ㆍ18 특별법 →
-    #   "어느 법?" 보기에 그 법들이 나오고, 모름을 고르자 변호사법·5ㆍ18 법만 수집해 답을 못 함.
-    #   이때는 되묻지 않고 AI 추측 법령을 먼저 봅니다(지능형 상위 법은 후보 앞으로 올리지 않음).
-    # ★ v1.38 — 질문 쪼개기: 여러 법적 측면(징계·형사·민사 등)을 함께 물으면, 검색어 변환 단계에서 LLM 이 낸
-    #   측면별 하위 질문으로 **지능형 검색을 따로** 돌려 측면마다 법령 1개와 그 법의 지목 조문을 고릅니다.
-    #   (v1.37 의 '용어 일치 후보 보강'·'제목 조각 측면 보강' 규칙을 대체 — 낱말 목록·점수 기준 없이 검색 결과로 판단)
     asp_plan = []
-    asp_same = ""      # v1.38e — 측면별 LLM 선택이 모두 같은 법이면 그 법(질문 전체의 주 법령으로 씀)
+    asp_same = ""
     aspects = terms.get("측면") or []
     if len(aspects) >= 2 and not user_laws and req.target in ("auto", "law"):
         from concurrent.futures import ThreadPoolExecutor
 
         def _asp_search(a):
-            # v1.38b — (재검색 때) 측면의 법 이름을 검색어 앞에 붙여 그 법의 조문이 잡히게 합니다
             g = re.sub(r"\s*(시행령|시행규칙)$", "", a.get("law", "")).strip()
             try:
                 return law_client.ai_search((g + " " + a["q"]).strip(), display=10)
             except Exception as e:                      # noqa: BLE001
                 applog.warn(f"측면 지능형 검색 실패: {e}")
                 return []
-        with ThreadPoolExecutor(max_workers=3) as ex:       # 1차: 하위 질문만으로(후보 법을 넓게 보려고 법 이름은 안 붙임)
+        with ThreadPoolExecutor(max_workers=3) as ex:
             asp_rows = list(ex.map(lambda a: _asp_search({"q": a["q"], "law": ""}), aspects))
-        # ★ v1.38c (U-19) — 측면마다 후보 법(LLM 추측 + 측면 검색 상위 3)을 모으고, 어느 법이 그 측면에 가장 직접
-        #   적용되는지는 LLM 이 한 번에 고릅니다. (추측만: 형사→형법·조문 0개 / 검색 1위만: 아동ㆍ청소년성보호법)
         parsed = []
-        # v1.38d — 질문 전체의 주 법령 후보(검색어 변환 법령명·질문 원문 지능형 상위)도 넣어, 측면 추측이 엉뚱할 때
-        #   (예: 어린이공원 CCTV '녹음' 측면 → 초·중등교육법) 주 법령을 고를 수 있게 합니다.
-        # v1.40 — 원문 지능형 상위 3개까지(외부강의 사례금: 청탁금지법이 원문 지능형 3위 — L-1751-3).
-        #   (C-20261017-14) 측면마다 같은 값이라 루프 밖에서 한 번만 계산합니다.
         whole = [re.sub(r"\s*(시행령|시행규칙)$", "", n).strip() for n in names[:2]] + [
             b for b in ai_laws[:3] if ai_score.get(b, 0) >= 0.15 and not re.search(r"(직제|고시|훈령|예규)$", b)]
         for a, rows in zip(aspects, asp_rows):
@@ -2291,7 +1961,6 @@ def _ask_sync(req: AskRequest, progress: list):
             asp_plan.append({"q": p["q"], "law": law, "backup": "", "hits": ph, "note": note})
             if not ph:
                 redo.append(asp_plan[-1])
-        # 고른 법의 조문이 측면 검색에 없으면 법 이름을 붙여 한 번 더 찾습니다
         if redo:
             with ThreadPoolExecutor(max_workers=3) as ex:
                 more = list(ex.map(lambda p: _asp_search({"q": p["q"], "law": p["law"]}), redo))
@@ -2299,10 +1968,6 @@ def _ask_sync(req: AskRequest, progress: list):
                 p["hits"] = [(r.get("법령명", ""), r.get("조문번호", ""), r.get("조문가지번호", "")) for r in rows
                              if r.get("조문번호") and _law_key(re.sub(r"\s*(시행령|시행규칙)$", "",
                                                                     r.get("법령명", ""))) == _law_key(p["law"])][:3]
-        # ★ v1.45 (C-20261028-18) — 측면 법이 LLM 이 지어낸 이름이어도(검색 결과에 없고 조문도 0개) 채택돼,
-        #   '질문 쪼개기' 가 켜지며 주 법령 고르기·'어느 법?'·지능형 1위 앞세우기가 모두 꺼졌습니다.
-        #   조문을 못 잡은 측면 법은 검색 결과에 나왔거나 법제처 체계도에 이름이 있을 때만 남깁니다.
-        #   법제처 오류로 확인하지 못하면 남깁니다. 되돌리기: 이 블록 삭제.
         _seen_l = {_law_key(re.sub(r"\s*(시행령|시행규칙)$", "", (r.get("법령명") or "").strip()))
                    for rows in asp_rows for r in rows} | {_law_key(b) for b in ai_laws}
         _fake = []
@@ -2318,15 +1983,8 @@ def _ask_sync(req: AskRequest, progress: list):
                 _fake.append(p["law"])
         if _fake:
             steps.append({"name": "측면 법령 제외", "detail": f"법제처에 없는 이름이라 버림: {', '.join(_fake)}"})
-        # 측면들이 모두 같은 법이면 쪼갤 필요가 없습니다(한 법 안의 여러 사항 — 기존 흐름이 더 낫다)
         if len({_law_key(p["law"]) for p in asp_plan}) < 2:
-            # v1.40 (C-20261017-13) — '모두 같은 법' 은 측면 **2개 이상**이 같은 법을 골랐을 때만 강한 신호로 봅니다.
-            #   측면 하나만 법이 정해지고 나머지가 비어 빠진 경우까지 주 법령으로 굳히지 않습니다.
             if len(asp_plan) >= 2:
-                # ★ v1.38e — 쪼개지는 않지만, LLM 이 측면마다 같은 법을 고른 것은 강한 신호입니다.
-                #   이 법을 주 법령으로 앞에 두고, 측면 검색에서 잡힌 그 법의 조문을 지목 조문 앞에 둡니다.
-                #   (v1.38d 실측: 어린이공원 CCTV → 측면 둘 다 개인정보 보호법인데 쪼개기 생략 뒤 질문 원문
-                #    지능형 1위 의료법이 앞에 오고 "어느 법?" 되묻기까지 나와 답을 못 함)
                 asp_same = asp_plan[0]["law"]
                 sh = []
                 for p in asp_plan:
@@ -2342,7 +2000,6 @@ def _ask_sync(req: AskRequest, progress: list):
             steps.append({"name": "질문 쪼개기",
                           "detail": " / ".join(f"{i + 1}) {p['q'][:45]} → {p['law']}{p['note']} 조문 {len(p['hits'])}개"
                                                for i, p in enumerate(asp_plan))})
-            # 측면별 지목 조문을 번갈아 앞에 둡니다(조문 선별의 '지능형 검색 조문 추가'가 앞 6개를 씀)
             inter = []
             for k in range(3):
                 for p in asp_plan:
@@ -2350,23 +2007,16 @@ def _ask_sync(req: AskRequest, progress: list):
                         inter.append(p["hits"][k])
             ai_hits = inter + [h for h in ai_hits if h not in inter]
 
-    # ★ v1.40 — 주 법령 고르기: 검색어 변환의 법령 추측과 지능형 검색 1위가 엇갈리면, 두 목록을 합쳐
-    #   LLM 이 '질문의 주체·행위를 직접 규율하는 법'을 고릅니다(후보에 없으면 정식 이름을 직접 제시 → 실제로
-    #   있는 법인지 체계도로 확인). 고른 법이 후보에 없으면 후보에 **더하기만** 합니다(아래 '법령 후보 추가').
-    #   (L-1751-1 지방공무원 육아휴직 → 남녀고용평등법 1위·'어느 법?' / L-1751-3 외부강의 사례금 → 청탁금지법 누락)
     law_pick = []
-    _abbr_full = ""          # ★ v1.44 (C-20261028-12) 약칭 복구로 찾은 정식명(아래 후보 순서에서 AI 추측 이름으로 대접)
+    _abbr_full = ""
     if (LAW_PICK and not user_laws and not asp_plan and not asp_same and req.target in ("auto", "law")
             and (names or ai_laws)):
         _gk = {_law_key(re.sub(r"\s*(시행령|시행규칙)$", "", n)) for n in names}
         _tot0 = sum(ai_score.values()) or 1.0
         _sh0 = ai_score.get(ai_laws[0], 0.0) / _tot0 if ai_laws else 0.0
-        # 둘이 같거나, 지능형 1위가 뚜렷하면(비중 LAW_ASK_SHARE 이상) 고르지 않습니다 — 예전 흐름이 맞던 경우.
-        #   (1차 실측: 주유소 누출검사 주기에 지능형 1위 토양환경보전법이 뚜렷한데 LLM 이 석유사업법을 골라 회귀)
         if not (ai_laws and _law_key(ai_laws[0]) in _gk) and _sh0 < LAW_ASK_SHARE:
             pool = []
             for n in [re.sub(r"\s*(시행령|시행규칙)$", "", n).strip() for n in names[:3]]:
-                # AI 추측 법령은 **법제처에 실제로 있는 이름만** 후보로(없는 이름 '지하저장탱크 누출검사 등에 관한 법률' 이 뽑힘)
                 rows = _stmd_rows(n) if n else []
                 row = _pick_stmd(rows, n) if rows else None
                 if row is not None and _law_key(law_client.row_name("lsStmd", row)) == _law_key(n) \
@@ -2382,9 +2032,6 @@ def _ask_sync(req: AskRequest, progress: list):
                     _ait_k.setdefault(_law_key(_k0), []).extend(_v0)
                 picks, other, subj = ai_client.pick_main_laws(
                     req.question + (f"\n(확인된 조건: {answered})" if answered else ""), pool,
-                    # ★ v1.44 (C-20261028-11) — 후보가 AI 표기("소음·진동관리법")면 지능형 표기("소음ㆍ진동관리법")와 글자가 달라
-                    #   근거를 못 찾고 "조문 없음"으로 보여 맞는 법이 탈락했습니다. 가운뎃점·공백을 무시한 키로 찾습니다.
-                    #   원래: ai_titles.get(x)
                     [("지능형 검색 조문: " + ", ".join(_ait_k[_law_key(x)])) if _ait_k.get(_law_key(x))
                      else "지능형 검색 조문 없음(이름 추측)" for x in pool])
                 if other and not any(_law_key(other) == _law_key(x) for x in pool + picks):
@@ -2418,7 +2065,6 @@ def _ask_sync(req: AskRequest, progress: list):
                               "detail": f"1위 '{ai_laws[0]}' 비중 {_share:.0%} 이고 AI 추측 법령 "
                                         f"'{', '.join(_real)}' 이(가) 지능형 상위 5개에 없음 — AI 추측 법령을 먼저 봅니다"})
 
-    # ★ v1.33 — 법령이 애매하면 첫 라운드에 "어느 법" 인지 묻습니다(조문 수집 전에 — 헛수집을 줄임).
     if (not user_laws and req.round == 0 and not req.skip_clarify and not weak_ai and not asp_plan
             and not asp_same and req.target in ("auto", "law")):
         tot = sum(ai_score.values()) or 1.0
@@ -2426,8 +2072,6 @@ def _ask_sync(req: AskRequest, progress: list):
         guess_keys = {_law_key(re.sub(r"\s*(시행령|시행규칙)$", "", n)) for n in names}
         ambiguous = bool(ai_laws) and share < LAW_ASK_SHARE and _law_key(ai_laws[0]) not in guess_keys
         if not ai_laws:
-            # 지능형 검색이 비었는데 AI 가 추측한 법령도 실제로 없으면(지어낸 이름) 근거가 하나도 없습니다.
-            #   실측: "유류판매업법"(없는 법) → 본문검색 복구가 산업집적법을 잡아 엉뚱한 답.
             real = []
             _errs19: list = []
             for n in names:
@@ -2436,16 +2080,12 @@ def _ask_sync(req: AskRequest, progress: list):
                 if any(_law_key(law_client.row_name("lsStmd", r)) == _law_key(b) for r in rows):
                     real.append(b)
             ambiguous = not real
-            # ★ v1.45 (C-20261028-19) — 법제처 장애(지능형 검색이 오류로만 끝남·체계도 오류)를 '없는 법 이름' 으로
-            #   오인해 보기 없는 '어느 법?' 을 물었습니다. 오류면 묻지 않고 그대로 진행합니다. 되돌리기: 아래 if 삭제.
             if ambiguous and ((n_err and not n_empty) or _errs19):
                 ambiguous = False
                 steps.append({"name": "법령 확인 건너뜀",
                               "detail": "법제처 응답 오류로 법령 이름을 확인하지 못해 '어느 법?' 을 묻지 않습니다"})
         if ambiguous:
             opts = []
-            # ★ v1.43 (C-20261018-2, L-1751-1) — 바로 앞 '주 법령 고르기(LLM)' 결과를 버리지 않고 보기 맨 앞에 둡니다
-            #   (자동 확정은 하지 않음 — 처음 시험에서 맨 앞 확정이 누출검사를 회귀시켰음). 되돌리기: 아래 for 삭제.
             for b in law_pick[:1]:
                 b = re.sub(r"\s*(시행령|시행규칙)$", "", b).strip()
                 if b and not any(_law_key(b) == _law_key(o) for o in opts):
@@ -2458,7 +2098,7 @@ def _ask_sync(req: AskRequest, progress: list):
                 if ai_score.get(b, 0) < 0.15 or re.search(r"(직제|고시|훈령|예규|규정|지침)$", b):
                     continue
                 opts.append(b)
-            for n in names:                       # AI 추측 중 **실제로 있는** 법령
+            for n in names:
                 if len(opts) >= 4:
                     break
                 b = re.sub(r"\s*(시행령|시행규칙)$", "", n).strip()
@@ -2502,8 +2142,6 @@ def _ask_sync(req: AskRequest, progress: list):
         for r in rows:
             if picked_n >= limit:
                 break
-            # 자치법규는 다른 지자체 조례가 섞여 옵니다.
-            # 지자체기관명에 우리 지자체가 없으면 버립니다.
             if target == "ordin" and LOCAL_GOV:
                 org = law_client.pick(r, "지자체기관명", "지자체명")
                 if LOCAL_GOV not in org:
@@ -2524,16 +2162,9 @@ def _ask_sync(req: AskRequest, progress: list):
                 "ministry": law_client.pick(r, "소관부처명", "지자체기관명", "회신기관명"),
             })
 
-    # --- 2단계: 체계도로 계층 전체 확보 ---------------------------
-    LAW_T = law_client.LAW_TARGET          # 기본 eflaw(시행일 기준)
+    LAW_T = law_client.LAW_TARGET
 
     if req.target in ("auto", "law"):
-        # ★ AI 가 추측한 법령명이 틀리면 체계도가 통째로 비고, 그 뒤 모든 단계가
-        #   엉뚱한 법령 위에서 돌아갑니다. 이 도구의 가장 큰 약점이었습니다.
-        #   그래서 추측한 이름으로 체계도가 안 잡히면, 용어로 **본문 검색**을 해서
-        #   그 말이 실제로 들어 있는 법령의 **진짜 이름**을 법제처에서 받아옵니다.
-        #   법령명을 맞힐 필요가 없어집니다.
-        # ★ v1.33 — 사용자가 법령을 지정했으면(화면 입력 또는 "어느 법" 되묻기 답) 그 법령만 수집합니다.
         user_resolved, user_bad = [], []
         for u in user_laws:
             b = re.sub(r"\s*(시행령|시행규칙)$", "", u).strip()
@@ -2577,11 +2208,6 @@ def _ask_sync(req: AskRequest, progress: list):
                     hit = True
                     break
 
-            # ★ 약칭(법제처 공식 약칭 DB)이면 정식명으로 바꿔 한 번 더 시도합니다.
-            #   본문 검색(아래)보다 가볍고 정확해서 먼저 시도합니다.
-            #   ("영"/"규칙" 같은 축약은 이거로 안 잡힙니다 — 그건 _guess_law 의
-            #    별도 로직입니다. 이건 "개인정보법" 처럼 법제처가 공식 등록한
-            #    약칭용입니다.)
             if not hit:
                 resolved = []
                 for nm in cand:
@@ -2601,8 +2227,6 @@ def _ask_sync(req: AskRequest, progress: list):
                                 "detail": f"'{', '.join(cand)}' 을(를) 공식 약칭으로 보고 "
                                           f"'{full}' 로 재시도",
                             })
-                            # ★ v1.44 (C-20261028-12) — 약칭이 후보 칸에 그대로 남아 정식명이 뒤로 밀리고(LAW_CANDIDATES=3에서 수집
-                            #   누락) '체계도 없음' 가짜 경고도 남겼습니다. 약칭 자리를 정식명으로 바꿉니다. 원래: cand = [full] + cand
                             _ab = {_law_key(nm) for nm in cand
                                    if law_client.resolve_abbrev(nm.replace(" 시행령", "").replace(" 시행규칙", "").strip()) == full}
                             cand = [full] + [c for c in cand if _law_key(c) not in _ab]
@@ -2611,28 +2235,13 @@ def _ask_sync(req: AskRequest, progress: list):
                     except law_client.LawApiError:
                         pass
 
-            # ★ 2026-08-20 — 여기까지는 "AI 가 추측한 이름이 법제처에 있는지"만 봤습니다.
-            #   그런데 **존재는 하지만 엉뚱한 법**을 추측하면(예: 음식점 폐식용유 질문에
-            #   "방사성폐기물 관리법") hit=True 로 확정되고 끝나버립니다. 로컬 모델은
-            #   이런 지식 기반 실수를 대형 클라우드 모델보다 훨씬 자주 냅니다.
-            #   그래서 hit 여부와 무관하게, 추출된 용어로 본문검색을 걸어서
-            #   "실제 조문에 이 말이 들어 있는 법" 과 AI 추측을 항상 교차검증합니다.
-            #   AI 지식이 아니라 법제처 원문이 최종 판단 기준이 됩니다.
-            # ★ 2026-09-29 — 본문검색 결과는 관련도 순이 아니라 **법령명 가나다순**이고
-            #   한 번에 최대 100개입니다. 그래서
-            #   · 결과 100개 전체를 보고, 여러 용어에 반복해서 걸린 법을 앞세웁니다.
-            #   · 결과가 100개로 꽉 찬 용어("시정명령", "신고" 같은 흔한 말)는 근거로
-            #     쓰지 않습니다. 가나다순으로 잘려 뒤쪽 법(예: ㅌ·ㅍ·ㅎ)이 안 보이므로,
-            #     "추측한 법이 결과에 없다" 는 판단이 틀립니다.
-            #     (실사고: "소음·진동관리법" 추측이 뒤집혀 "가덕도신공항 건설을 위한
-            #      특별법" 으로 답할 뻔함)
             hits_all: dict[str, int] = {}
             hits_info: dict[str, int] = {}
             info_words, weak_words = [], []
             if words:
                 for w in words[:3]:
                     try:
-                        rows = law_client.search(LAW_T, w, display=100, scope=2)   # 본문 검색
+                        rows = law_client.search(LAW_T, w, display=100, scope=2)
                     except law_client.LawApiError:
                         continue
                     if not rows:
@@ -2642,7 +2251,6 @@ def _ask_sync(req: AskRequest, progress: list):
                     seen_w = set()
                     for r in rows:
                         nm = law_client.row_name(LAW_T, r)
-                        # 시행령·시행규칙은 체계도가 알아서 따라옵니다. 본법만 모읍니다.
                         nm = re.sub(r"\s*(시행령|시행규칙)$", "", nm).strip()
                         if nm and nm not in seen_w:
                             seen_w.add(nm)
@@ -2651,12 +2259,9 @@ def _ask_sync(req: AskRequest, progress: list):
                                 hits_info[nm] = hits_info.get(nm, 0) + 1
 
             def _ranked(h: dict) -> list:
-                # 많이 걸린 순. 같으면 검색 결과 순서 유지(sorted 는 안정 정렬).
                 return sorted(h, key=lambda n: -h[n])
 
             def _same(a: str, b: str) -> bool:
-                # 부분 일치로 비교하면 "폐기물관리법" 이 "방사성폐기물관리법" 과
-                # 같다고 나옵니다. 공백·가운뎃점·하위법령 꼬리만 떼고 정확히 비교합니다.
                 return _law_key(a) == _law_key(b)
 
             if not hit:
@@ -2671,9 +2276,6 @@ def _ask_sync(req: AskRequest, progress: list):
                     })
                     cand = fresh[:2] + cand
             elif hits_info and not any(_same(nm, c) for nm in hits_info for c in cand):
-                # AI 가 추측한 법이 존재는 하지만, 드문 용어가 들어 있는 법 어디에도 없습니다.
-                # 다만 근거가 한 법에 모여 있을 때만 뒤집습니다(1등이 3개 이하).
-                # 여러 법이 똑같이 걸리면 가나다순 첫 법을 고르는 셈이라 믿을 수 없습니다.
                 ranked = _ranked(hits_info)
                 best = hits_info[ranked[0]]
                 tops = [n for n in ranked if hits_info[n] == best]
@@ -2691,11 +2293,7 @@ def _ask_sync(req: AskRequest, progress: list):
                                   f"퍼져 근거가 약함 — AI 추측 '{', '.join(cand)}' 유지",
                     })
 
-        # ★ v1.31 — 지능형 검색 1순위 법령을 후보 맨 앞에 둡니다. 로컬 LLM 의 추측은
-        #   (체계도에 실제로 있으면) 2순위로 남겨 둡니다 — 둘 다 수집하고 조문 선별이 고릅니다.
         if (asp_plan or asp_same) and not user_resolved:
-            # v1.38 — 측면별 법을 앞에(측면 순서대로), 그다음 측면별 예비 법, 그다음 기존 후보
-            #   v1.38e — 측면이 모두 같은 법이면 그 법을 맨 앞에 / v1.40 — LLM 이 고른 주 법령을 맨 앞에
             prim = []
             for x in ([asp_same] if asp_same else []) + [p["law"] for p in asp_plan] \
                     + [p["backup"] for p in asp_plan if p["backup"]] + cand:
@@ -2709,47 +2307,30 @@ def _ask_sync(req: AskRequest, progress: list):
                               "detail": f"'{top}' 을(를) 먼저 봅니다"
                                         + (f" (AI 추측: {', '.join(cand)})" if cand else "")})
             rest = [c for c in cand if _law_key(c) != _law_key(top)]
-            # ★ v1.32 — 나머지 후보 중 지능형 검색에도 나온 것(교차 확인된 것)을 앞으로.
-            #   본문검색 복구가 가나다순으로 올린 엉뚱한 법(건설기계 안전기준 등)이 2순위를 차지하지 않게.
             ai_keys = {_law_key(x) for x in ai_laws[:5]}
             corr = [c for c in rest if _law_key(c) in ai_keys]
             others = [c for c in rest if _law_key(c) not in ai_keys]
-            # ★ v1.32 — 법령 후보를 3개까지 수집합니다(2026-10-08 사용자 결정 "법령 후보 3개로 확대").
-            #   지능형 검색 2위 법령도 후보에 넣습니다. 단 점수가 낮거나(상위 5위 안 조문이 없음 ≈ 0.2 미만)
-            #   직제·고시처럼 조문 답변 근거가 될 수 없는 것은 넣지 않습니다.
             ai2 = [b for b in ai_laws[1:3]
                    if ai_score.get(b, 0) >= 0.2 and not re.search(r"(직제|고시|훈령|예규|규정)$", b)
                    and not any(_law_key(b) == _law_key(c) for c in [top] + corr)]
-            # ★ v1.40 — AI 가 이름을 댄 법(검색어 변환 법령명)은 지능형 2위보다 앞에 둡니다. 지능형 1위가 뚜렷해도
-            #   질문의 주 법령이 따로 있는 경우(소비기한 지난 원재료 → AI 추측 식품위생법, 지능형 1위 위생용품 관리법)
-            #   식품위생법이 후보 3위로 밀려 조문을 못 받았습니다(L-1016-1). 본문검색 복구로 올라온 이름은 해당 없음.
             _nk = {_law_key(re.sub(r"\s*(시행령|시행규칙)$", "", n)) for n in names}
-            if _abbr_full:                                       # ★ v1.44 (C-20261028-12)
+            if _abbr_full:
                 _nk.add(_law_key(_abbr_full))
             named_o = [c for c in others if _law_key(c) in _nk]
             others = [c for c in others if c not in named_o]
             cand = [top] + corr + named_o[:1] + ai2[:1] + [c for c in named_o[1:] + others
                                                             if not any(_law_key(c) == _law_key(x) for x in ai2[:1])]
 
-        # ★ v1.40 — LLM 이 고른 주 법령 중 후보에 없는 것 하나를 **2순위로 더합니다**(순서·되묻기는 예전 그대로).
-        #   1차 시험에서 LLM 선택을 맨 앞에 두고 '어느 법?' 되묻기까지 건너뛰게 했더니, 주유소 누출검사에
-        #   석유사업법을 골라(지능형 검색 조문 제목을 보여 줘도) 회귀 → 추가만 합니다(외부강의 → 청탁금지법 추가).
         extra_pick = [] if user_resolved else [
             x for x in law_pick if not any(_law_key(x) == _law_key(c) for c in cand)][:1]
         if extra_pick:
             cand = cand[:1] + extra_pick + cand[1:]
             steps.append({"name": "법령 후보 추가(LLM 선택)", "detail": f"'{extra_pick[0]}' 을(를) 후보에 더합니다"})
 
-        # v1.3 의 조문 선별이 붙어 토큰 부담이 크게 줄었으므로 후보를 2개로 되돌립니다.
-        # 1개만 쓰면 "누출검사" 처럼 여러 법에 쓰이는 용어에서 엉뚱한 법 하나만
-        # 잡고 끝나 답이 통째로 틀립니다. (토양환경보전법 → 위험물안전관리법)
-        # ★ v1.32 — 후보 하나가 체계도 조회에 실패하면 **조용히 건너뛰고** 나머지 하나로만
-        #   답하던 문제. 실패를 처리 과정에 남기고, 성공 2개가 될 때까지 다음 후보로 넘어갑니다.
         if user_resolved and only_mode:
             cand = list(user_resolved)
             cand_limit = len(cand)
         elif user_resolved:
-            # 우선 참고: 지정 법령을 맨 앞에 두고, 자동 후보로 한 묶음 이상 더 수집합니다.
             cand = list(user_resolved) + [c for c in cand
                                           if not any(_law_key(c) == _law_key(u) for u in user_resolved)]
             cand_limit = max(LAW_CANDIDATES, len(user_resolved) + 1)
@@ -2775,11 +2356,6 @@ def _ask_sync(req: AskRequest, progress: list):
                 stmd_fail.append(f"{base}(체계도 조회 실패: {str(e)[:60]})")
                 continue
             stmd_ok += 1
-            # 위임행정규칙은 체계도에 딸려오지만 질문과 무관한 것이 섞입니다.
-            # (예: 토양환경보전법 체계도에 "금강수계 수변구역 변경" 이 포함됨)
-            # 검색어와 겹치는 것을 우선하고, 겹치는 게 없으면 앞에서부터 씁니다.
-            # 검색어를 2글자 조각으로 쪼개 부분 일치도 잡습니다.
-            #   "특정토양오염관리대상시설" → 토양·오염·관리·시설 …
             frags = set()
             for w in (names + words):
                 w = re.sub(r"(법|시행령|시행규칙)$", "", w)
@@ -2791,13 +2367,9 @@ def _ask_sync(req: AskRequest, progress: list):
                 return sum(1 for fr in frags if fr in nm)
 
             tree_laws = [L for L in tree["laws"] if L["id"] and L["id"] not in seen]
-            # ★ v1.37 — 하위법령이 아주 많은 체계도(국가공무원법: 시행령 30여 개)는 법률·같은 이름의 시행령·시행규칙과
-            #   질문 낱말이 이름에 겹치는 하위법령만 남깁니다. 전에는 이 체계도 하나가 조문 수집 칸(앞 7개 법령)을
-            #   다 채워 다음 후보(형법·민법 등)는 조문을 아예 못 가져왔습니다(실사용 2026-10-13 불법촬영 질문).
             if len(tree_laws) > TREE_MAX_LAWS:
                 own = {_law_key(base), _law_key(base + " 시행령"), _law_key(base + " 시행규칙")}
                 core = [L for L in tree_laws if L.get("level") == "법률" or _law_key(L["name"]) in own]
-                # 법령명에서 나온 조각('공무원' 등)은 모든 하위법령에 걸리므로 검색 **용어**의 조각만 씁니다
                 wfr = {w2[i:i + 2] for w2 in (re.sub(r"\s+", "", w) for w in words) for i in range(len(w2) - 1)}
 
                 def _wscore(L):
@@ -2808,17 +2380,15 @@ def _ask_sync(req: AskRequest, progress: list):
                               "detail": f"{base}: 하위법령 {len(tree_laws)}개 중 {len(kept)}개만 — "
                                         + ", ".join(L["name"] for L in kept)})
                 tree_laws = kept
-            for L in tree_laws:                          # 법률·시행령·시행규칙
+            for L in tree_laws:
                 seen.add(L["id"])
                 # mst(법령일련번호) 는 법제처 3단비교 URL 의 lsiSeq 로 씁니다.
                 found.append({**L, "target": LAW_T, "kind": L["level"], "ministry": ""})
 
             ranked = sorted(tree["admruls"], key=lambda x: -_score(x))
-            # 겹치는 조각이 하나도 없으면(0점) 무관한 것으로 보고 버립니다.
-            # 나머지는 점수 순으로 최대 4개.
             picked_admruls = [a for a in ranked if _score(a) > 0][:4]
 
-            for A in picked_admruls:                     # 위임행정규칙
+            for A in picked_admruls:
                 if A["id"] not in seen:
                     seen.add(A["id"])
                     found.append({
@@ -2829,20 +2399,17 @@ def _ask_sync(req: AskRequest, progress: list):
                     })
         if asp_plan:
             for f in found:
-                f["_aspects"] = [p["q"] for p in asp_plan]   # v1.38 — 답변 단계에서 측면별로 나눠 답하도록
+                f["_aspects"] = [p["q"] for p in asp_plan]
         if stmd_fail:
             applog.warn("법령 후보 체계도 실패: " + ", ".join(stmd_fail))
             steps.append({"name": "법령 후보 일부 실패",
                           "detail": ", ".join(stmd_fail[:3])
                                     + (" — 다음 후보로 대신했습니다" if stmd_ok else "")})
 
-    # 체계도로 못 찾았으면 일반 검색으로 보완
     if not found:
         if req.target in ("auto", "law"):
             for q in (names + words)[:3]:
                 add(LAW_T, q, 2, "법령")
-            # 법령명 검색도 실패했으면 마지막으로 본문 검색을 겁니다.
-            # 법령명을 몰라도 그 말이 들어간 법령을 찾아냅니다.
             if not found:
                 for q in (words + names)[:2]:
                     add(LAW_T, q, 2, "법령", scope=2)
@@ -2852,12 +2419,7 @@ def _ask_sync(req: AskRequest, progress: list):
         if req.target in ("auto", "admrul"):
             for q in (names + words)[:2]:
                 add("admrul", q, 2, "행정규칙")
-    # ★ v1.31 — 자동(auto) 검색에서 조례를 뺍니다. 지금 범위는 국가법령이고,
-    #   LOCAL_GOV(특정 지자체)에 묶인 결과가 범용 답변을 흐렸습니다.
-    #   조례는 화면에서 대상으로 "자치법규" 를 직접 고를 때만 찾습니다.
     if req.target == "ordin":
-        # 조례는 "성남시 토양환경보전법" 같은 이름일 수 없습니다.
-        # 법령명이 아니라 용어(누출검사, 토양오염)로 찾아야 합니다.
         gov = LOCAL_GOV or ""
         for q in (words or names)[:2]:
             q = q.strip()
@@ -2870,28 +2432,17 @@ def _ask_sync(req: AskRequest, progress: list):
     if not found:
         return {"steps": steps, "answer": "해당하는 법령을 찾지 못했습니다.", "laws": []}
 
-    # --- 3단계: 조문 수집 ---------------------------------------
     refs = {}
-    # v1.37 — 여러 측면을 묻는 질문은 조문을 받을 법령 수를 늘립니다(다른 질문은 그대로 7개).
-    # ★ v1.40 — 질문 쪼개기가 없어도 **법령(법률·시행령·시행규칙)을 위임 행정규칙보다 먼저** 받습니다.
-    #   첫 후보의 위임 행정규칙 4개가 조문 수집 칸(앞 7개)을 채워 둘째 후보 법률(외부강의 → 청탁금지법)이
-    #   본문을 아예 못 받던 문제(L-1751-3). 안정 정렬이라 후보 순서는 유지됩니다.
     _fetch = sorted(found, key=lambda f: (0 if f.get("level") in ("법률", "시행령", "시행규칙") else 1))
     if asp_plan:
-        # 여러 측면 질문은 후보 법률들의 본문을 먼저 받습니다(위임 행정규칙이 칸을 다 채우지 않게). 안정 정렬이라 주 법령 순서는 유지.
         _fetch = sorted(found, key=lambda f: (0 if f.get("level") == "법률" else
                                               1 if f.get("level") in ("시행령", "시행규칙") else 2))
-    # 법령을 앞으로 당긴 만큼 위임 행정규칙(고시 등)이 밀리므로 칸을 2개 더 둡니다.
     _nfetch = FETCH_MAX_LAWS + 2 + (3 if asp_plan else 0)
     _fetched = {id(x) for x in _fetch[:_nfetch]}
     for f in _fetch[:_nfetch]:
         try:
-            # ★ v1.41 캐시 — 같은 버전(MST)이면 저장본 사용. 꺼져 있으면 아래 lambda 그대로 호출(=v1.40 동작).
-            #   원복: detail = law_client.get_detail(f["target"], f["id"])
             detail = law_cache.get_detail(f["target"], f["id"], f.get("mst", ""), f.get("enforced", ""),
                                           lambda: law_client.get_detail(f["target"], f["id"]))
-        # ★ v1.42 (C-20261018-7) — LawApiError 만 잡아서 시간초과·연결 오류면 질문 전체가 오류였습니다.
-        #   그 법령만 건너뜁니다. 원래: except law_client.LawApiError: continue
         except Exception as e:                            # noqa: BLE001
             if not isinstance(e, law_client.LawApiError):
                 applog.warn(f"조문 수집 실패({f.get('name', '')}) — 그 법령만 건너뜁니다: {type(e).__name__}: {e}")
@@ -2899,10 +2450,6 @@ def _ask_sync(req: AskRequest, progress: list):
         f["meta"] = detail["meta"]
         f["articles"] = detail["articles"]
 
-        # ★ 법률 조문에는 위임법령(lsDelegated) 매핑을 붙여둡니다.
-        #   시행령·시행규칙 자체에는 안 붙입니다 — 위임은 "법률 조문 → 하위법령
-        #   조문" 방향으로만 의미가 있습니다. 실패해도 조문 조회는 계속됩니다
-        #   (delegation_map 자체가 예외를 삼킵니다).
         if f.get("level") == "법률" and f.get("id"):
             f["delegated"] = law_client.delegation_map(f["id"])
 
@@ -2921,9 +2468,8 @@ def _ask_sync(req: AskRequest, progress: list):
         for r in law_client.extract_references(detail["articles"], f["name"]):
             refs[r] = refs.get(r, 0) + 1
 
-    # 조문을 하나의 목록으로 펼칩니다. (법령, 조문) 쌍에 번호를 매깁니다.
     flat = []
-    for f in [x for x in found if id(x) in _fetched]:   # v1.37 — 조문을 받은 법령 그대로(보통 앞 7개)
+    for f in [x for x in found if id(x) in _fetched]:
         for a in f.get("articles", []):
             if a.get("조문여부") == "전문":
                 continue
@@ -2951,19 +2497,11 @@ def _ask_sync(req: AskRequest, progress: list):
 
 def _ask_after_search(req, steps, answered, found, flat, catalog, refs, it=None, ai_hits=None):
     """검색이 끝난 뒤의 단계. 되묻기 라운드마다 여기부터 다시 실행됩니다."""
-    # ★ 2026-08-19 — 사용자가 "아니오" 라고 답한 주제의 법령을 빼는 처리가
-    #   예전에는 **검색 경로 안에만** 있었습니다. 그런데 그 경로는 round=0
-    #   (= answered 가 비어 있는 새 질문)에서만 지나가고, 답이 실제로 들어오는
-    #   round>=1 은 항상 캐시로 빠져나가 이 필터를 건너뛰었습니다.
-    #   즉 "방사성폐기물에 해당하나요? → 아니오" 라고 답해도 방사성폐기물
-    #   관련 법령이 그대로 남아 답변 컨텍스트에 들어갔습니다. 기능이 죽어 있었죠.
-    #   → 되묻기 답을 실제로 손에 쥔 이 지점으로 옮깁니다.
-    #     캐시가 오염되지 않도록 **사본**에만 적용합니다.
     excluded = _excluded_terms(answered)
     if excluded:
         dropped = [f for f in found
                    if any(x in f.get("name", "") for x in excluded)]
-        if dropped and len(dropped) < len(found):   # 전부 걸리면 거르지 않습니다
+        if dropped and len(dropped) < len(found):
             drop_ids = {id(d) for d in dropped}
             found = [f for f in found if id(f) not in drop_ids]
             flat = [(f, a) for f, a in flat if id(f) not in drop_ids]
@@ -2989,15 +2527,8 @@ def _ask_after_search(req, steps, answered, found, flat, catalog, refs, it=None,
     if it is None:
         it = intent_mod.classify(req.question)
     MAX_ROUNDS = CLARIFY_ROUNDS
-    bp_kw = _bp_keywords(req.question + " " + (answered or ""))      # v1.34 긴 별표 발췌용
+    bp_kw = _bp_keywords(req.question + " " + (answered or ""))
 
-    # --- 3-1단계: 필요한 조문만 고르기 ----------------------------
-    # 조문 본문을 통째로 넣으면 요청당 3만 토큰. 제목만 보여주고 고르면 2천 토큰.
-    # ★ v1.31 — 선별을 되묻기 **앞**으로 옮겼습니다. 되묻기가 선별된 조문 본문을
-    #   보고 판단하기 때문입니다. 선별은 질문에만 달려 있으므로(되묻기 답과 무관)
-    #   첫 라운드 결과를 조문 키로 저장해 두고 다음 라운드에서 재사용합니다
-    #   (라운드마다 LLM 을 다시 부르지 않음). 번호가 아니라 키로 저장하는 이유:
-    #   "아니오" 제외 조건으로 목록이 줄면 번호가 밀립니다.
     def _akey(f, a):
         return (f["name"], str(a.get("조문번호", "")), str(a.get("조문가지번호", "")),
                 a.get("조문제목", ""))
@@ -3013,22 +2544,14 @@ def _ask_after_search(req, steps, answered, found, flat, catalog, refs, it=None,
         if picked:
             steps.append({"name": "조문 선별 재사용",
                           "detail": f"이전 라운드에서 고른 {len(picked)}개"})
-    # ★ v1.44 (C-20261028-08) — 캐시된 선별이 되묻기 '아니오' 제외로 모두 빠지면(picked=None) 다시 선별합니다.
-    #   예전엔 elif 라 재선별 없이 전체 조문이 목록 순서대로 들어가 보강·보호 기능이 모두 꺼졌습니다. 원래: elif SELECT_ARTICLES …
     if picked is None and SELECT_ARTICLES and len(flat) > 12:
         try:
-            # ★ 2026-09-29 — 법령이 여럿이면 조문 목록만으로도 수천 토큰입니다.
-            #   컨텍스트를 넘으면 목록 뒤쪽을 잘라서 보냅니다(번호는 그대로라 매핑 유지).
             cat_sel = catalog
             q_sel = req.question + (f"\n(사용자가 참고 법령으로 지정: {', '.join(_ul)} — 이 법령의 조문을 우선 고려)"
                                     if _ul else "")
             n_sel = ai_client.count_tokens(ai_client.select_prompt(q_sel, catalog))
             lim = ai_client.server_ctx() - ai_client.MAXTOK_SELECT - 64
             if n_sel > lim:
-                # ★ v1.40 — 넘치면 먼저 **법령명을 묶음 머리에 한 번만** 적는 짧은 목록으로 바꿉니다.
-                #   줄마다 "[남녀고용평등과 일ㆍ가정 양립 지원에 관한 법률 시행규칙]" 을 되풀이해 토큰의 절반 가까이를
-                #   썼고, 목록 뒤를 잘라 마지막 법령과 별표(기준표가 대개 맨 끝)가 통째로 선별에서 빠졌습니다(U-21).
-                #   번호는 그대로라 선별 결과 매핑은 같습니다.
                 out_l, prev_nm = ["(법령명은 묶음 첫 줄 [ ] 에 한 번만 적었다. 그 아래 번호들은 그 법령의 조문이다)"], None
                 for i, (f, a_) in enumerate(flat):
                     if f["name"] != prev_nm:
@@ -3038,8 +2561,6 @@ def _ask_after_search(req, steps, answered, found, flat, catalog, refs, it=None,
                 compact = "\n".join(out_l)
                 n_c = ai_client.count_tokens(ai_client.select_prompt(q_sel, compact))
                 if n_c > lim:
-                    # 그래도 넘치면 서식(별지)을 뺍니다 — 수백 개라 목록을 다 먹고, 답의 근거가 되는 일이 드뭅니다.
-                    #   (음주운전: 도로교통법 시행규칙 별지 100여 개 때문에 뒤쪽 별표 28 이 잘림 — L-1016-2)
                     compact = "\n".join(ln for ln in out_l
                                          if not re.match(r"^\d+\.\s*\[(별지|서식)", ln))
                     n_c = ai_client.count_tokens(ai_client.select_prompt(q_sel, compact))
@@ -3058,23 +2579,17 @@ def _ask_after_search(req, steps, answered, found, flat, catalog, refs, it=None,
                                         f"목록 {len(lines)}줄 중 앞 {keep_n}줄만 보냄"})
             nums = ai_client.select_articles(q_sel, cat_sel)
             picked = [flat[n - 1] for n in nums if 1 <= n <= len(flat)]
-            # ★ v1.42 (C-20261018-10) — LLM 이 같은 번호를 두 번 내면 같은 조문이 두 번 들어가 예산을 낭비합니다.
-            #   순서를 지키며 중복 제거. 되돌리기: 아래 두 줄 삭제.
             _seen_n: set = set()
             picked = [x for x in picked if not (id(x[1]) in _seen_n or _seen_n.add(id(x[1])))]
-            # ★ v1.44 (C-20261028-07) — 선별 응답이 깨져 번호가 하나도 없으면([]) '전체 사용' 이어야 하는데,
-            #   빈 목록이 아래에서 지능형 조문 6개만 남기고 다음 라운드까지 캐시됐습니다. 되돌리기: 아래 3줄 삭제.
             if not picked:
                 steps.append({"name": "조문 선별", "detail": "선별 결과 없음(응답 형식 오류) — 전체 조문을 씁니다"})
                 picked = None
         except ai_client.AiError as e:
             applog.warn(f"조문 선별 실패 — 전체 조문을 씁니다: {e}")
-            picked = None                      # 실패하면 전체를 씁니다
+            picked = None
         if picked:
             steps.append({"name": "조문 선별",
                           "detail": f"{len(flat)}개 중 {len(picked)}개 선택"})
-        # ★ v1.31 — 지능형 검색이 지목한 조문(관련도 상위 6개)은 선별 결과에 없어도 앞에 넣습니다.
-        #   제목만 보는 선별이 놓치는 조문(예: 시행령 제8조 검사 주기)을 보완합니다.
         if ai_hits and picked is not None:
             def _n(x):
                 return str(x or "").strip().lstrip("0")
@@ -3092,9 +2607,6 @@ def _ask_after_search(req, steps, answered, found, flat, catalog, refs, it=None,
                         if k not in have:
                             extra.append((f, a))
                         break
-            # ★ v1.32 — 지능형 검색이 지목한 조문은 선별이 이미 골랐더라도 **맨 앞**(우선순위 최상)으로.
-            #   토큰 예산을 넘으면 뒤에서부터 빼므로, 순서가 곧 우선순위입니다.
-            #   (실제 사례: "폐기물처리업 종류" 에서 핵심인 법 제25조가 선별 목록 뒤쪽에 있어 빠졌음)
             if front:
                 picked = front + [p for p in picked if _akey(*p) not in seen]
             if extra:
@@ -3107,14 +2619,6 @@ def _ask_after_search(req, steps, answered, found, flat, catalog, refs, it=None,
         if picked:
             _cache_put(sel_key, [_akey(f, a) for f, a in picked])
 
-    # ★ 아래에서 별표를 덧붙이므로 반드시 복사본으로 씁니다.
-    #   picked/flat 을 그대로 쓰면 append 가 원본 목록을 오염시킵니다.
-    # ★ v1.41 RAG — 조문 '본문' 유사도 상위 조문 중 LLM 선별이 놓친 것을 **뒤에** 덧붙입니다(최대 RAG_MAX_ADD=6).
-    #   제목만 보는 선별이 놓치던 본문·별표 속 조문, 목록이 길어 잘린 뒤쪽 조문을 보완합니다.
-    #   되묻기 답(answered)도 질의에 넣으므로 2라운드부터는 답에 맞는 조문이 새로 붙습니다(선별 재사용 보완).
-    #   토큰 예산은 뒤에서부터 빼므로 기존 선별 조문을 밀어내지 않습니다. 오류 시 기존 선별 그대로.
-    #   원복: 이 if 블록 삭제 (또는 _cache/flags/rag_select 파일 삭제 / RAG_SELECT=0)
-    #   (picked 가 빈 목록이면 v1.40 처럼 '선별 실패 → 전체 조문 사용' 이므로 건드리지 않습니다)
     if picked and rag_select.enabled("select"):
         _tw_rag = next((s_.get("detail", {}).get("용어", []) for s_ in steps
                         if s_.get("name") == "검색어 변환" and isinstance(s_.get("detail"), dict)), [])
@@ -3122,10 +2626,6 @@ def _ask_after_search(req, steps, answered, found, flat, catalog, refs, it=None,
                                                label_fn=lambda f_, a_: _ctx_key(f_, a_), terms=_tw_rag)
         if _rag_info:
             steps.append(_rag_info)
-    # ★ v1.42 ai_ext (기본 꺼짐 — _cache/flags/rag_ai_ext) — 법제처 지능형 검색을 더 씁니다(받아 둔 조문 안에서만).
-    #   ① 되묻기 답이 생기면 '질문+답' 으로 다시 찾아 맞는 조문을 맨 앞에(처음 질문만으로 찾은 순위 보정)
-    #   ② 행정규칙 조문(search=2)·③ 별표(search=1) 중 받아 둔 것을 뒤에 덧붙임. 실패하면 그대로.
-    #   되돌리기: 이 if 블록 삭제(또는 플래그 파일 삭제).
     if picked and ai_ext.enabled():
         try:
             _x_notes = []
@@ -3141,18 +2641,11 @@ def _ask_after_search(req, steps, answered, found, flat, catalog, refs, it=None,
                 _x_notes.append("별표 " + ", ".join(_ctx_key(f, a) for f, a in _xc))
             if _x_notes:
                 steps.append({"name": "지능형 검색 보강", "detail": " / ".join(_x_notes)})
-        except Exception as e:                            # noqa: BLE001 — 보조 기능
+        except Exception as e:                            # noqa: BLE001
             applog.warn(f"지능형 검색 보강 실패 — 건너뜁니다: {e}")
     use = list(picked or flat)
 
 
-    # ── v1.35 — 질문이 이름으로 집어 말한 조문 우선 ─────────────────────
-    # 질문에 "토양오염우려기준", "토양오염대책기준" 처럼 **조문 제목 그 자체**가 나오면 그 조문이 답의 핵심입니다.
-    # 선별이 놓치거나 토큰 예산 때문에 뒤로 밀려 빠지는 일이 있어(실사용 2026-10-10: "우려기준이냐 대책기준이냐"
-    # 물었는데 법 제4조의2·시행규칙 제1조의5·별표 3(우려기준)이 빠지고 별표 7(대책기준)만 남아 "대책기준" 으로 답함)
-    # 제목이 질문에 그대로 들어 있는 조문을 맨 앞(우선순위 최상)에 둡니다. 그 조문이 인용한 별표도 따라옵니다.
-    # (v1.35 2차 — 처음엔 맨 앞으로 옮겼더니 주유소·음식점 시나리오의 되묻기·답이 흔들려서,
-    #  순서는 그대로 두고 **빠졌으면 넣고, 토큰 예산에서 마지막까지 지키는** 방식으로 바꿨습니다.)
     named_ids: set = set()
     if picked is not None and NAMED_FIRST:
         named = _named_in_question(req.question, flat)
@@ -3164,31 +2657,22 @@ def _ask_after_search(req, steps, answered, found, flat, catalog, refs, it=None,
             steps.append({"name": "질문에 이름이 나온 조문 보호",
                           "detail": ", ".join(_ctx_key(f, a) for f, a in named)
                                     + (f" (추가 {len(add_n)}개)" if add_n else "")})
-    # ★ v1.42 ctx_guard (해석35) — 질문에 "법령명(약칭 포함) 제N조" 로 직접 적힌 조문도 같은 방식으로 보호합니다.
-    #   (위 보호는 '…기준' 제목이 질문에 그대로 나올 때만이라, "지방계약법 시행령 제25조" 는 분량 조절에서 빠졌음)
-    #   되돌리기: 이 블록 삭제(.env CTX_GUARD_CITED=0 이면 끔).
     _cited_ids: set = set()
     if picked is not None and ctx_guard.enabled("cited"):
         try:
             _cited = ctx_guard.cited_in_question(req.question, flat)
-        except Exception as e:                            # noqa: BLE001 — 보조 기능. 실패해도 계속
+        except Exception as e:                            # noqa: BLE001
             applog.warn(f"질문에 적힌 조문 찾기 실패 — 건너뜁니다: {e}")
             _cited = []
         if _cited:
             have_c = {_akey(f, a) for f, a in use}
             add_c = [p for p in _cited if _akey(*p) not in have_c]
             use = use + add_c
-            # named_ids 에 넣으면 그 조문이 인용한 별표까지 짧게(1,600자) 줄어들어 따로 둡니다(우선순위만 올림).
             _cited_ids = {id(a) for _, a in _cited}
             steps.append({"name": "질문에 적힌 조문 보호",
                           "detail": ", ".join(_ctx_key(f, a) for f, a in _cited)
                                     + (f" (추가 {len(add_c)}개)" if add_c else "")})
 
-    # ── v1.32 — 상위 조문 자동 포함 ─────────────────────────────────
-    # 시행령·시행규칙 조문은 "법 제12조제1항에 따른 …", "영 제8조에 따라 …" 처럼 근거 조문을
-    # 적습니다. 선별이 하위 조문만 고르고 그 근거(법률 조문)를 빠뜨리면 답변이 "신고 의무가 있다"
-    # 는 근거를 못 댑니다. (실제 사례: 주유소 설치신고 — 시행규칙 제12조는 골랐지만 법 제12조 누락)
-    # 선별 결과가 있을 때만, 최대 4개, 우선순위는 인용한 조문 바로 뒤.
     parent_rank: dict = {}
     if picked:
         def _nk(x):
@@ -3207,7 +2691,7 @@ def _ask_after_search(req, steps, answered, found, flat, catalog, refs, it=None,
             body = a.get("조문내용", "") or ""
             for m in re.finditer(r"(?<![가-힣「」])(법|영)\s*제\s*(\d+)\s*조(?:\s*의\s*(\d+))?", body):
                 if body[max(0, m.start() - 3):m.start()].endswith("같은 "):
-                    continue                     # "같은 법 제5조" — 앞에 나온 **다른** 법
+                    continue
                 tgt = fam if m.group(1) == "법" else fam + " 시행령"
                 k = (tgt, m.group(2), _nk(m.group(3)))
                 if k in have_k or k not in flat_idx:
@@ -3222,11 +2706,6 @@ def _ask_after_search(req, steps, answered, found, flat, catalog, refs, it=None,
             steps.append({"name": "상위 조문 자동 포함",
                           "detail": ", ".join(_ctx_key(f, a) for f, a in parents)})
 
-        # ★ v1.34 — 위임 조문 자동 포함(아래 방향). 법률 조문이 "대통령령으로 정하는 사업" 처럼 넘기면
-        #   그 시행령·시행규칙 조문(법제처 위임 데이터 기준)을 함께 넣습니다. 그래야 그 조문이 가리키는
-        #   별표(대상 사업·기준 수치)까지 자동으로 따라옵니다.
-        #   (실제 사례: "환경영향평가를 받아야 하나요?" — 법 조문만 고르고 시행령 별표 3(대상사업 범위)이
-        #    빠져, 되묻기가 "별표 3 기준 이상/미만" 같은 알 수 없는 보기를 냈고 답도 수치 없이 끝남)
         children = []
         for i_use, (f, a) in enumerate(list(use[:8])):
             if f.get("level") != "법률" or len(children) >= 4:
@@ -3249,9 +2728,6 @@ def _ask_after_search(req, steps, answered, found, flat, catalog, refs, it=None,
             steps.append({"name": "위임 조문 자동 포함",
                           "detail": ", ".join(_ctx_key(f, a) for f, a in children)})
 
-        # ★ v1.41 — 참조 조문 확장: 같은 법령 안 "제N조에 따른" 참조와, 위임 데이터에 없는 하위 조문("법 제N조")을
-        #   이미 받은 조문 안에서 찾아 최대 3개 덧붙임(맨 뒤 = 예산 초과 시 먼저 빠짐). 기본 꺼짐(_cache/flags/rag_refs).
-        #   원복: 아래 if 블록 삭제
         if rag_select.enabled("refs"):
             _refs = rag_select.ref_expand(use, flat, have_k)
             if _refs:
@@ -3259,33 +2735,17 @@ def _ask_after_search(req, steps, answered, found, flat, catalog, refs, it=None,
                 steps.append({"name": "참조 조문 자동 포함(v1.41)",
                               "detail": ", ".join(_ctx_key(f, a) for f, a in _refs)})
 
-    # ── 인용된 별표를 자동으로 끌어옵니다 ─────────────────────────
-    # "누출검사주기는 별표 4와 같다" 처럼 조문이 별표에 넘기는 경우,
-    # 별표를 안 가져오면 AI 가 숫자를 지어내거나 조문에 없는 내용을 붙입니다.
     def _bp_no(a):
         """별표 항목에서 번호를 뽑습니다. 조문제목이 '[별표 4] …' 형태입니다."""
-        # ★ 2026-10-02 — "별표 3의2" 의 가지번호까지 읽습니다. 안 읽으면 별표 3 과 섞입니다.
         mt = re.match(r"\[(별표|별지|서식)\s*(\d+)(?:의(\d+))?", a.get("조문제목", ""))
         return (mt.group(1), mt.group(2) + (f"의{mt.group(3)}" if mt.group(3) else "")) if mt else None
 
-    # ★ 2026-08-19 — 별표 번호를 **인용한 조문이 속한 법령**에 무조건 붙이고
-    #   있었습니다. 그런데 조문은 다른 법령의 별표도 인용합니다.
-    #     「토양환경보전법 시행규칙」 제N조 … "「폐기물관리법 시행규칙」 별표 5에 따른"
-    #   그러면 토양환경보전법 시행규칙의 별표 5(전혀 다른 내용)를 끌어와 AI 에
-    #   넣거나, 없으면 "「토양환경보전법 시행규칙」 별표 5 를 못 받았다" 는
-    #   엉뚱한 경고를 띄웠습니다.
-    #   → 별표 앞 100자 안에 「다른 법령명」이 있으면 그 법령으로 붙입니다.
-    #     수집한 법령 목록에 없는 이름이면 아예 건드리지 않습니다.
     _known = {f["name"] for f in found}
     wanted = set()
-    # ★ v1.32 — 우선순위(작을수록 중요). 선별 순서 그대로이고, 자동으로 끌어온 별표는
-    #   **그 별표를 인용한 조문 바로 앞** 순위를 받습니다. 토큰 예산을 넘으면 큰 순위부터 뺍니다.
-    #   (v1.31: 별표를 무조건 맨 나중에 빼서, 덜 중요한 조문이 인용한 큰 별표가 남고
-    #    핵심 조문이 빠지는 일이 있었음)
     prio = {id(a): float(i) for i, (f, a) in enumerate(use)}
     prio.update(parent_rank)
     cite_rank: dict = {}
-    _cite_src: dict = {}          # ★ v1.44 (C-20261028-06) 별표 키 → 인용한 조문 id 목록
+    _cite_src: dict = {}
     for i_use, (f, a) in enumerate(use):
         body = a.get("조문내용", "")
         for mt in re.finditer(r"(별표|별지)\s*제?\s*(\d+)(?:\s*의\s*(\d+))?\s*호?", body):
@@ -3299,13 +2759,10 @@ def _ask_after_search(req, steps, answered, found, flat, catalog, refs, it=None,
                 if cand in _known:
                     owner = cand
                 elif cand != f["name"]:
-                    continue          # 우리가 안 가진 법령의 별표 — 건드리지 않음
+                    continue
             wanted.add((owner, kind, no))
             cite_rank.setdefault((owner, kind, no), i_use)
             _cite_src.setdefault((owner, kind, no), []).append(id(a))
-    # v1.35 — 질문에 이름이 나온 조문과 그 조문이 인용한 별표는 예산에서 끝까지 남깁니다.
-    # v1.35 — 질문자가 "○○이 아니다" 라고 밝힌 대상의 특례 조문(제목에 그 이름이 든 것)은 예산에서 먼저 뺍니다.
-    #   (비교15: "토양오염관리대상시설이 아니라서" 인데 시설 설치자 조문이 남고 일반 규정 제11조가 빠짐)
     _neg_early = [re.sub(r"\s+", "", n) for n in _negated_targets(req.question)]
     if _neg_early:
         demoted = []
@@ -3316,7 +2773,7 @@ def _ask_after_search(req, steps, answered, found, flat, catalog, refs, it=None,
                 demoted.append(_ctx_key(f, a))
         if demoted:
             steps.append({"name": "아니라고 밝힌 대상의 특례 조문 뒤로", "detail": ", ".join(demoted[:6])})
-    named_bp: set = set()          # 보호 조문이 인용한 별표 (렌더링 때 질문 낱말 줄 위주로 더 짧게)
+    named_bp: set = set()
     if named_ids:
         for i_use, (f, a) in enumerate(use):
             if id(a) not in named_ids:
@@ -3327,24 +2784,17 @@ def _ask_after_search(req, steps, answered, found, flat, catalog, refs, it=None,
                 named_bp.add(k3)
                 if k3 in cite_rank:
                     cite_rank[k3] = min(cite_rank[k3], 0.6)
-    # ★ v1.42 ctx_guard — 질문에 적힌 조문도 예산 조절에서 마지막까지 남도록 우선순위를 올립니다.
     for f, a in use:
         if id(a) in _cited_ids:
             prio[id(a)] = min(prio.get(id(a), 0.0), 0.2)
-    # ★ v1.44 (C-20261028-06) — 별표 순위를 인용 조문의 **목록 위치**(use 안 index)로 매겨, 뒤에 붙는 상위·위임·참조·
-    #   질문 조문(prio 0.2~0.4)이 인용한 별표는 가장 먼저 빠지고, 뒤로 민(+100) 특례 조문의 별표는 높은 순위를 지켰습니다.
-    #   모든 prio 조정이 끝난 뒤 '인용한 조문들 중 가장 높은 prio' 로 다시 매깁니다(질문 조문 보호 별표는 0.6 상한 유지).
-    #   되돌리기: 이 for 블록 삭제.
     for k3, ids in _cite_src.items():
         pr = min(prio.get(i, 999.0) for i in ids)
         cite_rank[k3] = min(pr, 0.6) if k3 in named_bp else pr
-    # 선별이 직접 고른 별표도, 그 별표를 인용한 조문이 더 앞에 있으면 그 순위를 따릅니다.
     for f, a in use:
         k = _bp_no(a)
         if k and (f["name"], *k) in cite_rank:
             prio[id(a)] = min(prio[id(a)], cite_rank[(f["name"], *k)] - 0.5)
 
-    # 본문을 끝내 확보하지 못한 별표. 답변 검증 단계에서 경고를 띄우는 데 씁니다.
     missing_bp: list[dict] = []
 
     if wanted:
@@ -3364,18 +2814,13 @@ def _ask_after_search(req, steps, answered, found, flat, catalog, refs, it=None,
             steps.append({"name": "별표 자동 포함",
                           "detail": ", ".join(a.get("조문제목", "")[:30] for _, a in added[:5])})
 
-        # ── 본문 조회로도 안 잡힌 별표는 별표·서식 API 로 한 번 더 ──────
         # 법령(target=law)은 본문 조회에 별표가 아예 딸려오지 않습니다.
-        # 이것이 "별표 4와 같다" 만 보고 AI 가 주기를 지어내던 원인입니다.
         got = already | {(f["name"], *(_bp_no(a) or ("", ""))) for f, a in added}
         still = sorted(w for w in wanted if w not in got)
         if still:
             by_name = {}
             for f, _ in use:
                 by_name.setdefault(f["name"], f)
-            # ★ v1.44 (C-20261028-05) — 다른 법령 별표 인용("「폐기물관리법 시행규칙」 별표 5에 따른")에서 그 법령 조문이
-            #   선별에 하나도 없으면 by_name 에 없어 API 조회도 경고도 없이 건너뛰었습니다. 받아 둔 법령(found)도 찾습니다.
-            #   되돌리기: 아래 두 줄 삭제.
             for f in found:
                 by_name.setdefault(f["name"], f)
             fetched = []
@@ -3386,7 +2831,7 @@ def _ask_after_search(req, steps, answered, found, flat, catalog, refs, it=None,
                 try:
                     rows = law_client.get_byeolpyo(
                         f.get("target", "law"), f.get("mst") or f.get("id", ""), law_name)
-                except Exception:                 # 별표는 보조 정보. 실패해도 조회는 계속합니다
+                except Exception:
                     rows = []
                 row = next((r for r in rows
                             if (r.get("no", "") + (f"의{r['gaji']}" if r.get("gaji") else "")) == no
@@ -3394,20 +2839,12 @@ def _ask_after_search(req, steps, answered, found, flat, catalog, refs, it=None,
                 link = (row or {}).get("link", "")
                 title = (row or {}).get("title", "")
                 if row and row.get("body"):
-                    body = row["body"][:12000]    # v1.32: 6천 → 1만2천 (비고까지 받도록; 넘길 때 압축)
+                    body = row["body"][:12000]
                     fetched.append(f"{law_name} {kind} {no}")
                 elif kind == "별지":
-                    # 별지는 신고서·신청서 같은 **서식**입니다. 주기·수치를 정하지
-                    # 않으므로 본문이 없어도 답변 근거에 지장이 없습니다.
-                    # 경고를 띄우면 진짜 경고(별표)까지 같이 무시하게 되므로
-                    # missing_bp 에 넣지 않습니다. 링크만 남깁니다.
                     body = (f"[{kind} {no}] {title}\n"
                             f"(제출용 서식입니다. 양식 자체는 주기·기준을 정하지 않습니다.)")
                 else:
-                    # ★ 본문을 못 받았다는 사실을 컨텍스트에 명시적으로 넣습니다.
-                    #   비워두면 AI 는 별표가 없다는 것조차 모르고 기억으로 채웁니다.
-                    #   제목은 받았으므로 "무엇을 정하는 별표인지" 는 알려줍니다.
-                    #   그래야 "이 별표를 봐야 한다" 고 정확히 안내할 수 있습니다.
                     body = (f"[{kind} {no}] {title}\n"
                             f"({kind} {no} 의 제목은 위와 같습니다. 그러나 본문은 법제처가 "
                             f"API 로 제공하지 않아 가져오지 못했습니다. "
@@ -3422,10 +2859,6 @@ def _ask_after_search(req, steps, answered, found, flat, catalog, refs, it=None,
                     "조문여부": "조문", "시행일자": "", "구분": kind,
                     "조문내용": body, "파일링크": link,
                 }
-                # ★ 2026-08-19 — `f` 는 캐시에 들어 있는 바로 그 dict 입니다.
-                #   그냥 append 하면 되묻기 라운드마다(같은 캐시로 다시 들어올
-                #   때마다) 같은 별표가 계속 쌓여, 화면과 AI 컨텍스트에 중복으로
-                #   들어갑니다. 같은 제목이 이미 있으면 붙이지 않습니다.
                 arts = f.setdefault("articles", [])
                 if not any(x.get("조문제목") == art["조문제목"] for x in arts):
                     arts.append(art)
@@ -3440,34 +2873,17 @@ def _ask_after_search(req, steps, answered, found, flat, catalog, refs, it=None,
                               + " — 첨부파일로만 제공되어 수치 확인 불가",
                 })
 
-    # ── 조문 본문 렌더링 (use 순서 = 우선순위) ───────────────────
-    delegated_hits = 0     # 위임법령 힌트를 실제로 붙인 조문 수 (처리 과정 표시용)
-    units = []             # (법령, 조문, 컨텍스트에 들어갈 텍스트)
+    delegated_hits = 0
+    units = []
     for f, a in use:
         body = a.get("조문내용", "")
         if a.get("구분") in ("별표", "별지", "서식") or \
                 str(a.get("조문제목", "")).startswith(("[별표", "[별지", "[서식")):
-            # v1.32: 원문 2천 자 자르기 → 테두리·공백 압축 후 비고를 남기며 자르기
-            # v1.35 — 보호한 기준 별표(예: 우려기준 별표 3)는 예산에서 끝까지 남는 대신 짧게(질문 낱말 줄+머리+비고).
-            #   두 별표를 통째로 지키다 일반 규정(법 제11조)이 예산에서 밀려난 일이 있었음(비교15).
             lim = BP_CTX_CHARS
             if (f["name"], *(_bp_no(a) or ("", ""))) in named_bp:
                 lim = min(BP_CTX_CHARS, 1600)
             body = _fit_keep_notes(_compact_bp(body), lim, bp_kw)
 
-        # ★ 위임법령(lsDelegated) 힌트 — 이 조문이 위임한 하위법령 조문번호를
-        #   법제처 데이터로 못박아 둡니다. AI가 시행령·시행규칙 조문번호를
-        #   짐작해서 틀리는 것을 막으려는 목적이라, 조문 개수가 많아도
-        #   법률 조문에만(연결이 있을 때만) 붙습니다.
-        #   ★ 2026-08-18 — 위임 대상은 종류마다 필드 이름이 다르고
-        #     (위임법령제목 / 위임행정규칙제목 / 위임자치법규제목 …),
-        #     행정규칙·자치법규는 조문번호를 아예 주지 않습니다.
-        #     law_client.get_delegated() 가 _kind_raw / _title / _jo 로
-        #     정규화해 주므로 그것을 씁니다.
-        #   ★ `인용법령` 은 위임이 아니라 단순 상호참조입니다. 실측상
-        #     건수가 압도적(455건 중 354건)이라 문장을 나눠 씁니다 —
-        #     한 덩어리로 "위임됩니다" 라고 쓰면 AI가 상호참조를
-        #     하위법령으로 오해합니다.
         dele = (f.get("delegated") or {}).get(
             law_client.dele_key(a.get("조문번호", ""), a.get("조문가지번호", "")))
         if dele:
@@ -3479,12 +2895,8 @@ def _ask_after_search(req, steps, answered, found, flat, catalog, refs, it=None,
                 gaji = (d.get("_jo_gaji") or "").lstrip("0")
                 if jo:
                     return f"「{title}」 제{jo}조" + (f"의{gaji}" if gaji else "")
-                # 행정규칙·자치법규·규정·조약 — 조문번호 없이 이름만 옵니다.
-                # 조문번호를 지어내지 못하게 "미제공" 이라고 못박습니다.
                 return f"「{title}」({d.get('_kind_raw') or d.get('_kind') or '위임'}, 조문번호 미제공)"
 
-            # 위임(시행령·시행규칙·고시…) 과 인용(상호참조) 을 갈라 담습니다.
-            # get_delegated() 가 위임을 앞으로 정렬해 주므로 앞에서 자릅니다.
             dele_hints, ref_hints = [], []
             for d in dele:
                 c = _cite(d)
@@ -3514,9 +2926,6 @@ def _ask_after_search(req, steps, answered, found, flat, catalog, refs, it=None,
                 body += note + ")"
                 delegated_hits += 1
 
-        # ★ 조문마다 법령명을 앞에 붙입니다.
-        #   구분선만 두면 AI 가 아래로 내려갈수록 어느 법령인지 잊고
-        #   법률 제8조를 "시행령 제8조" 로 인용하는 오류가 납니다.
         units.append((f, a, f"[{f['name']}] {label_of(a)}\n{body}"))
     if delegated_hits:
         steps.append({"name": "위임법령 힌트 추가",
@@ -3527,56 +2936,39 @@ def _ask_after_search(req, steps, answered, found, flat, catalog, refs, it=None,
         return a.get("구분") in ("별표", "별지", "서식") or \
             str(a.get("조문제목", "")).startswith(("[별표", "[별지", "[서식"))
 
-    # --- 3-2단계: 되묻기 (v1.31: 선별·별표 보강 **뒤**, 조문 **본문** 기반) ----
-    # ★ 2026-10-07 — v1.30 까지는 선별 **전에** 조문 **제목** 60줄만 보고 물었습니다.
-    #   · catalog 는 법령 순서로 나열돼 두 번째 법령·시행규칙·별표는 아예 안 보였고
-    #   · 기준값(2만L·1년·3회)은 본문·별표에 있어 보기를 나눌 수 없었습니다.
-    #   이제 선별된 조문과 별표 본문을 토큰 상한(CLARIFY_CTX_TOKENS) 안에서 넘깁니다.
-    # ★ 의도가 사용자 사실을 요구하지 않으면(조문 조회·정의·일반 기준) 묻지 않습니다.
     if not req.skip_clarify and req.round == 0 and not it.needs_facts:
         steps.append({"name": "되묻기 생략",
                       "detail": f"질문 유형 '{it.label}' — 사례 사실 없이 답할 수 있음"})
-    # ★ v1.32 — 질문에 구체적 사실(수치·단위·날짜)이 2개 이상 적혀 있으면 되묻기는 1라운드까지만.
-    #   사실을 충분히 준 질문에 라운드를 거듭하면 지엽적인 것(측정 기관·300m 이내 주택)을 묻고,
-    #   그 "모름" 때문에 답변까지 흐려졌습니다(공사장 소음 68dB 사례).
     n_facts = len(intent_mod._CASE_FACTS.findall(req.question))
     max_r = min(MAX_ROUNDS, 1) if n_facts >= 2 else MAX_ROUNDS
     if LAW_Q in (answered or ""):
-        max_r += 1                     # v1.33 — "어느 법" 라운드는 사실 확인 라운드에서 빼고 셉니다
+        max_r += 1
     if not req.skip_clarify and req.round < max_r and it.needs_facts:
         prim = [u for u in units if not _is_bp(u)]
         bps = [u for u in units if _is_bp(u)]
         order = prim[:8] + bps[:4] + prim[8:] + bps[4:]
-        # ★ v1.41 RAG — 되묻기 근거를 질문(+이전 답)과 본문 유사도가 높은 조문·별표부터 넣습니다
-        #   (RAC 2026: 검색 근거 기반 되묻기, 근거 4개 안팎에서 효과 포화). 오류 시 위 순서 그대로.
-        #   원복: 아래 3줄 삭제 (또는 _cache/flags/rag_clarify 파일 삭제 / RAG_CLARIFY=0)
         if rag_select.enabled("clarify"):
             order = rag_select.order_for_clarify(req.question, answered or "", prim, bps) or order
             steps.append({"name": "되묻기 근거 유사도 정렬(v1.41)", "detail": " / ".join(_ctx_key(f_, a_) for f_, a_, _ in order[:4])})
         parts, used = [], 0
         for f, a, txt in order:
-            # 별표는 비고(보정·예외)가 보기를 가르므로 조금 더 길게, 비고를 남겨 자릅니다.
             piece = _fit_keep_notes(txt, 2500 if _is_bp((f, a, txt)) else 1500,
                                     bp_kw if _is_bp((f, a, txt)) else None)
-            if used + len(piece) > CLARIFY_CTX_TOKENS * 2 and parts:   # 글자 기준 1차 컷
+            if used + len(piece) > CLARIFY_CTX_TOKENS * 2 and parts:
                 break
             parts.append(piece)
             used += len(piece)
         clar_ctx = "\n\n".join(parts)
         n_cl = ai_client.count_tokens(clar_ctx)
-        if n_cl > CLARIFY_CTX_TOKENS:                                  # 토큰 기준 2차 컷
+        if n_cl > CLARIFY_CTX_TOKENS:
             clar_ctx = clar_ctx[:int(len(clar_ctx) * CLARIFY_CTX_TOKENS / n_cl * 0.95)] \
                 + "\n…(분량 제한으로 이하 생략)"
         try:
             asks = ai_client.clarify(req.question, answered, clar_ctx)
         except ai_client.AiError as e:
             applog.warn(f"되묻기 판단 실패 — 건너뜁니다: {e}")
-            asks = []          # 판단 실패는 그냥 통과시킵니다
+            asks = []
 
-        # ★ v1.40 — 법정 기한 자체를 묻는 질문("며칠 이내에 선임해야 하나요", "언제까지 청구할 수 있나요")에
-        #   사건 날짜(퇴직일·사무처리일)를 되묻지 않습니다. 날짜는 질문자가 **특정 날짜 계산**을 원할 때만 필요한데,
-        #   그런 질문에는 기준이 되는 날짜·경과 기간이 적혀 있거나 '다음 ○○는 언제' 처럼 묻습니다.
-        #   (되묻기 지시문에 같은 규칙을 넣었지만 로컬 모델이 계속 날짜를 물어 — L-2244-2·L-1751-2 — 코드로 거릅니다)
         if asks and it.kind == intent_mod.DEADLINE:
             _has_date = bool(re.search(r"\d{4}\s*[년.\-/]|\d+\s*(년|개월|달)\s*(전|째|됐|되었|지났|경과)|다음\s*\S{0,6}(언제|검사|점검)",
                                        req.question + " " + (answered or "")))
@@ -3589,8 +2981,6 @@ def _ask_after_search(req, steps, answered, found, flat, catalog, refs, it=None,
                                   "detail": "법정 기한을 묻는 질문이라 사건 날짜는 묻지 않음: "
                                             + " / ".join(a["question"][:30] for a in _dq)})
         if asks:
-            # 이미 물은 질문(모름으로 답한 것 포함)과 겹치면 버립니다.
-            # 프롬프트 지시를 로컬 모델이 무시해도 여기서 최종적으로 막힙니다.
             already = _asked_questions(answered)
             fresh = [a for a in asks if not _is_repeat_question(a["question"], already)]
             if not fresh:
@@ -3620,24 +3010,16 @@ def _ask_after_search(req, steps, answered, found, flat, catalog, refs, it=None,
         by_law = {}
         for f, a, txt in sel:
             by_law.setdefault(id(f), (f, []))[1].append(txt)
-        # ★ 조문마다 법령명을 앞에 붙입니다(위 txt). 구분선만 두면 AI 가 아래로
-        #   내려갈수록 어느 법령인지 잊고 법률 제8조를 "시행령 제8조" 로 인용합니다.
         return "\n\n".join(
             f"=== 여기부터는 「{f['name']}」 조문입니다 "
             f"(시행 {f.get('enforced', '?')}) ===\n" + "\n\n".join(txts)
             for f, txts in by_law.values()), len(by_law)
 
-    # ── 토큰 예산 ────────────────────────────────────────────────
-    # ★ 2026-09-29 — 로컬 LLM 컨텍스트 = 지시문 + 질문 + 조문 + **답변(출력)**.
-    #   예산을 넘으면 중간을 뚝 자르지 않고, 우선순위가 낮은 조문부터 통째로 뺍니다.
-    #   우선순위: 조문 선별이 고른 순서(선별 프롬프트가 중요한 것부터 적게 함).
-    #   별표는 수치가 들어 있어 맨 나중에 뺍니다. 최소 3개는 남깁니다.
     _hint = {
         intent_mod.DEFINITION: "\n(질문 유형: 용어 정의 — 정의 조문을 먼저 인용하고 쉽게 풀어 설명한다)",
         intent_mod.GENERAL_RULE: "\n(질문 유형: 일반 기준·절차 설명 — 특정 사례를 판정하는 질문이 아니다. "
                                  "조건에 따라 기준이 달라지면 경우를 나눠 정리한다)",
     }.get(it.kind, "")
-    # ★ v1.35 — 질문자가 "○○이 아니다" 라고 밝힌 대상 → 그 대상 특례가 아니라 일반 조문으로 답하도록 명시
     _neg = _negated_targets(req.question)
     if _neg:
         _hint += ("\n(질문자 확인: " + ", ".join(f"「{n}」에 해당하지 않음" for n in _neg)
@@ -3645,19 +3027,14 @@ def _ask_after_search(req, steps, answered, found, flat, catalog, refs, it=None,
                     "(예: 신고·조사·명령의 일반 규정)이 직접 근거이므로 그 조문으로 답한다. "
                     "'직접적인 규정을 확인할 수 없다' 고 하지 않는다)")
         steps.append({"name": "질문자가 아니라고 밝힌 대상", "detail": ", ".join(_neg) + " — 일반 조문으로 답하도록 지시"})
-    # ★ v1.38 — 여러 측면을 묻는 질문이면 측면별로 나눠 답하도록 알려 줍니다(질문 쪼개기 결과).
     _asp = next((f.get("_aspects") for f in found if f.get("_aspects")), None)
     if _asp:
         _hint += ("\n(이 질문은 여러 측면을 함께 묻는다: " + " / ".join(f"{i + 1}) {q}" for i, q in enumerate(_asp))
                   + " — 【결론】과 【설명】에서 측면마다 근거 조문을 들어 나눠 답한다. 조문이 없는 측면은 그렇다고 밝힌다)")
-    # ★ v1.35 — 개정·변경을 묻는 질문이면 직전 버전과 비교한 [개정 이력] 을 붙입니다.
     try:
         _hint += _history_block(req.question, use, prio, bp_kw, steps, answered or "")
-    except Exception as e:                                # noqa: BLE001 — 보조 정보. 실패해도 답은 냅니다
+    except Exception as e:                                # noqa: BLE001
         applog.warn(f"개정 이력 비교 실패 — 건너뜁니다: {e}")
-    # ★ v1.40 — 참고 해석례를 답변 **앞에** 골라 답변 지시에 함께 넣습니다(U-24).
-    #   조문에 명시가 없고 부처 해석으로만 결론이 나는 질문(폐업 안 된 음식점 자리 새 영업신고 → 식약처
-    #   '중복 신고 불가')에서 조문만 보고 반대로 답했습니다. 같은 쟁점이라고 LLM 이 고른 것만(대개 0~2건) 넣습니다.
     _pre_cases = None
     if RELATED_CASES and CASE_IN_ANSWER:
         try:
@@ -3667,24 +3044,17 @@ def _ask_after_search(req, steps, answered, found, flat, catalog, refs, it=None,
                                         _case_candidates(req.question, _tw0, found))
             _ci = _pre_cases.get("items") or []
             if _ci:
-                # 본문(질의요지·회답)을 보고 같은 쟁점인 것만 답변에 넣습니다(화면 표시는 그대로)
                 _keep = ai_client.confirm_cases(req.question, _ci)
                 if _keep is None:
-                    # ★ v1.45 (C-20261028-27) — 본문 대조 호출이 실패하면 '0건' 으로 처리돼 화면 참고사례까지 사라졌습니다.
-                    #   실패면 답변 지시에는 넣지 않고(확인 안 됨) 화면 목록은 그대로 둡니다.
                     steps.append({"name": "참고 해석례 확인", "detail": "본문 대조 실패 — 답변에는 넣지 않고 화면에만 표시"})
                     _ci = []
                 else:
                     _n0 = len(_ci)
                     _ci = [_ci[k] for k in _keep]
-                    # 화면의 참고 사례도 본문 대조를 통과한 것만 보여 줍니다(U-18: 쟁점이 다른 사례가 섞임)
                     _pre_cases = {"items": _ci, "detail": (_pre_cases.get("detail", "") +
                                                            f" → 본문 대조 {_n0}건 중 {len(_ci)}건")}
                     steps.append({"name": "참고 해석례 확인", "detail": f"본문 대조 — {_n0}건 중 {len(_ci)}건 같은 쟁점"})
             if _ci:
-                # ★ v1.47 — "해석 결론과 어긋나게 답하지 말라" 만 있어, 개정 전 조문으로 낸 옛 해석(2012)을 따라
-                #   현행 조문("총 사용가능기간 내에서")과 반대로 답했습니다(10-30 평가 해석24). 해석 뒤 개정 가능성을 함께 알립니다.
-                #   원래: "…같은 쟁점에 결론을 낸 해석이 있으면 그 결론과 어긋나게 답하지 말고 \"(참고: 기관 해석 날짜)\" 처럼 밝힌다. …"
                 _hint += ("\n\n[참고 해석례 — 서버가 법제처에서 가져온 실제 법령해석·부처 해석·판례다. "
                           "근거 조문은 [조문 원문]에서 든다. 해석은 그 날짜 당시 조문 기준이라 그 뒤 개정됐을 수 있다. "
                           "해석이 근거로 든 조문 문구가 지금 [조문 원문]과 다르면(대상·요건·'…내에서' 같은 제한이 바뀜) 현행 조문 문언대로 결론 내고 "
@@ -3692,7 +3062,7 @@ def _ask_after_search(req, steps, answered, found, flat, catalog, refs, it=None,
                           "\"(참고: 기관 해석 날짜)\" 처럼 밝힌다. 질문과 사실관계가 다르면 쓰지 않는다]\n"
                           + "\n".join(f"{k + 1}) [{c['kind']}] {c['title'][:90]} ({c.get('org', '')} {c.get('date', '')})\n"
                                       f"   질의: {c['q'][:220]}\n   회답: {c['a'][:480]}" for k, c in enumerate(_ci[:2])))
-        except Exception as e:                            # noqa: BLE001 — 참고 정보. 실패해도 답은 냅니다
+        except Exception as e:                            # noqa: BLE001
             applog.warn(f"참고 해석례(답변 전) 실패 — 건너뜁니다: {e}")
             _pre_cases = None
     q_for_answer = req.question + (f"\n(확인된 조건: {answered})" if answered else "") + _hint
@@ -3700,8 +3070,6 @@ def _ask_after_search(req, steps, answered, found, flat, catalog, refs, it=None,
     overhead = ai_client.count_tokens(
         ai_client.ANSWER_PROMPT.format(question=q_for_answer, context=""))
     budget = ctx_n - overhead - min(ai_client.MAXTOK_ANSWER, ANSWER_RESERVE) - 96
-    # ★ v1.45 (C-20261028-26) — [개정 이력]·참고 해석례 같은 덧붙임이 길어 예산이 0 이하가 되면 음수 자르기로
-    #   컨텍스트 초과 오류가 났습니다. 조문 몫이 MIN_CTX_BUDGET 보다 작으면 덧붙임(_hint)을 줄여 확보합니다.
     if budget < MIN_CTX_BUDGET and _hint:
         _ht = ai_client.count_tokens(_hint) or 1
         _keep_r = max(0.0, (_ht - (MIN_CTX_BUDGET - budget) * 1.1) / _ht)
@@ -3712,18 +3080,14 @@ def _ask_after_search(req, steps, answered, found, flat, catalog, refs, it=None,
         steps.append({"name": "참고 블록 축소", "detail": f"조문 예산 확보 — 덧붙임 {_ht:,}토큰 중 {int(_keep_r * 100)}% 남김"})
 
     keep = list(units)
-    _cut_keys = None              # ★ v1.45 (C-29)
+    _cut_keys = None
     context, n_laws = _assemble(keep)
     n_tok = ai_client.count_tokens(context)
     dropped = []
     if n_tok > budget:
-        # ★ v1.32 — 조문을 빼기 **전에** 별표를 먼저 줄입니다(비고는 남김).
-        #   큰 별표(시설·장비 기준표 등) 몇 개가 예산을 다 먹어 핵심 조문이 빠지는 것을 막습니다.
         shrunk = 0
         for j, u in enumerate(keep):
             if _is_bp(u) and len(u[2]) > 1800:
-                # v1.40 — 앞부분이 아니라 **질문 낱말이 든 줄 주변**을 남깁니다(비고 유지).
-                #   표 앞 1,800자만 남기면 질문에 해당하는 줄(별표 13 성토, 별표 28 정지·취소 수치)이 잘렸습니다.
                 keep[j] = (u[0], u[1], _fit_keep_notes(u[2], 1800, bp_kw or None))
                 shrunk += 1
         if shrunk:
@@ -3734,11 +3098,10 @@ def _ask_after_search(req, steps, answered, found, flat, catalog, refs, it=None,
                           "detail": f"예산 {budget:,}토큰 초과 — 별표 {shrunk}개를 1,800자로 줄임(비고 유지) "
                                     f"{before_tok:,} → {n_tok:,}토큰"})
     if n_tok > budget:
-        # 우선순위가 낮은(prio 가 큰) 것부터 뺍니다. 같은 순위면 뒤에 있는 것부터.
         pos = {id(u[1]): i for i, u in enumerate(keep)}
         order = sorted(keep, key=lambda u: (-prio.get(id(u[1]), float(len(keep))), -pos[id(u[1])]))
         for _ in range(5):
-            ratio = n_tok / max(1, len(context))          # 글자당 토큰 (실측)
+            ratio = n_tok / max(1, len(context))
             need = (n_tok - budget) * 1.1
             while need > 0 and order and len(keep) > 3:
                 u = order.pop(0)
@@ -3749,12 +3112,8 @@ def _ask_after_search(req, steps, answered, found, flat, catalog, refs, it=None,
             n_tok = ai_client.count_tokens(context)
             if n_tok <= budget or len(keep) <= 3 or not order:
                 break
-        # ★ v1.42 ctx_guard (해석35) — 글자 수 추정으로 큰 조문을 한꺼번에 빼 예산이 많이 남으면
-        #   (8,523 예산에 6,162), 뺀 것 중 우선순위가 높은 것부터 예산 안에 들어가는 만큼 되돌려 넣습니다.
-        #   되돌리기: 이 블록 삭제(.env CTX_GUARD_REFILL=0 이면 끔).
         if dropped and n_tok <= budget and ctx_guard.enabled("refill"):
             try:
-                # 뒤에 붙는 '※ 분량 제한' 안내문 몫(약 400토큰)은 남겨 둡니다(v1.42 검토 ③).
                 keep, dropped, context, n_laws, n_tok, _back = ctx_guard.refill(
                     keep, dropped, prio, pos, _assemble, ai_client.count_tokens, budget - 400)
                 if _back:
@@ -3762,18 +3121,15 @@ def _ask_after_search(req, steps, answered, found, flat, catalog, refs, it=None,
                                   "detail": f"남는 예산으로 {len(_back)}개 다시 넣음: "
                                             + ", ".join(f"「{f['name']}」 {label_of(a)}" for f, a, _ in _back[:5])
                                             + f" → {n_tok:,}토큰"})
-            except Exception as e:                        # noqa: BLE001 — 보조 기능. 실패하면 뺀 그대로
+            except Exception as e:                        # noqa: BLE001
                 applog.warn(f"조문 되돌려 넣기 실패 — 건너뜁니다: {e}")
-        if n_tok > budget:                                # 최후 수단: 글자 단위로 자름
-            cut = max(0, int(len(context) * max(budget, 0) / n_tok * 0.95))   # ★ v1.45 (C-26) 음수 방지
+        if n_tok > budget:
+            cut = max(0, int(len(context) * max(budget, 0) / n_tok * 0.95))
             context = context[:cut] + "\n…(분량 제한으로 이하 생략)"
             n_tok = ai_client.count_tokens(context)
-            # ★ v1.45 (C-20261028-29) — 글자 단위로 자른 뒤에도 평가용 context_keys 가 전체 keep 을 기록해
-            #   Recall 이 부풀었습니다. 본문 첫머리가 남은 조문만 기록합니다.
             _cut_keys = [_ctx_key(f, a) for f, a, t in keep if str(t)[:80] in context]
         if dropped:
             names = [f"「{f['name']}」 {label_of(a)}" for f, a, _ in dropped]
-            # 빠진 조문이 있다는 사실을 모델에게 알립니다. 모르면 그 내용을 기억으로 채웁니다.
             context += ("\n\n(※ 분량 제한으로 다음 조문은 넣지 못했습니다: " + ", ".join(names[:15])
                         + (" 외" if len(names) > 15 else "")
                         + ". 이 조문의 내용이 필요하면 추측하지 말고 원문 확인이 필요하다고 답하십시오.)")
@@ -3788,7 +3144,6 @@ def _ask_after_search(req, steps, answered, found, flat, catalog, refs, it=None,
     if not context.strip():
         return {"steps": steps, "answer": "조문 본문을 가져오지 못했습니다.", "laws": found}
 
-    # ★ v1.36 — 참고 사례(해석례·판례)는 답변을 만드는 동안 다른 스레드에서 찾습니다.
     _cases_fut = None
     if RELATED_CASES and _pre_cases is None:
         try:
@@ -3801,25 +3156,18 @@ def _ask_after_search(req, steps, answered, found, flat, catalog, refs, it=None,
         except Exception as e:                            # noqa: BLE001
             applog.warn(f"참고 사례 검색 시작 실패 — 건너뜁니다: {e}")
 
-    # --- 4단계: 답변 + 검증 ---------------------------------------
     try:
         text = ai_client.answer(q_for_answer, context)
     except ai_client.AiError as e:
         return _err(str(e))
-    # v1.35 — "아니라고 밝힌 대상" 질문에서 【결론】 앞에 붙는 "질문은 …이나 제공된 조문은 …" 분석문은 지웁니다.
     if _neg and "【결론】" in text:
         pre = text[:text.index("【결론】")]
         if pre.strip() and re.search(r"제공된\s*(\[?조문|원문)", pre):
             text = text[text.index("【결론】"):]
 
-    # ★ v1.40 — 답변 검토: 다 쓴 답변을 LLM 이 원문·질문과 대조해 오류(원문불일치·단서누락·전제위반·결론모순)를
-    #   찾고, 근거 글자가 실제로 있는 지적만 남겨 한 번 다시 씁니다. (U-20·22·23, L-2244-1·3 등)
     if ANSWER_REVIEW and len(text) > 80:
         try:
             probs = ai_client.review_answer(q_for_answer, text, context)
-            # ★ v1.46 — 답이 스스로 고친 흔적("수정된 결론:", "정정하면")을 남기면 【결론】과 【설명】 끝의 판정이
-            #   엇갈립니다(10-29 평가: 소음 5시간 — 【결론】 "초과했습니다", 끝의 '수정된 결론' "초과하지 않았습니다").
-            #   검토가 '문제 없음' 이어도 결론모순으로 보고 한 번 다시 쓰게 합니다. 되돌리기: 아래 4줄 삭제.
             _sc = _SELF_CORR_RE.search(text)
             if _sc and not any(p.get("kind") == "결론모순" for p in probs):
                 probs = list(probs) + [{"kind": "결론모순", "quote": text[_sc.start():_sc.start() + 80].strip(),
@@ -3830,11 +3178,8 @@ def _ask_after_search(req, steps, answered, found, flat, catalog, refs, it=None,
                     pre2 = text2[:text2.index("【결론】")]
                     if pre2.strip() and re.search(r"제공된\s*(\[?조문|원문)", pre2):
                         text2 = text2[text2.index("【결론】"):]
-                # 다시 쓴 답이 근거를 잃으면(1차 실측: 일요일 소음 — 표기 지적 하나로 다시 써 인용 0건) 처음 답을 씁니다
                 _c1 = sum(1 for c in verify_citations(text, found) if c["ok"])
                 _c2 = sum(1 for c in verify_citations(text2, found) if c["ok"])
-                # ★ v1.44 (C-20261028-10) — 다시 쓴 답이 출력 상한에서 잘리면(【설명】 등 뒷부분 없음) 멀쩡한 첫 답을 덮었습니다.
-                #   첫 답에 있던 블록이 다시 쓴 답에 모두 있어야 채택합니다. 되돌리기: _keep_secs 조건 삭제.
                 _keep_secs = all(h in text2 for h in ("【결론】", "【근거】", "【계산】", "【설명】") if h in text)
                 if "【결론】" in text2 and len(text2) > 80 and "【근거】" in text2 and _c2 >= max(1, _c1 // 2) and _keep_secs:
                     text = text2
@@ -3844,7 +3189,6 @@ def _ask_after_search(req, steps, answered, found, flat, catalog, refs, it=None,
                               "detail": f"오류 {len(probs)}건 → 고쳐 다시 씀: "
                                         + " / ".join(f"[{p['kind']}] {p['fix'][:60]}" for p in probs)})
             elif not ai_client.REVIEW_STATS.get("ok", True):
-                # ★ v1.45 (C-20261028-14) — 검토 호출이 실패해도 "문제 없음(주장 N개)" 로 보였습니다(N 은 이전 질문 값).
                 steps.append({"name": "답변 검토", "detail": "검토 실패(응답 오류) — 처음 답변을 그대로 씁니다"})
             else:
                 _rs = ai_client.REVIEW_STATS
@@ -3852,23 +3196,15 @@ def _ask_after_search(req, steps, answered, found, flat, catalog, refs, it=None,
                               "detail": f"문제 없음 (핵심 주장 {_rs.get('claims', 0)}개 대조"
                                         + (f", 원문 근거를 못 찾은 지적 {_rs['dropped']}건 버림" if _rs.get("dropped") else "")
                                         + ")"})
-        # ★ v1.42 (C-20261018-18) — AiError 만 잡아서 검토 결과 형식 오류(KeyError 등)면 질문 전체가 실패했습니다.
-        #   원래: except ai_client.AiError as e:
         except Exception as e:                            # noqa: BLE001
             applog.warn(f"답변 검토 실패 — 처음 답변을 씁니다: {type(e).__name__}: {e}")
 
     cites = verify_citations(text, found)
     steps.append({"name": "인용 검증", "detail": f"{sum(1 for c in cites if c['ok'])}/{len(cites)}건 확인"})
 
-    # ── 안전장치: 본문 없는 별표를 답변이 **근거로 썼는지** ────────
-    # 실제 사고: 별표 4 본문이 없는데 모델이 "매 8년" 이라고 했다가
-    # 같은 질문에 다시 "5·10·15년 이후 매 2년" 이라고 했습니다. 둘 다 근거가 없습니다.
-    # 담당자가 이 수치를 민원인에게 그대로 안내하면 사고로 이어집니다.
     warnings = []
     if missing_bp:
         cited_bp = _bp_used_as_basis(text)
-        # ★ v1.45 (C-20261028-13) — 번호가 같아도 답변이 **다른 법령**의 별표라고 밝혔으면 경고하지 않습니다.
-        #   원래: hits = [m for m in missing_bp if (m["kind"], m["no"]) in cited_bp]
         hits = [m for m in missing_bp
                 if any(k == m["kind"] and n == m["no"] and (not lw or _law_key(lw) == _law_key(m["law"]))
                        for k, n, lw in cited_bp)]
@@ -3888,8 +3224,7 @@ def _ask_after_search(req, steps, answered, found, flat, catalog, refs, it=None,
                     warnings.append(f"{m['kind']} {m['no']} 원문 보기: {m['link']}")
             steps.append({"name": "별표 경고", "detail": names + " — 근거 없는 수치 경고 표시"})
 
-    # ── 안전장치: 답변이 날짜를 계산했으면 코드가 검산합니다 ─────────
-    try:                                                  # ★ v1.45 (C-22) 검산은 보조 기능 — 실패해도 답은 냅니다
+    try:
         calc_warn = verify_calc(text, f"{req.question}\n{answered}")
     except Exception as e:                                # noqa: BLE001
         applog.warn(f"계산 검산 실패 — 건너뜁니다: {type(e).__name__}: {e}")
@@ -3898,9 +3233,6 @@ def _ask_after_search(req, steps, answered, found, flat, catalog, refs, it=None,
         warnings.extend(calc_warn)
         steps.append({"name": "계산 검산", "detail": f"{len(calc_warn)}건 이상 발견"})
 
-    # 인용된 조문 번호 집합 — 화면에서 이것만 펼쳐 보여줍니다.
-    # 법령별로 어떤 조문이 인용됐는지. 법률 제3조와 시행령 제3조를 구분하기 위해
-    # 법령명까지 키에 넣습니다.
     hit = sorted({(c["law"], c["jo"], c["gaji"]) for c in cites if c["ok"]})
 
     cases = []
@@ -3913,18 +3245,16 @@ def _ask_after_search(req, steps, answered, found, flat, catalog, refs, it=None,
             rc = _case_finalize(req.question, _cases_fut.result(timeout=20))
             cases = rc.get("items") or []
             steps.append({"name": "참고 사례", "detail": rc.get("detail", "")})
-        except Exception as e:                            # noqa: BLE001 — 참고 정보. 실패해도 답은 냅니다
+        except Exception as e:                            # noqa: BLE001
             applog.warn(f"참고 사례 검색 실패 — 건너뜁니다: {e}")
 
     return {
-        # ★ v1.48 — 법령 목록을 답변이 인용한 순서(많이 인용한 법령 묶음 먼저)로 돌려줍니다. 원래: "laws": found
         "steps": steps, "answer": text, "laws": _laws_by_cites(found, cites), "citations": cites,
         "cases": cases,
         "cited_keys": [f"{n}|{j}|{g}" for n, j, g in hit],
         "references": [r for r, _ in sorted(refs.items(), key=lambda x: -x[1])][:12],
         "warnings": warnings,
         "intent": it.as_dict(),
-        # v1.31 — 평가용: 컨텍스트에 실제로 들어간 조문(검색 Recall 측정), 빠진 조문
         "debug": {
             "flat_n": len(flat),
             "picked_n": len(picked or []),
@@ -3932,7 +3262,6 @@ def _ask_after_search(req, steps, answered, found, flat, catalog, refs, it=None,
             "dropped_keys": [_ctx_key(f, a) for f, a, _ in dropped],
             "user_laws": _user_laws(req),
             "laws_mode": _laws_mode(req),
-            # v1.32 — 지능형 검색이 돌려준 조문 순서(법령 순위 판단을 나중에 검토하려고)
             "ai_hits": [f"{n} 제{str(j).lstrip('0')}조" + (f"의{str(g).lstrip('0')}" if str(g).strip("0") else "")
                         for n, j, g in (ai_hits or [])[:20]],
         },

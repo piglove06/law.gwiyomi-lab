@@ -30,16 +30,16 @@ pip install -r requirements.txt
 copy .env.example .env        # Windows
 # .env 를 열어서 LAW_OC(법제처 인증키) 등을 채우세요
 
-# 4. 로컬 LLM 서버 + 웹 서버 실행
-_3_start_server.bat
+# 4. 전부 실행 (LLM + 웹 서버 + 터널 + 감시 프로그램)
+start.bat
 ```
 
 브라우저에서 http://127.0.0.1:8000 접속.
 
 `--reload` 는 코드 수정 시 자동 재시작입니다. 개발 중에만 쓰세요.
 
-실제 배포/운영은 `_3_start_server.bat` (서버 + Cloudflare 터널) 과
-`_4_start_watcher.bat` (자동 테스트 + 자동 커밋/푸시) 를 사용합니다.
+운영은 `start.bat` 하나로 켭니다(이미 켜진 것은 건너뜀). 감시 프로그램 없이 켜려면 `start.bat nowatch`.
+`llm_start.bat` 은 LLM만 켜는 파일로, `start.bat` 과 LLM 자동 재시작이 부릅니다(LLM 설정은 이 파일 한 곳에만 있음).
 
 ## 파일 구조
 
