@@ -35,6 +35,19 @@ MAXTOK_ANSWER  = int(os.getenv("MAXTOK_ANSWER",  "4000"))
 SELECT_MAX = int(os.getenv("SELECT_MAX", "20"))
 
 LOCAL_BASE_URL = os.getenv("LOCAL_BASE_URL", "http://localhost:8080/v1").rstrip("/")
+# ★ v1.57 — 주소의 'localhost' 는 127.0.0.1 로 바꿔 부릅니다. Windows 는 localhost 를 IPv6(::1)부터 시도하는데
+#   llama-server 는 127.0.0.1 에만 떠 있어, 연결할 때마다 약 2초를 기다린 뒤에야 IPv4 로 넘어갑니다
+#   (11-17 평가 로그: LLM 호출 147회 모두 서버가 잰 처리 시간보다 2.2~2.4초 더 걸림 — 호출 앞의 토큰 세기도 같음).
+#   그대로 두기: .env LOCAL_KEEP_HOST=1
+def _ipv4_local(url: str) -> str:
+    return re.sub(r"(?<=://)localhost(?=[:/]|$)", "127.0.0.1", url)
+
+
+if os.getenv("LOCAL_KEEP_HOST", "0") in ("0", "", "false", "False"):
+    LOCAL_BASE_URL = _ipv4_local(LOCAL_BASE_URL)
+# 로컬 LLM 서버를 부르는 공용 클라이언트. httpx.post() 는 부를 때마다 클라이언트를 새로 만들어(수십~수백 ms) 느립니다.
+# 연결은 요청마다 새로 맺습니다(keep-alive 0) — 서버가 끊은 묵은 연결을 다시 쓰다 실패하는 일을 피합니다.
+HTTP = httpx.Client(limits=httpx.Limits(max_keepalive_connections=0))
 LOCAL_MODEL = os.getenv("LOCAL_MODEL", "Qwen3.6-35B-A3B")
 LOCAL_TIMEOUT = float(os.getenv("LOCAL_TIMEOUT", "300"))
 # 서버에서 컨텍스트 길이를 읽지 못할 때 쓸 값. llama-server 의 -c 와 맞추세요.
@@ -382,7 +395,7 @@ def server_ctx() -> int:
         return _ctx_cache["n"] or LOCAL_CTX_FALLBACK
     n = 0
     try:
-        d = httpx.get(f"{_server_root()}/props", timeout=5).json()
+        d = HTTP.get(f"{_server_root()}/props", timeout=5).json()
         g = d.get("default_generation_settings") or {}
         n = int(g.get("n_ctx") or d.get("n_ctx") or 0)
     except Exception:                                    # noqa: BLE001
@@ -404,7 +417,7 @@ def count_tokens(text: str) -> int:
         return 0
     if LOCAL_SERVER == "llamacpp":
         try:
-            r = httpx.post(f"{_server_root()}/tokenize", json={"content": text}, timeout=30)
+            r = HTTP.post(f"{_server_root()}/tokenize", json={"content": text}, timeout=30)
             toks = r.json().get("tokens")
             if isinstance(toks, list):
                 return len(toks)
@@ -593,7 +606,7 @@ def _call_local(prompt: str, temperature: float, model: str,
     who = "Ollama" if LOCAL_SERVER == "ollama" else "llama-server"
     try:
         with kv_reuse.LOCK:
-            resp = httpx.post(url, json=payload, timeout=LOCAL_TIMEOUT)
+            resp = HTTP.post(url, json=payload, timeout=LOCAL_TIMEOUT)
         resp.raise_for_status()
     except httpx.ConnectError as e:
         msg = f"로컬 LLM 서버에 연결하지 못했습니다 ({url}). {who} 가 실행 중인지 확인하세요."
@@ -1292,6 +1305,38 @@ def answer_revised(question: str, context: str, problems: list) -> str:
     q = (question + "\n\n[검토 의견 — 앞서 쓴 답변에서 발견된 오류. 이 오류를 반드시 바로잡아 처음부터 다시 쓴다. "
          "검토 의견을 답변에 옮겨 적지는 마라]\n" + notes)
     return _strip_revision_notes(answer(q, context))
+
+
+CONCLUSION_FIX_PROMPT = """아래 [답변]에는 【결론】이 빠져 있다. [답변]의 【계산】·【설명】이 내린 판정 그대로 【결론】 블록만 쓴다.
+
+규칙
+- "【결론】" 머리표로 시작하고 1~3문장. 첫 문장은 [질문]에 대한 판정이며, 【계산】의 '판정' 줄(없으면 【설명】의 마지막 판정)과 같아야 한다.
+- 수치·조문·조치는 [답변]에 적힌 것만 쓴다. 새 내용을 보태지 마라.
+- [질문]이 "…라면 어떻게 되나" 를 함께 물었고 판정이 그 경우가 아니면, "만약 …라면" 으로 그 경우의 조치를 한 문장 덧붙인다.
+- 【결론】 블록 말고는 아무것도 쓰지 마라.
+
+[질문]
+{question}
+
+[답변]
+{answer}
+"""
+MAXTOK_CONCL = int(os.getenv("MAXTOK_CONCL", "300"))
+
+
+def fix_conclusion(question: str, body: str) -> str:
+    """
+    ★ v1.57 — 【결론】을 뺀 답변 본문(body)을 주고 【결론】 블록만 다시 받습니다. 실패하면 "".
+    다시 쓴 답도 【결론】만 【계산】·【설명】과 반대로 나오는 일이 있어(11-17 소음 5시간: 계산은 '70 이하 → 초과 아님',
+    결론은 '초과') main 이 마지막에 한 번 부릅니다. 판정이 어긋날 때만 부르므로 평소에는 호출이 늘지 않습니다.
+    """
+    try:
+        out = _call(CONCLUSION_FIX_PROMPT.format(question=str(question or "")[:1500], answer=body),
+                    temperature=0, max_tokens=MAXTOK_CONCL, stage="concl_fix")
+    except AiError:
+        return ""
+    m = re.search(r"【결론】[\s\S]*?(?=\n\s*【|\Z)", out or "")
+    return m.group(0).strip() if m else ""
 
 
 CLARIFY_PROMPT = """너는 법령 질문에 답하기 전에, 결론을 가르는 사실 중 빠진 것만 되묻는 도구다.

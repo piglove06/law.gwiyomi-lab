@@ -130,6 +130,12 @@ extract_terms → ai_search(질문 원문, 비면 재시도 → 용어로) → �
 ### ai_client.py :: LOCAL_BASE_URL
 - 로컬 LLM 서버 주소(기본 http://localhost:8080/v1).
 
+### ai_client.py :: _ipv4_local
+- 주소의 `localhost` 를 `127.0.0.1` 로(v1.57). Windows 는 localhost 를 IPv6(::1)부터 시도하는데 llama-server 는 127.0.0.1 에만 떠 있어 연결마다 약 2초를 기다렸음 — 11-17 평가 로그에서 LLM 호출 147회 모두 서버가 잰 시간보다 2.2~2.4초 더 걸렸고, 호출 앞의 토큰 세기(`count_tokens`)도 같았음. 그대로 두기: .env `LOCAL_KEEP_HOST=1`.
+
+### ai_client.py :: HTTP
+- 로컬 LLM 서버를 부르는 공용 httpx 클라이언트(v1.57). `httpx.post()` 는 부를 때마다 클라이언트를 새로 만들어 느림. keep-alive 는 0 — 서버가 끊은 묵은 연결을 다시 쓰다 실패하지 않게. kv_reuse 도 `_post` 로 같은 것을 씀. ai_client·kv_reuse 에 `httpx.get(`·`httpx.post(` 를 직접 쓰지 말 것(테스트가 막음).
+
 ### ai_client.py :: LOCAL_TIMEOUT
 - 요청 하나 300초. 로컬은 느려 넉넉히.
 
@@ -223,6 +229,9 @@ extract_terms → ai_search(질문 원문, 비면 재시도 → 용어로) → �
 
 ### ai_client.py :: answer
 - 답변 생성. kv_reuse ①: /completion 으로 생성 토큰을 기억(검토가 이어 쓰기용, flags/kv_chain_on 일 때만), 고정 지시문은 ② 로 복원. 안 되면 예전 방식.
+
+### ai_client.py :: fix_conclusion
+- 【결론】을 뺀 답변 본문을 주고 【결론】 블록만 다시 받음(`CONCLUSION_FIX_PROMPT`, 출력 `MAXTOK_CONCL`=300, v1.57). main 이 마지막 `_verdict_conflict` 가 참일 때만 부름(.env `CONCL_FIX=0` 으로 끔). 다시 쓴 답도 계산은 '70 이하 → 초과 아님'인데 결론만 '초과'로 나온 일(11-17 소음 5시간)이 있어서 — 답 전체를 또 쓰게 하면 같은 실수를 되풀이하므로 본문을 고정하고 결론만 받음. 받은 결론이 여전히 본문과 어긋나면 버리고 예전처럼 경고만 냄. 실패하면 "".
 
 ### ai_client.py :: _REVISION_NOTE_RE
 - 고친 과정을 설명하는 말(검토 의견·이전 답변·결론을 정정·최종 수정).
@@ -487,6 +496,12 @@ extract_terms → ai_search(질문 원문, 비면 재시도 → 용어로) → �
 
 ### main.py :: _named_law
 - 인용 앞 글자에서 수집한 법령 이름 찾기. 공식 약칭("지방계약법 시행령")도 인정(ctx_guard, `CTX_GUARD_ABBR=0` 이면 끔).
+
+### main.py :: _BARE_LEVEL
+- 이름 없이 단계만 적은 법령 표기(「시행령」·「같은 법 시행규칙」 등). `_guess_law` 가 이것을 법령 이름으로 보지 않고 앞에 나온 법령의 시행령·시행규칙으로 풂(v1.57). 전에는 '시행령'이라는 이름의 법령을 찾다가 '수집한 조문에 없습니다'로 찍혔음(11-17 관련없는 분야 3건).
+
+### main.py :: _cited_by_collected
+- 수집하지 않은 법령의 조문 인용이 수집한 조문 본문에 그대로 적혀 있는지 찾음(v1.57). 예: 토양환경보전법 시행규칙 제12조의 "「위험물안전관리법」 제9조에 따른 완공검사"를 답변이 옮긴 경우. `verify_citations` 가 이런 인용을 `ok`·`ref`=True, 단계 '다른 법령(본문 인용)', 제목에 '원문은 수집하지 않았습니다'로 표시. 법령명과 조 번호가 붙어 있을 때만 인정(같은 법·조의2 는 따로 봄). 지난 평가 4회분 답변으로 다시 돌려 보니 미확인 인용 18건 중 10건이 이 유형.
 
 ### main.py :: _guess_law
 - 인용이 어느 법령인지 추정. 이름 긴 것부터(시행령이 법률에 먼저 걸리지 않게), 가운뎃점 차이는 같은 법.

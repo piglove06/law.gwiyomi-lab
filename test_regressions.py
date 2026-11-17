@@ -131,6 +131,76 @@ class Citations(unittest.TestCase):
         self.assertEqual(self.found("제54조·제55조제1항·제63조"), ["제54조", "제55조제1항", "제63조"])
 
 
+class CitationNames(unittest.TestCase):
+    LAWS = [{"name": "가나관리법", "level": "법률",
+             "articles": [{"조문번호": "7", "조문가지번호": "", "조문제목": "신고", "조문내용": "제7조(신고) 법률 본문"}]},
+            {"name": "가나관리법 시행령", "level": "시행령",
+             "articles": [{"조문번호": "7", "조문가지번호": "", "조문제목": "신청", "조문내용": "제7조(신청) ① 영 본문"}]},
+            {"name": "가나관리법 시행규칙", "level": "시행규칙",
+             "articles": [{"조문번호": "12", "조문가지번호": "", "조문제목": "검사",
+                           "조문내용": "제12조(검사) ① 다음 날부터 6개월 이내\n1. 「다라안전법」 제9조에 따른 완공검사에 합격한 날"}]}]
+
+    def test_bare_level_name_uses_previous_law(self):
+        got = main.verify_citations("「가나관리법 시행령」 제7조제1항에 따라 신청한다. 이후 「시행령」 제7조제3항에 따라 발급한다.", self.LAWS)
+        self.assertEqual([(c["ok"], c["law"]) for c in got], [(True, "가나관리법 시행령")] * 2)
+
+    def test_other_law_quoted_by_collected_article(self):
+        got = main.verify_citations("「가나관리법 시행규칙」 제12조제1항에 따르면 「다라안전법」 제9조에 따른 완공검사일이 기준이다.", self.LAWS)
+        self.assertTrue(got[1]["ok"] and got[1].get("ref"))
+        self.assertIn("제12조", got[1]["title"])
+
+    def test_other_law_not_quoted_stays_unverified(self):
+        for cite in ("「다라안전법」 제10조", "「다라안전법」 제9조의2", "「다라안전법 시행령」 제9조"):
+            got = main.verify_citations(cite + "에 따른다.", self.LAWS)
+            self.assertFalse(got[0]["ok"], cite)
+
+
+class ConclusionFix(unittest.TestCase):
+    BODY = ("【근거】\n별표 8 | 주거지역 공사장 주간 65dB(A) 이하\n\n"
+            "【계산】\n- 보정 후 규제기준: 65 + 5 = 70dB(A) 이하\n- 판정: 68dB(A)는 70dB(A) 이하이므로 규제기준을 초과하지 않음")
+
+    def test_conflict_gone_after_conclusion_only_rewrite(self):
+        text = "【결론】\n생활소음 규제기준을 초과한 것이 맞습니다.\n\n" + self.BODY
+        self.assertTrue(main._verdict_conflict(text))
+        keep = ai_client._call
+        ai_client._call = lambda *a, **k: "【결론】\n규제기준을 초과하지 않습니다. 만약 초과라면 조치명령을 받습니다.\n\n【근거】\n덧붙인 블록"
+        try:
+            new = ai_client.fix_conclusion("초과한 건가요?", main._CONCL_BLOCK_RE.sub("", text, 1).strip())
+        finally:
+            ai_client._call = keep
+        self.assertNotIn("덧붙인", new)
+        merged = main._merge_conclusion(text, new)
+        self.assertFalse(main._verdict_conflict(merged))
+        self.assertIn("판정: 68dB(A)는 70dB(A) 이하", merged)
+
+    def test_llm_failure_keeps_answer(self):
+        keep = ai_client._call
+
+        def boom(*a, **k):
+            raise ai_client.AiError("x")
+        ai_client._call = boom
+        try:
+            self.assertEqual(ai_client.fix_conclusion("q", self.BODY), "")
+        finally:
+            ai_client._call = keep
+        self.assertEqual(main._merge_conclusion("【결론】\n네\n\n" + self.BODY, ""), "")
+
+
+class LocalServerAddress(unittest.TestCase):
+    def test_localhost_becomes_ipv4(self):
+        self.assertEqual(ai_client._ipv4_local("http://localhost:8080/v1"), "http://127.0.0.1:8080/v1")
+        self.assertEqual(ai_client._ipv4_local("http://localhost/v1"), "http://127.0.0.1/v1")
+        for same in ("http://localhost.example.com/v1", "http://mylocalhost:8080/v1", "http://192.168.0.5:8080/v1"):
+            self.assertEqual(ai_client._ipv4_local(same), same)
+
+    def test_all_local_calls_share_one_client(self):
+        import inspect
+        import re
+        import kv_reuse
+        for mod in (ai_client, kv_reuse):
+            self.assertFalse(re.search(r"(?m)^[^#\n]*httpx\.(get|post)\(", inspect.getsource(mod)), mod.__name__)
+
+
 class CalcCheck(unittest.TestCase):
     def test_wrong_sum_and_invented_date(self):
         w = main.verify_calc("【계산】\n기준일: 2010년 9월 23일\n+ 주기: 8년\n= 다음 검사: 2038년 9월 23일",

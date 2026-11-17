@@ -467,6 +467,7 @@ SELECT_CTX_CAP = int(os.getenv("SELECT_CTX_CAP", "16384"))
 CTX_BUDGET_MAX = int(os.getenv("CTX_BUDGET_MAX", "20000"))
 QUESTION_REPEAT_TOKENS = int(os.getenv("QUESTION_REPEAT_TOKENS", "6000"))
 AI_HIT_PROTECT = int(os.getenv("AI_HIT_PROTECT", "6"))
+CONCL_FIX = os.getenv("CONCL_FIX", "1") != "0"
 MIN_CTX_BUDGET = int(os.getenv("MIN_CTX_BUDGET", "2500"))
 
 LAW_CANDIDATES = int(os.getenv("LAW_CANDIDATES", "3"))
@@ -543,7 +544,7 @@ SELECT_ARTICLES = os.getenv("SELECT_ARTICLES", "1") not in ("0", "false", "False
 # 조회 후 지자체기관명으로 한 번 더 걸러냅니다.
 LOCAL_GOV = os.getenv("LOCAL_GOV", "성남시").strip()
 
-VERSION = "1.56"
+VERSION = "1.57"
 
 app = FastAPI(title="법령 조회 도우미", version=VERSION)
 
@@ -714,6 +715,35 @@ def _explicit_law_name(prefix: str) -> str:
     return ""
 
 
+_BARE_LEVEL = {"시행령", "시행규칙", "같은법시행령", "같은법시행규칙", "동법시행령", "동법시행규칙"}
+
+
+def _cited_by_collected(law_name: str, jo: str, gaji: str, laws: list[dict]):
+    """
+    ★ v1.57 — 수집하지 않은 법령의 조문 인용이, 수집한 조문 본문에 그대로 적혀 있는 것인지 찾습니다.
+      예) 토양환경보전법 시행규칙 제12조가 "「위험물안전관리법」 제9조에 따른 완공검사" 라고 적고 있고 답변이 이를 옮김.
+      지어낸 인용이 아니므로 '확인 안 됨'으로 찍지 않습니다(11-17 평가: 주유소·누출검사·세차장 3문항).
+    있으면 (인용한 법령명, 조문 표시, 그 문장), 없으면 None. 법령명과 조 번호가 붙어 있을 때만 인정합니다.
+    """
+    nm = re.sub(r"[\s「」『』\[\]()·ㆍ・]+", "", law_name or "")
+    if len(nm) < 3 or not str(jo).isdigit():
+        return None
+    pat = re.compile(r"[\s·ㆍ・]*".join(re.escape(ch) for ch in nm) + r"\s*[」』\]]?\s*제\s*" + str(jo) + r"\s*조"
+                     + (rf"\s*의\s*{gaji}(?!\d)" if gaji else r"(?!\s*의\s*\d)"))
+    for law in laws:
+        for art in law.get("articles", []):
+            body = art.get("조문내용", "") or ""
+            m = pat.search(body)
+            if not m:
+                continue
+            a = max(body.rfind("\n", 0, m.start()) + 1, m.start() - 200)
+            b = body.find("\n", m.end())
+            b = len(body) if b < 0 else b
+            src = f"제{art.get('조문번호', '')}조" + (f"의{art['조문가지번호']}" if art.get("조문가지번호") else "")
+            return law.get("name", ""), src, body[a:min(b, m.end() + 200)].strip()
+    return None
+
+
 def _guess_law(prefix: str, laws: list[dict], default: str) -> str:
     """
     인용문 앞에 붙은 글자에서 법령명을 추려냅니다.
@@ -728,6 +758,8 @@ def _guess_law(prefix: str, laws: list[dict], default: str) -> str:
     if n:
         return n
     _ex = _explicit_law_name(prefix)
+    if _norm(_ex) in _BARE_LEVEL:
+        _ex = ""
     if _ex:
         _kx = re.sub(r"[\s「」『』\[\]()·ㆍ・]+", "", _ex)
         for law in laws:
@@ -1090,6 +1122,13 @@ def verify_citations(answer_text: str, laws: list[dict]) -> list[dict]:
                     law_name, hit = nm, v
                     break
 
+        if hit is None and not any(_norm(l.get("name", "")) == _norm(law_name) for l in laws):
+            _ref = _cited_by_collected(law_name, jo, gaji, laws)
+            if _ref:
+                out.append({"jo": jo, "gaji": gaji, "label": label, "ok": True, "ref": True, "law": law_name,
+                            "title": f"「{_ref[0]}」 {_ref[1]} 본문이 인용한 조문 — 이 조문의 원문은 수집하지 않았습니다",
+                            "text": _ref[2][:1200], "full": "", "level": "다른 법령(본문 인용)", "mismatch": ""})
+                continue
         out.append(
             {
                 "jo": jo, "gaji": gaji,
@@ -3512,14 +3551,23 @@ def _ask_after_search(req, steps, answered, found, flat, catalog, refs, it=None,
         except Exception as e:                            # noqa: BLE001
             applog.warn(f"답변 검토 실패 — 처음 답변을 씁니다: {type(e).__name__}: {e}")
 
-    cites = verify_citations(text, found)
-    steps.append({"name": "인용 검증", "detail": f"{sum(1 for c in cites if c['ok'])}/{len(cites)}건 확인"})
-
     warnings = []
     _vc_final = _verdict_conflict(text)
+    if _vc_final and CONCL_FIX:
+        _t3 = _merge_conclusion(text, ai_client.fix_conclusion(
+            req.question + (f"\n(확인된 조건: {answered})" if answered else ""), _CONCL_BLOCK_RE.sub("", text, 1).strip()))
+        if _t3 and not _verdict_conflict(_t3):
+            text, _vc_final = _t3, ""
+            warnings.append("처음 쓴 【결론】이 【계산】·【설명】의 판정과 달라, 그 판정에 맞춰 【결론】만 다시 썼습니다. "
+                            "수치는 근거 조문 원문으로 확인하세요.")
+            steps.append({"name": "결론 다시 씀", "detail": "【결론】이 계산·설명의 판정과 반대 → 본문 판정에 맞춰 결론만 다시 씀"})
     if _vc_final:
         warnings.append("답변의 【결론】과 계산·설명의 판정이 서로 다릅니다. 근거 조문 원문과 수치로 직접 확인하세요.")
         steps.append({"name": "결론 불일치 경고", "detail": _vc_final[:60]})
+
+    cites = verify_citations(text, found)
+    steps.append({"name": "인용 검증", "detail": f"{sum(1 for c in cites if c['ok'])}/{len(cites)}건 확인"})
+
     if _trunc:
         warnings.append("답변이 길이 한도에서 잘렸습니다. 뒷부분이 빠졌을 수 있으니 근거 조문 원문으로 확인하세요.")
         steps.append({"name": "답변 잘림", "detail": "출력 상한에 걸려 끝까지 쓰이지 않음 — 화면에 경고 표시"})

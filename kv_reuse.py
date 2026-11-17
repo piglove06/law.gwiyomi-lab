@@ -32,8 +32,6 @@ import re
 import threading
 import time
 
-import httpx
-
 import applog
 
 import flags
@@ -81,6 +79,12 @@ def _root() -> str:
     return ai_client._server_root()
 
 
+def _post(url: str, **kw):
+    """ai_client 의 공용 클라이언트로 POST (v1.57 — 호출마다 클라이언트를 새로 만들지 않음)."""
+    import ai_client
+    return ai_client.HTTP.post(url, **kw)
+
+
 def template():
     """(head, tail, eot) — 사용자 메시지 하나를 서버 채팅 템플릿으로 감쌀 때의 앞·뒤 글자. 실패하면 None."""
     if _STATE["tpl"]:
@@ -89,7 +93,7 @@ def template():
         return None
     s = "␟KVSENTINEL␟"
     try:
-        r = httpx.post(f"{_root()}/apply-template",
+        r = _post(f"{_root()}/apply-template",
                        json={"messages": [{"role": "user", "content": s}],
                              "chat_template_kwargs": {"enable_thinking": False}}, timeout=10)
         r.raise_for_status()
@@ -112,7 +116,7 @@ def template():
 
 
 def _tokenize(text: str) -> list:
-    r = httpx.post(f"{_root()}/tokenize",
+    r = _post(f"{_root()}/tokenize",
                    json={"content": text, "add_special": False, "parse_special": True}, timeout=30)
     r.raise_for_status()
     out = []
@@ -149,7 +153,7 @@ def complete(parts: list, temperature: float, max_tokens: int, stage: str, schem
     if schema is not None and ai_client.json_enabled():
         body["json_schema"] = schema
     t0 = time.time()
-    r = httpx.post(f"{_root()}/completion", json=body, timeout=ai_client.LOCAL_TIMEOUT)
+    r = _post(f"{_root()}/completion", json=body, timeout=ai_client.LOCAL_TIMEOUT)
     r.raise_for_status()
     d = r.json()
     tm = d.get("timings") or {}
@@ -189,13 +193,13 @@ def _prefix_parts(stage: str, full: str):
         name = f"pfx_{stage}_{hashlib.sha1(st['text'].encode('utf-8')).hexdigest()[:12]}.bin"
         if st["file"] != name:
             complete(list(st["ids"]), 0.0, 0, stage + "_pfx", slot=0)
-            r = httpx.post(f"{_root()}/slots/0?action=save", json={"filename": name}, timeout=60)
+            r = _post(f"{_root()}/slots/0?action=save", json={"filename": name}, timeout=60)
             if r.status_code >= 400:
                 raise RuntimeError(f"slots save HTTP {r.status_code}: {r.text[:120]}")
             st["file"] = name
             _STATE["slots_ok"] = True
         else:
-            r = httpx.post(f"{_root()}/slots/0?action=restore", json={"filename": name}, timeout=60)
+            r = _post(f"{_root()}/slots/0?action=restore", json={"filename": name}, timeout=60)
             if r.status_code >= 400:
                 st["file"] = ""
                 raise RuntimeError(f"slots restore HTTP {r.status_code}: {r.text[:120]}")
