@@ -428,7 +428,8 @@ def _merge_conclusion(text: str, text2: str) -> str:
 
 _SELF_CORR_RE = re.compile(r"(?m)(수정된|정정된|바로잡은|다시\s*정리한)\s*결론|^\s*\**\s*(수정|정정)\s*\**\s*[:：]|정정하면"
                            r"|잠깐[,，]?\s*다시|다시\s*(확인|계산)해\s*보겠"
-                           r"|결론\s*(수정|정정|변경)|재검토\s*\**\s*[:：]|최종\s*결론\s*\**\s*[:：]|이전\s*답변의?\s*결론")
+                           r"|결론\s*(수정|정정|변경)|재검토\s*\**\s*[:：]|최종\s*결론\s*\**\s*[:：]|이전\s*답변의?\s*결론"
+                           r"|오류\s*수정|재\s*판정|다시\s*확인합니다|제가[^.\n]{0,20}(잘못|다시)")
 _VERDICT_WORDS = re.compile(r"초과|해당|대상|위반|필요|가능")
 _NEG_WORDS = re.compile(r"않|아니|아닙|아님|아닌|미달|미초과|없")
 _FINAL_WORDS = re.compile(r"판정|최종|따라서|그러므로|결론적으로|이므로|므로")
@@ -445,7 +446,9 @@ def _verdict_conflict(text: str) -> str:
     later = ""
     mk = re.search(r"【계산】([\s\S]*?)(?=【|\Z)", text or "")
     if mk:
-        lines = [ln for ln in mk.group(1).splitlines() if "판정" in ln]
+        # ★ v1.59 — '판정' 이 든 줄 중 판정 낱말(초과·해당…)이 있는 마지막 줄. 그냥 마지막 줄을 쓰면
+        #   "※ 오류 수정 및 재판정" 같은 제목 줄이 걸려 비교할 낱말이 없어 놓쳤음(11-17 소음 5시간).
+        lines = [ln for ln in mk.group(1).splitlines() if "판정" in ln and _VERDICT_WORDS.search(ln)]
         later = lines[-1] if lines else ""
     if not later:
         me = re.search(r"【설명】([\s\S]*?)(?=【|\Z)", text or "")
@@ -468,6 +471,7 @@ CTX_BUDGET_MAX = int(os.getenv("CTX_BUDGET_MAX", "20000"))
 QUESTION_REPEAT_TOKENS = int(os.getenv("QUESTION_REPEAT_TOKENS", "6000"))
 AI_HIT_PROTECT = int(os.getenv("AI_HIT_PROTECT", "6"))
 CONCL_FIX = os.getenv("CONCL_FIX", "1") != "0"
+ANSWER_FIRST = os.getenv("ANSWER_FIRST", "1") != "0"
 MIN_CTX_BUDGET = int(os.getenv("MIN_CTX_BUDGET", "2500"))
 
 LAW_CANDIDATES = int(os.getenv("LAW_CANDIDATES", "3"))
@@ -544,7 +548,7 @@ SELECT_ARTICLES = os.getenv("SELECT_ARTICLES", "1") not in ("0", "false", "False
 # 조회 후 지자체기관명으로 한 번 더 걸러냅니다.
 LOCAL_GOV = os.getenv("LOCAL_GOV", "성남시").strip()
 
-VERSION = "1.58"
+VERSION = "1.59"
 
 app = FastAPI(title="법령 조회 도우미", version=VERSION)
 
@@ -1269,6 +1273,17 @@ def _is_repeat_question(q: str, already: set) -> bool:
             if SequenceMatcher(None, a, n).ratio() >= 0.72:
                 return True
     return False
+
+
+def _needs_value(ask: dict) -> bool:
+    """
+    ★ v1.59 — 이 되묻기가 '값을 직접 받아야 하는' 질문인지. 고를 수 있는 보기('모름'·'… 입력' 제외)가 2개 미만이면 참.
+      보기가 2개 이상이면 "A 이면 …, B 이면 …" 으로 경우를 나눠 먼저 답할 수 있지만,
+      설치일·측정값처럼 값이 있어야 계산되는 질문은 나눌 경우가 없어 먼저 물어야 합니다.
+    """
+    real = [o for o in (str(x).strip() for x in (ask.get("options") or []))
+            if o and not _UNKNOWN_ANS.match(o) and "입력" not in o]
+    return len(real) < 2
 
 
 def _drop_repeats(asks: list, answered: str) -> list:
@@ -3315,6 +3330,7 @@ def _ask_after_search(req, steps, answered, found, flat, catalog, refs, it=None,
     max_r = min(MAX_ROUNDS, 1) if n_facts >= 2 else MAX_ROUNDS
     if LAW_Q in (answered or ""):
         max_r += 1
+    _pending = {}
     if not req.skip_clarify and req.round < max_r and it.needs_facts:
         prim = [u for u in units if not _is_bp(u)]
         bps = [u for u in units if _is_bp(u)]
@@ -3363,7 +3379,13 @@ def _ask_after_search(req, steps, answered, found, flat, catalog, refs, it=None,
         if not asks:
             steps.append({"name": "되묻기 판단",
                           "detail": f"더 물을 것 없음 (조문 {len(parts)}개 본문 기준)"})
-        if asks:
+        if asks and ANSWER_FIRST and not any(_needs_value(a) for a in asks):
+            _pending = {"clarify_after": asks, "round": req.round + 1, "max_rounds": max_r, "answered": answered}
+            steps.append({"name": "먼저 답하고 묻기",
+                          "detail": f"{len(asks)}개 항목 — 보기별로 경우를 나눠 먼저 답하고, 답 아래에서 고르면 좁혀서 다시 답함 "
+                                    f"(조문 {len(parts)}개 본문 기준)"})
+            answered = " / ".join(x for x in [answered] + [f"{a['question']}: 모름" for a in asks] if x)
+        elif asks:
             steps.append({"name": "질문 확인",
                           "detail": f"{req.round + 1}차 · {len(asks)}개 항목 "
                                     f"(조문 {len(parts)}개 본문 기준)"})
@@ -3658,6 +3680,7 @@ def _ask_after_search(req, steps, answered, found, flat, catalog, refs, it=None,
         "references": [r for r, _ in sorted(refs.items(), key=lambda x: -x[1])][:12],
         "warnings": warnings,
         "intent": it.as_dict(),
+        **_pending,
         "debug": {
             "flat_n": len(flat),
             "picked_n": len(picked or []),

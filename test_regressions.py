@@ -260,6 +260,66 @@ class ClarifyRepeats(unittest.TestCase):
         self.assertEqual(main._drop_repeats([{"question": "저장 용량은 얼마입니까?"}], "저장 용량은 얼마입니까?: 모름"), [])
 
 
+class VerdictHeadingLine(unittest.TestCase):
+    """11-17 v1.58 소음 5시간: 【계산】 끝에 '※ 오류 수정 및 재판정' 제목 줄이 붙어 결론 모순을 놓쳤음."""
+    TEXT = ("【결론】\n생활소음 규제기준을 초과했습니다.\n\n【계산】\n- 적용 규제기준: 70dB(A) 이하\n"
+            "- 판정: 68dB(A)는 70dB(A) 이하이므로 초과하지 않습니다.\n\n※ **오류 수정 및 재판정**\n"
+            "위 계산 과정에서 질문의 전제와 조문의 적용을 다시 확인합니다.")
+
+    def test_conflict_found_past_heading_line(self):
+        self.assertTrue(main._verdict_conflict(self.TEXT))
+
+    def test_self_correction_trace_found(self):
+        for t in ("※ **오류 수정 및 재판정**", "'보정' 항목을 다시 확인합니다.", "제가 조문 해석을 잘못했는지"):
+            self.assertTrue(main._SELF_CORR_RE.search(t), t)
+        self.assertFalse(main._SELF_CORR_RE.search("근거 조문 원문으로 확인하세요. 측정값은 68dB(A)입니다."))
+
+
+class AnswerFirst(unittest.TestCase):
+    def test_enumerated_choices_can_be_answered_by_cases(self):
+        self.assertFalse(main._needs_value({"options": ["예", "아니오", "모름"]}))
+        self.assertFalse(main._needs_value({"options": ["지하매설", "지상·옥내", "모름"]}))
+
+    def test_value_questions_must_be_asked_first(self):
+        for opts in (["날짜 입력", "모름"], ["2020년 3월", "모름"], ["모름"], []):
+            self.assertTrue(main._needs_value({"options": opts}), opts)
+
+    def _run(self, answers):
+        calls = []
+        ask_after = [{"question": "등록대상동물입니까?", "options": ["예", "아니오", "모름"]}]
+
+        def fake(base, payload, timeout=600.0):
+            calls.append(payload)
+            if len(calls) == 1:
+                return {"answer": "【결론】\n경우별 답", "clarify_after": ask_after, "round": 1, "answered": ""}
+            return {"answer": "【결론】\n좁힌 답"}
+        keep = eval_run.ask
+        eval_run.ask = fake
+        try:
+            data = eval_run.run_case("http://x", {"question": "q", "answers": answers, "default": "모름"}, verbose=False)
+        finally:
+            eval_run.ask = keep
+        return calls, data
+
+    def test_eval_picks_known_answer_under_first_answer(self):
+        calls, data = self._run({"등록대상동물": "예"})
+        self.assertEqual(len(calls), 2)
+        self.assertIn("등록대상동물입니까?: 예", calls[1]["answered"])
+        self.assertEqual((data["answer"], data["_after_rounds"]), ("【결론】\n좁힌 답", 1))
+
+    def test_eval_keeps_first_answer_when_nothing_known(self):
+        calls, data = self._run({})
+        self.assertEqual(len(calls), 1)
+        self.assertEqual(data["_rounds"], [])
+        self.assertEqual(data["_clarify_items"][0]["question"], "등록대상동물입니까?")
+
+    def test_screen_and_result_carry_questions_under_answer(self):
+        html = open(os.path.join(HERE, "static", "index.html"), encoding="utf-8").read()
+        for word in ('id="clarifyAfter"', "data.clarify_after", "cq-need"):
+            self.assertIn(word, html)
+        self.assertIn("**_pending", open(os.path.join(HERE, "main.py"), encoding="utf-8").read())
+
+
 class EvalAutoAnswer(unittest.TestCase):
     def test_longer_key_first(self):
         self.assertEqual(eval_run.pick_option("재해취약지역에 포함됩니까?", ["예", "아니오", "모름"],

@@ -176,11 +176,19 @@ def run_case(base: str, case: dict, verbose: bool = True) -> dict:
                       "answered": "", "round": 0, "laws": laws, "laws_mode": laws_mode,
                       "use_cache": False, **prev})
 
+    def _knows(asks):
+        """답 아래에 붙은 되묻기(clarify_after) 중 이 문항이 답을 아는 것이 있는가 — 있으면 실제 사용자처럼 골라서 다시 묻습니다."""
+        return any(k and k in a.get("question", "") and not re.match(r"^(모름|모르)", str(v))
+                   for a in asks or [] for k, v in (answers or {}).items())
+
     r = 0
-    while data.get("clarify") and r < max_rounds:
+    after_rounds = 0
+    while r < max_rounds and (data.get("clarify") or _knows(data.get("clarify_after"))
+                              or (data.get("clarify_after") and note and r == 0)):
         r += 1
         picked = []
-        for a in data["clarify"]:
+        after_rounds += 0 if data.get("clarify") else 1
+        for a in (data.get("clarify") or data["clarify_after"]):
             clar_items.append({"question": a.get("question", ""), "options": a.get("options", [])})
             choice = pick_option(a["question"], a.get("options", []), answers, default)
             picked.append(f"{a['question']}: {choice}")
@@ -195,7 +203,10 @@ def run_case(base: str, case: dict, verbose: bool = True) -> dict:
                           "answered": answered, "round": r, "laws": laws, "laws_mode": laws_mode,
                           "use_cache": False, **prev})
 
+    for a in data.get("clarify_after") or []:
+        clar_items.append({"question": a.get("question", ""), "options": a.get("options", [])})
     data["_elapsed"] = round(time.time() - t0, 1)
+    data["_after_rounds"] = after_rounds
     data["_rounds"] = rounds
     data["_answered"] = answered
     data["_clarify_items"] = clar_items
