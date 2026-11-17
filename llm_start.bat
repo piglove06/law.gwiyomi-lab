@@ -9,7 +9,7 @@ rem ------------------------------------------------------------
 set "LLAMA_DIR=C:\llama"
 set "LLAMA_MODEL=unsloth/Qwen3.6-35B-A3B-GGUF:Q4_K_M"
 rem  --slot-save-path must stay relative: an absolute path with Korean letters stops llama-server from starting.
-set "LLAMA_ARGS=-hf %LLAMA_MODEL% -lm none --no-mmproj -np 1 -c 16384 -ctk q8_0 -ctv q8_0 -fa on -t 6 --jinja --cache-ram 2048 --slot-save-path _cache\slots --port 8080 -fit off -ngl 99 -ncmoe 26"
+set "LLAMA_ARGS=-hf %LLAMA_MODEL% -lm none --no-mmproj -np 1 -c 32768 -ctk q8_0 -ctv q8_0 -fa on -t 6 --jinja --cache-ram 2048 --slot-save-path _cache\slots --port 8080 -fit off -ngl 99 -ncmoe 26"
 set "PY=.venv\Scripts\python.exe"
 rem  Pinned host RAM for CPU-side experts (~13 GB) fails with "CUDA error: out of memory" on this PC.
 set "GGML_CUDA_NO_PINNED=1"

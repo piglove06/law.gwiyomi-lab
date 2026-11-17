@@ -6,6 +6,7 @@
 사고 경위는 CODE_NOTES.md 4장의 같은 함수 항목에 있습니다.
 """
 import os
+import re
 import subprocess
 import sys
 import unittest
@@ -182,7 +183,8 @@ class TableCompact(unittest.TestCase):
            "└────┴────┴────┘")
 
     def test_merged_first_cell_becomes_group_label(self):
-        lines = main._compact_bp(self.RAW).split("\n")
+        lines = main._BOX_CHARS.sub("", main._hoist_row_labels(self.RAW)).split("\n")
+        lines = [re.sub(r"\s*│\s*", "│", ln.strip()) for ln in lines if ln.strip("│| ")]
         self.assertIn("▶ 가. 주거지역", lines)
         self.assertIn("▶ 나. 그 밖의 지역", lines)
         i, j = lines.index("▶ 가. 주거지역"), lines.index("▶ 나. 그 밖의 지역")
@@ -267,6 +269,45 @@ class LastFinish(unittest.TestCase):
             self.assertEqual(applog.last_finish("answer"), "stop")
         finally:
             applog.emit = old
+
+
+class TableRecords(unittest.TestCase):
+    RAW = ("┌─────┬────┬────┐\n"
+           "│대상 지역 │소음원  │주간    │\n"
+           "├─────┼────┼────┤\n"
+           "│가. 주거  │공장    │55 이하 │\n"
+           "│지역      ├────┼────┤\n"
+           "│          │공사장  │65 이하 │\n"
+           "├─────┼────┼────┤\n"
+           "│나. 그 밖 │공장    │65 이하 │\n"
+           "│의 지역   ├────┼────┤\n"
+           "│          │공사장  │70 이하 │\n"
+           "└─────┴────┴────┘")
+
+    def test_each_row_carries_group_and_column_names(self):
+        got = main._compact_bp(self.RAW).split("\n")
+        self.assertIn("대상 지역: 가. 주거 지역 | 소음원: 공사장 | 주간: 65 이하", got)
+        self.assertIn("대상 지역: 나. 그 밖의 지역 | 소음원: 공사장 | 주간: 70 이하", got)
+
+    def test_separate_entries_in_one_band_fall_back(self):
+        raw = ("┌──────────┬────┐\n│시설                │기준    │\n├──────────┼────┤\n"
+               "│가) 큰 시설         │1.7     │\n│나) 작은 시설       │1.9     │\n└──────────┴────┘")
+        got = main._compact_bp(raw)
+        self.assertNotIn("한 줄이 한 행", got)
+        self.assertIn("│가) 큰 시설│1.7│", got)
+
+    def test_flow_boxes_untouched(self):
+        raw = "┌───┐  ┌──┐\n│작성  │?│접수│\n└───┘  └──┘"
+        self.assertNotIn("한 줄이 한 행", main._compact_bp(raw))
+
+
+class AiHitProtect(unittest.TestCase):
+    def test_match_by_law_and_number(self):
+        f = {"name": "악취방지법"}
+        a1 = {"조문번호": "8", "조문가지번호": "2"}
+        a2 = {"조문번호": "8", "조문가지번호": ""}
+        got = main._ai_hit_articles([("악취방지법", "0008", "02"), ("없는법", "1", "")], [(f, a2), (f, a1)])
+        self.assertEqual(got, [(f, a1)])
 
 
 class LawClient(unittest.TestCase):

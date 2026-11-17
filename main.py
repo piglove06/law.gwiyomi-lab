@@ -12,7 +12,9 @@ import asyncio
 import hashlib
 import hmac
 import json
+import unicodedata
 import urllib.parse
+from collections import Counter
 from datetime import datetime, timedelta, timezone
 import logging
 import os
@@ -88,6 +90,7 @@ CLARIFY_ROUNDS = int(os.getenv("CLARIFY_ROUNDS", "3"))
 CLARIFY_CTX_TOKENS = int(os.getenv("CLARIFY_CTX_TOKENS", "5000"))
 
 BP_CTX_CHARS = int(os.getenv("BP_CTX_CHARS", "3500"))
+TABLE_RECORDS = os.getenv("TABLE_RECORDS", "1") != "0"
 BP_FETCH_CHARS = 12000
 BP_SHRINK_CHARS = 1800
 CLARIFY_BP_CHARS = 2500
@@ -135,9 +138,190 @@ def _hoist_row_labels(text: str) -> str:
     return "\n".join(out)
 
 
-def _compact_bp(text: str) -> str:
+_TBL_SEP = "│├┤┼┬┴┌┐└┘┃┣┫╋┳┻┏┓┗┛"
+_TBL_DASH = "─━═"
+TABLE_SNAP_COLS = 3
+
+
+def _disp_w(ch: str) -> int:
+    """글자의 화면 폭(칸). 한글·전각·표 그리기 문자는 2칸."""
+    if ch in _TBL_SEP or ch in _TBL_DASH:
+        return 2
+    return 2 if unicodedata.east_asian_width(ch) in ("W", "F") else 1
+
+
+def _tbl_segments(line: str):
+    """표 한 줄 → [(시작 칸, 끝 칸, 'text'|'border', 글자)]. 표 줄이 아니면 None."""
+    s = line.rstrip()
+    if not s.lstrip() or s.lstrip()[0] not in _TBL_SEP:
+        return None
+    pos, segs, start, buf = 0, [], None, []
+    for ch in s.lstrip():
+        if ch in _TBL_SEP:
+            if start is not None and buf:
+                txt = "".join(buf)
+                kind = "border" if txt.strip() and not txt.strip(_TBL_DASH + " ") else "text"
+                segs.append((start, pos, kind, txt))
+            pos += 2
+            start, buf = pos, []
+        else:
+            buf.append(ch)
+            pos += _disp_w(ch)
+    return segs
+
+
+def _listy(cell: dict) -> bool:
+    """칸 안의 여러 줄이 줄바꿈된 한 문장이 아니라 따로따로인 항목들인지(끝이 아닌 줄이 칸을 다 채우지 않음)."""
+    fr = [f for f in cell["lines"] if f.strip()]
+    room = max(4, int(cell["w"] * 0.3))
+    return any(cell["w"] - sum(_disp_w(ch) for ch in f.rstrip()) >= room for f in fr[:-1])
+
+
+def _table_records(block: list):
+    """
+    괘선으로 그린 표(줄 목록) → 행마다 '열 이름: 값 | 열 이름: 값' 한 줄. 표 구조를 확실히 못 읽으면 None.
+    세로로 합친 칸(여러 행에 걸친 구분)은 그 칸에 걸친 모든 행에 되풀이해 적습니다.
+    """
+    rows = [(i, _tbl_segments(ln)) for i, ln in enumerate(block) if ln.strip()]
+    if any(sg is None for _, sg in rows) or len(rows) < 3:
+        return None
+    bounds = sorted({p for _, sg in rows for a, b, k, _ in sg if k == "border" for p in (a - 2, b)})
+    if len(bounds) < 3:
+        return None
+
+    def snap(p):
+        j = min(range(len(bounds)), key=lambda q: abs(bounds[q] - p))
+        return j if abs(bounds[j] - p) <= TABLE_SNAP_COLS else None
+
+    n_leaf = len(bounds) - 1
+    open_c, cells, cuts, full_cuts = {}, [], [], []
+    for li, sg in rows:
+        covered, shift = 0, 0
+        for a, b, kind, txt in sg:
+            s, e = snap(a - 2 + shift), snap(b + shift)
+            if s is None or e is None or e <= s:
+                return None
+            shift = bounds[e] - b
+            if kind == "border":
+                covered += e - s
+                for lf in range(s, e):
+                    c = open_c.pop(lf, None)
+                    if c is not None:
+                        c["end"] = li
+                continue
+            cur = open_c.get(s)
+            if cur is None or cur["span"] != (s, e):
+                for lf in range(s, e):
+                    c = open_c.pop(lf, None)
+                    if c is not None:
+                        c["end"] = li
+                cur = {"span": (s, e), "start": li, "end": None, "lines": [], "w": bounds[e] - bounds[s] - 2}
+                cells.append(cur)
+                for lf in range(s, e):
+                    open_c[lf] = cur
+            cur["lines"].append(txt)
+        if covered:
+            cuts.append(li)
+            if covered >= n_leaf:
+                full_cuts.append(li)
+    last = rows[-1][0] + 1
+    for c in cells:
+        if c["end"] is None:
+            c["end"] = last
+
+    def text_of(c):
+        out = ""
+        for frag in c["lines"]:
+            f = frag.strip()
+            if not f:
+                continue
+            if out:
+                out += " " if c["_room"] else ""
+            out += f
+            c["_room"] = c["w"] - sum(_disp_w(ch) for ch in frag.rstrip()) >= 2
+        return re.sub(r"\s{2,}", " ", out)
+    for c in cells:
+        c["_room"] = True
+        c["text"] = text_of(c)
+    cells = [c for c in cells if c["text"]]
+    if len(full_cuts) < 3:
+        return None
+    head_end = full_cuts[1]
+    heads = [c for c in cells if c["start"] < head_end]
+    body = [c for c in cells if c["start"] >= head_end]
+    if not heads or not body:
+        return None
+    if any(not any(h["span"][0] <= lf < h["span"][1] for h in heads) for lf in range(n_leaf)) \
+            or any(not re.search(r"[가-힣A-Za-z]", h["text"]) for h in heads):
+        return None
+
+    def head_of(s, e):
+        names = []
+        for lf in range(s, e):
+            path = " ".join(h["text"] for h in sorted(heads, key=lambda h: h["start"])
+                            if h["span"][0] <= lf < h["span"][1])
+            if path and path not in names:
+                names.append(path)
+        return "/".join(names)
+
+    edges = sorted(set(cuts) | {last})
+    out = []
+    for a, b in zip(edges, edges[1:]):
+        if a < head_end:
+            continue
+        band = [c for c in body if c["start"] < b and c["end"] > a]
+        if not band:
+            continue
+        multi = [c for c in band if c["start"] >= a and sum(1 for f in c["lines"] if f.strip()) >= 2]
+        if len(multi) >= 2 and any(_listy(c) for c in multi):
+            return None
+        parts, seen = [], set()
+        for c in sorted(band, key=lambda c: c["span"]):
+            if id(c) in seen:
+                continue
+            seen.add(id(c))
+            s, e = c["span"]
+            h = "" if e - s >= n_leaf else head_of(s, e)
+            if parts and h and parts[-1][0] == h:
+                parts[-1] = (h, parts[-1][1] + " > " + c["text"])
+            else:
+                parts.append((h, c["text"]))
+        out.append(" | ".join(f"{h}: {t}" if h and h != t else t for h, t in parts))
+    return out or None
+
+
+def _linearize_tables(text: str) -> str:
+    """별표 안의 괘선 표를 행 단위 기록으로 바꿉니다. 못 읽은 표·글자가 하나라도 빠지는 표는 원문 그대로 둡니다."""
+    lines = str(text or "").split("\n")
+    out, i = [], 0
+    while i < len(lines):
+        if not (lines[i].lstrip()[:1] and lines[i].lstrip()[0] in "┌┏"):
+            out.append(lines[i])
+            i += 1
+            continue
+        j = i
+        while j < len(lines) and (not lines[j].strip() or lines[j].lstrip()[0] in _TBL_SEP):
+            j += 1
+        while j > i and not lines[j - 1].strip():
+            j -= 1
+        block = lines[i:j]
+        recs = None
+        try:
+            recs = _table_records(block)
+        except Exception:                                    # noqa: BLE001
+            recs = None
+        if recs:
+            strip = lambda t: Counter(re.sub(r"[\s" + _TBL_SEP + _TBL_DASH + "]", "", t))
+            if strip("\n".join(block)) - strip("\n".join(recs)):
+                recs = None
+        out.extend(["(표 — 한 줄이 한 행, '열 이름: 값')"] + recs if recs else block)
+        i = j
+    return "\n".join(out)
+
+
+def _compact_bp(text: str, records: bool = True) -> str:
     """별표 원문에서 표 테두리·정렬 공백·빈 줄을 걷어냅니다. 글자(내용)는 그대로입니다."""
-    t = _BOX_CHARS.sub("", _hoist_row_labels(text))
+    t = _BOX_CHARS.sub("", _hoist_row_labels(_linearize_tables(text) if (TABLE_RECORDS and records) else text))
     t = re.sub(r"[ \t　 ]+", " ", t)
     lines = []
     for ln in t.split("\n"):
@@ -279,6 +463,10 @@ _SELF_CORR_FIX = ("【결론】과 뒤쪽(【설명】 끝의 '수정된 결론'
                   "고친 흔적 없이 【결론】부터 처음부터 다시 쓴다")
 
 ANSWER_RESERVE = int(os.getenv("ANSWER_RESERVE", "3000"))
+SELECT_CTX_CAP = int(os.getenv("SELECT_CTX_CAP", "16384"))
+CTX_BUDGET_MAX = int(os.getenv("CTX_BUDGET_MAX", "20000"))
+QUESTION_REPEAT_TOKENS = int(os.getenv("QUESTION_REPEAT_TOKENS", "6000"))
+AI_HIT_PROTECT = int(os.getenv("AI_HIT_PROTECT", "6"))
 MIN_CTX_BUDGET = int(os.getenv("MIN_CTX_BUDGET", "2500"))
 
 LAW_CANDIDATES = int(os.getenv("LAW_CANDIDATES", "3"))
@@ -355,7 +543,7 @@ SELECT_ARTICLES = os.getenv("SELECT_ARTICLES", "1") not in ("0", "false", "False
 # 조회 후 지자체기관명으로 한 번 더 걸러냅니다.
 LOCAL_GOV = os.getenv("LOCAL_GOV", "성남시").strip()
 
-VERSION = "1.54"
+VERSION = "1.56"
 
 app = FastAPI(title="법령 조회 도우미", version=VERSION)
 
@@ -2586,6 +2774,21 @@ def _ask_sync(req: AskRequest, progress: list):
     return _ask_after_search(req, steps, answered, found, flat, catalog, refs, it, ai_hits)
 
 
+def _ai_hit_articles(ai_hits, use: list) -> list:
+    """지능형 검색 상위 AI_HIT_PROTECT 개가 가리키는 조문 중 use 에 들어 있는 것 [(f, a)]."""
+    def _n(x):
+        return str(x or "").strip().lstrip("0")
+    out = []
+    for law, jo, gaji in (ai_hits or [])[:AI_HIT_PROTECT]:
+        for f, a in use:
+            if (str(law).replace(" ", "") == f["name"].replace(" ", "")
+                    and _n(a.get("조문번호")) == _n(jo) and _n(a.get("조문번호"))
+                    and _n(a.get("조문가지번호")) == _n(gaji)):
+                out.append((f, a))
+                break
+    return out
+
+
 def _ask_after_search(req, steps, answered, found, flat, catalog, refs, it=None, ai_hits=None):
     """검색이 끝난 뒤의 단계. 되묻기 라운드마다 여기부터 다시 실행됩니다."""
     excluded = _excluded_terms(answered)
@@ -2641,7 +2844,7 @@ def _ask_after_search(req, steps, answered, found, flat, catalog, refs, it=None,
             q_sel = req.question + (f"\n(사용자가 참고 법령으로 지정: {', '.join(_ul)} — 이 법령의 조문을 우선 고려)"
                                     if _ul else "")
             n_sel = ai_client.count_tokens(ai_client.select_prompt(q_sel, catalog))
-            lim = ai_client.server_ctx() - ai_client.MAXTOK_SELECT - 64
+            lim = min(ai_client.server_ctx(), SELECT_CTX_CAP) - ai_client.MAXTOK_SELECT - 64
             if n_sel > lim:
                 out_l, prev_nm = ["(법령명은 묶음 첫 줄 [ ] 에 한 번만 적었다. 그 아래 번호들은 그 법령의 조문이다)"], None
                 for i, (f, a_) in enumerate(flat):
@@ -2878,6 +3081,8 @@ def _ask_after_search(req, steps, answered, found, flat, catalog, refs, it=None,
     for f, a in use:
         if id(a) in _cited_ids:
             prio[id(a)] = min(prio.get(id(a), 0.0), 0.2)
+    for f, a in _ai_hit_articles(ai_hits, use):
+        prio[id(a)] = min(prio.get(id(a), 0.0), 0.3)
     for k3, ids in _cite_src.items():
         pr = min(prio.get(i, 999.0) for i in ids)
         cite_rank[k3] = min(pr, 0.6) if k3 in named_bp else pr
@@ -2973,7 +3178,8 @@ def _ask_after_search(req, steps, answered, found, flat, catalog, refs, it=None,
             lim = BP_CTX_CHARS
             if (f["name"], *(_bp_no(a) or ("", ""))) in named_bp:
                 lim = min(BP_CTX_CHARS, 1600)
-            body = _fit_keep_notes(_compact_bp(body), lim, bp_kw)
+            _form = a.get("구분") in ("별지", "서식") or str(a.get("조문제목", "")).startswith(("[별지", "[서식"))
+            body = _fit_keep_notes(_compact_bp(body, records=not _form), lim, bp_kw)
 
         dele = (f.get("delegated") or {}).get(
             law_client.dele_key(a.get("조문번호", ""), a.get("조문가지번호", "")))
@@ -3160,14 +3366,14 @@ def _ask_after_search(req, steps, answered, found, flat, catalog, refs, it=None,
     ctx_n = ai_client.server_ctx()
     overhead = ai_client.count_tokens(
         ai_client.ANSWER_PROMPT.format(question=q_for_answer, context=""))
-    budget = ctx_n - overhead - min(ai_client.MAXTOK_ANSWER, ANSWER_RESERVE) - 96
+    budget = min(CTX_BUDGET_MAX, ctx_n - overhead - min(ai_client.MAXTOK_ANSWER, ANSWER_RESERVE) - 96)
     if budget < MIN_CTX_BUDGET and _hint:
         _ht = ai_client.count_tokens(_hint) or 1
         _keep_r = max(0.0, (_ht - (MIN_CTX_BUDGET - budget) * 1.1) / _ht)
         _hint = _hint[:int(len(_hint) * _keep_r)] + ("\n…(참고 블록 분량 제한으로 생략)" if _keep_r < 1 else "")
         q_for_answer = req.question + (f"\n(확인된 조건: {answered})" if answered else "") + _hint
         overhead = ai_client.count_tokens(ai_client.ANSWER_PROMPT.format(question=q_for_answer, context=""))
-        budget = ctx_n - overhead - min(ai_client.MAXTOK_ANSWER, ANSWER_RESERVE) - 96
+        budget = min(CTX_BUDGET_MAX, ctx_n - overhead - min(ai_client.MAXTOK_ANSWER, ANSWER_RESERVE) - 96)
         steps.append({"name": "참고 블록 축소", "detail": f"조문 예산 확보 — 덧붙임 {_ht:,}토큰 중 {int(_keep_r * 100)}% 남김"})
 
     keep = list(units)
@@ -3234,6 +3440,8 @@ def _ask_after_search(req, steps, answered, found, flat, catalog, refs, it=None,
     })
     if not context.strip():
         return {"steps": steps, "answer": "조문 본문을 가져오지 못했습니다.", "laws": found}
+    if n_tok >= QUESTION_REPEAT_TOKENS:
+        context += "\n\n(조문 원문 끝. 위 조문으로 답할 질문을 다시 적는다: " + re.sub(r"\s+", " ", req.question.strip())[:400] + ")"
 
     _cases_fut = None
     if RELATED_CASES and _pre_cases is None:
