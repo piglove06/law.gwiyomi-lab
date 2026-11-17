@@ -1007,6 +1007,7 @@ async function ask(skipClarify, extra, round){
   const lawsPicked = parseLaws();
   const lawsMode = lawMode();
   // v1.34 — 앞 질문에 이어서 묻기: 체크돼 있고 앞 질문이 지금 질문과 다를 때만
+  autoFollow(base);
   const followOn = !!($("follow") && $("follow").checked && PREV_CTX && PREV_CTX.q !== base);
   const prevSent = followOn ? PREV_CTX : null;
   const qkey = base + "||" + lawsPicked.join(",") + "||" + (lawsPicked.length ? lawsMode : "")
@@ -1045,7 +1046,8 @@ async function ask(skipClarify, extra, round){
                             laws: lawsPicked, laws_mode: lawsMode,
                             prev_question: prevSent ? prevSent.q : "",
                             prev_laws: prevSent ? prevSent.laws : [],
-                            prev_conclusion: prevSent ? prevSent.conclusion : ""})
+                            prev_conclusion: prevSent ? prevSent.conclusion : "",
+                            prev_answered: prevSent ? (prevSent.answered || "") : ""})
     });
     // 서버가 NDJSON 스트림으로 보냅니다. 한 줄씩 읽어 진행 상황을 표시하고,
     // 마지막 "result" 줄을 최종 결과로 씁니다.
@@ -1147,7 +1149,9 @@ async function ask(skipClarify, extra, round){
     renderCases(data.cases);
     renderLaws(data.laws, data.cited_keys);
     applyFind();
-    setPrevContext(base, data);
+    // v1.58 — 이어 물은 질문이었으면 그 앞 질문과 조건도 다음 질문으로 이어 줍니다(뒤쪽 8개까지)
+    setPrevContext(base, data, [prevSent ? prevSent.answered : "", prevSent ? `그 앞 질문: ${prevSent.q}` : "", extra || ""]
+                               .filter(Boolean).join(" / ").split(" / ").slice(-8).join(" / "));
 
     history.unshift({
       q: base,
@@ -1305,8 +1309,25 @@ function parseLaws(){
   return out.slice(0, 3);
 }
 // ── v1.34 앞 질문에 이어서 묻기 ─────────────────────────────
-let PREV_CTX = null;     // {q, laws, conclusion} — 마지막으로 답이 나온 질문
-function setPrevContext(q, data){
+let PREV_CTX = null;     // {q, laws, conclusion, answered} — 마지막으로 답이 나온 질문
+// v1.58 — 이어 묻는 질문으로 보이면 체크를 대신 켭니다. 사용자가 체크를 직접 바꾸면 그 질문에서는 손대지 않습니다.
+let FOLLOW_TOUCHED = false;
+const FOLLOW_HEAD = /^(그럼|그러면|그렇다면|그렇담|그리고|그런데|근데|그래서|그때|그\s*때|이때|그\s*경우|그런\s*경우|이\s*경우|이런\s*경우|위\s*경우|위의\s*경우|반대로|아니면|추가로|또\s)/;
+const FOLLOW_REF = /(그\s*(시설|사업장|공장|업체|기간|기준|검사|신고|허가|경우)|해당\s*(시설|사업장)|위\s*(시설|사업장)|그건|그거|이건|거기)/;
+const FOLLOW_LAW = /[가-힣]{2,}(법률|시행령|시행규칙)|[가-힣]{2,}(?<![방수용기공요문])법(?=$|[\s,.?!」)]|[은는이가을를의에도과와로상])/;
+function looksLikeFollowUp(q){
+  const t = String(q || "").trim();
+  if(!t || FOLLOW_LAW.test(t)) return false;          // 법령명을 직접 적었으면 새 질문
+  if(FOLLOW_HEAD.test(t) || FOLLOW_REF.test(t)) return true;
+  return t.length <= 15 && /(은|는|도)(요)?\s*\?*$/.test(t);   // "보관 기간은?" 처럼 주제만 던진 짧은 질문
+}
+function autoFollow(q){
+  if(!PREV_CTX || FOLLOW_TOUCHED || !$("follow") || PREV_CTX.q === String(q || "").trim()) return;
+  const on = looksLikeFollowUp(q);
+  $("follow").checked = on;
+  if($("followPrev")) $("followPrev").textContent = "(앞 질문: " + PREV_CTX.q + ")" + (on ? " · 이어 묻는 질문으로 보여 자동으로 켰습니다" : "");
+}
+function setPrevContext(q, data, answered){
   const seen = new Set(), laws = [];
   (data.laws || []).forEach(l => {
     const n = String(l.name || "").replace(/\s*(시행령|시행규칙)$/, "").trim();
@@ -1314,7 +1335,9 @@ function setPrevContext(q, data){
   });
   const ans = String(data.answer || "");
   const m = ans.match(/【결론】([\s\S]*?)(?=【|$)/);
-  PREV_CTX = {q: q, laws: laws.slice(0, 2), conclusion: (m ? m[1] : ans).replace(/\s+/g, " ").trim().slice(0, 300)};
+  PREV_CTX = {q: q, laws: laws.slice(0, 2), conclusion: (m ? m[1] : ans).replace(/\s+/g, " ").trim().slice(0, 300),
+              answered: String(answered || "")};
+  FOLLOW_TOUCHED = false;
   if($("followWrap")){
     $("followWrap").style.display = "flex";
     $("followPrev").textContent = "(앞 질문: " + q + ")";
@@ -1422,6 +1445,8 @@ fetch("/api/version").then(r => r.json()).then(d => {
 
 renderHistory();   // 저장된 이력 복원
 $("go").onclick = () => ask(false);
+$("q").addEventListener("input", () => autoFollow($("q").value));
+if($("follow")) $("follow").addEventListener("change", () => { FOLLOW_TOUCHED = true; });
 $("q").addEventListener("keydown", e => {
   if(e.key === "Enter" && (e.ctrlKey || e.metaKey)) ask(false);
 });

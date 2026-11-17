@@ -170,7 +170,8 @@ def run_case(base: str, case: dict, verbose: bool = True) -> dict:
     laws_mode = case.get("laws_mode", "only")
     prev = {"prev_question": case.get("prev_question", ""),
             "prev_laws": list(case.get("prev_laws") or []),
-            "prev_conclusion": case.get("prev_conclusion", "")}
+            "prev_conclusion": case.get("prev_conclusion", ""),
+            "prev_answered": case.get("prev_answered", "")}
     data = ask(base, {"question": q, "target": case.get("target", "auto"),
                       "answered": "", "round": 0, "laws": laws, "laws_mode": laws_mode,
                       "use_cache": False, **prev})

@@ -228,6 +228,38 @@ class ClarifyAnswers(unittest.TestCase):
         self.assertEqual(got, ("용량: 2만L", "yes"))
 
 
+class FollowUp(unittest.TestCase):
+    PREV = ("어느 법의 규정을 찾으시나요?: 토양환경보전법 / 저장시설은 어디에 있습니까?: 지하매설 / "
+            "오염 이력이 있습니까?: 모름 / 추가 설명: 제조업 공장")
+
+    def test_known_conditions_carried_unknown_and_law_pick_dropped(self):
+        self.assertEqual(main._prev_conditions(self.PREV), "저장시설은 어디에 있습니까?: 지하매설 / 추가 설명: 제조업 공장")
+        self.assertEqual(main._prev_conditions(""), "")
+
+    def test_carried_question_not_asked_again(self):
+        already = main._asked_questions("앞 질문: x / " + main._prev_conditions(self.PREV))
+        self.assertTrue(main._is_repeat_question("저장시설은 어디에 있습니까?", already))
+        self.assertFalse(main._is_repeat_question("오염 이력이 있습니까?", already))
+
+    def test_request_and_screen_pass_prev_answered(self):
+        self.assertEqual(main.AskRequest(question="q").prev_answered, "")
+        html = open(os.path.join(HERE, "static", "index.html"), encoding="utf-8").read()
+        for word in ("prev_answered", "function looksLikeFollowUp", "autoFollow(base)"):
+            self.assertIn(word, html)
+
+
+class ClarifyRepeats(unittest.TestCase):
+    def test_same_round_duplicate_dropped(self):
+        asks = [{"question": "누출검사대상시설로 인정받았습니까?"},
+                {"question": "누출검사대상시설로 인정받지 못했거나 모름입니까?"},
+                {"question": "저장 용량은 얼마입니까?"}]
+        self.assertEqual([a["question"] for a in main._drop_repeats(asks, "")],
+                         ["누출검사대상시설로 인정받았습니까?", "저장 용량은 얼마입니까?"])
+
+    def test_already_answered_dropped(self):
+        self.assertEqual(main._drop_repeats([{"question": "저장 용량은 얼마입니까?"}], "저장 용량은 얼마입니까?: 모름"), [])
+
+
 class EvalAutoAnswer(unittest.TestCase):
     def test_longer_key_first(self):
         self.assertEqual(eval_run.pick_option("재해취약지역에 포함됩니까?", ["예", "아니오", "모름"],

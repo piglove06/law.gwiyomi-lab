@@ -544,7 +544,7 @@ SELECT_ARTICLES = os.getenv("SELECT_ARTICLES", "1") not in ("0", "false", "False
 # 조회 후 지자체기관명으로 한 번 더 걸러냅니다.
 LOCAL_GOV = os.getenv("LOCAL_GOV", "성남시").strip()
 
-VERSION = "1.57"
+VERSION = "1.58"
 
 app = FastAPI(title="법령 조회 도우미", version=VERSION)
 
@@ -664,6 +664,7 @@ class AskRequest(BaseModel):
     prev_question: str = ""
     prev_laws: list[str] = []
     prev_conclusion: str = ""
+    prev_answered: str = ""     # v1.58 — 앞 질문에서 되묻기로 확인된 조건("질문: 답 / …")
     use_cache: bool = True      # v1.41 — false 면 '같은 질문 결과 불러오기'를 묻지 않음(eval_run 이 씀)
 
 
@@ -1170,6 +1171,25 @@ _NO_ANSWER_RE = re.compile(
     r"([^/]{2,60}?)\s*[:：]\s*(아니오|아니요|아니다|해당없음|해당하지\s*않음|없음|아님)")
 
 
+_UNKNOWN_ANS = re.compile(r"^(모름|모르|잘\s*모|확인\s*안|미확인)")
+
+
+def _prev_conditions(prev_answered: str) -> str:
+    """
+    ★ v1.58 — 앞 질문에서 확인된 조건 중 이어 묻는 질문에 넘길 것만 고릅니다("질문: 답 / …" 형식 그대로).
+      '모름' 으로 답한 것(확인된 사실이 아님)과 법령 고르기 질문(법령은 prev_laws 로 따로 넘어옴)은 뺍니다.
+      형식을 그대로 두므로 같은 질문을 다시 묻지 않고(_asked_questions), '아니오' 로 답한 종류도 계속 제외됩니다.
+    """
+    keep = []
+    for seg in (prev_answered or "").split(" / "):
+        seg = seg.strip()
+        ans = re.split(r"[:：]", seg)[-1].strip()
+        if not seg or LAW_Q in seg or not ans or _UNKNOWN_ANS.match(ans):
+            continue
+        keep.append(seg[:200])
+    return " / ".join(keep[-8:])
+
+
 def _excluded_terms(answered: str) -> list:
     """
     "…에 해당하나요?: 아니오" 형태에서 제외할 주제어를 뽑습니다.
@@ -1249,6 +1269,18 @@ def _is_repeat_question(q: str, already: set) -> bool:
             if SequenceMatcher(None, a, n).ratio() >= 0.72:
                 return True
     return False
+
+
+def _drop_repeats(asks: list, answered: str) -> list:
+    """이미 물은 질문(answered)과 겹치는 것, 그리고 **이번에 함께 낸 질문끼리** 겹치는 것을 뺍니다.
+    ★ v1.58 — 11-17 평가: 한 번에 "…로 인정받았습니까?" 와 "…로 인정받지 못했거나 모름입니까?" 를 같이 물음."""
+    already = _asked_questions(answered)
+    fresh = []
+    for a in asks:
+        if not _is_repeat_question(a["question"], already):
+            fresh.append(a)
+            already.add(_norm_q(a["question"]))
+    return fresh
 
 
 TARGET_LABEL = {"law": "법령", "eflaw": "법령", "admrul": "행정규칙",
@@ -2098,13 +2130,17 @@ def _ask_sync(req: AskRequest, progress: list):
         if (req.prev_conclusion or "").strip():
             concl = re.sub(r"\s+", " ", req.prev_conclusion.strip())[:300]
             prev_note += f" / 앞 답변 결론: {concl}"
+        _pc = _prev_conditions(req.prev_answered)
+        if _pc:
+            prev_note += f" / {_pc}"
         if not req.laws and req.prev_laws:
             req.laws = [x for x in req.prev_laws if str(x).strip()][:2]
             req.laws_mode = "prefer"
         if req.round == 0:
             steps.append({"name": "앞 질문에 이어서",
                           "detail": req.prev_question.strip()[:80]
-                                    + (f" · 앞 답의 법령 우선 참고: {', '.join(req.laws)}" if req.laws else "")})
+                                    + (f" · 앞 답의 법령 우선 참고: {', '.join(req.laws)}" if req.laws else "")
+                                    + (f" · 앞에서 확인된 조건 {_pc.count(' / ') + 1}개 이어 받음" if _pc else "")})
 
     answered = " / ".join(x for x in (prev_note, req.answered, req.note.strip()) if x)
 
@@ -3317,8 +3353,7 @@ def _ask_after_search(req, steps, answered, found, flat, catalog, refs, it=None,
                                   "detail": "법정 기한을 묻는 질문이라 사건 날짜는 묻지 않음: "
                                             + " / ".join(a["question"][:30] for a in _dq)})
         if asks:
-            already = _asked_questions(answered)
-            fresh = [a for a in asks if not _is_repeat_question(a["question"], already)]
+            fresh = _drop_repeats(asks, answered)
             if not fresh:
                 applog.debug("clarify", f"이미 물은 질문 {len(asks)}개 반복 감지 → 되묻기 종료")
                 steps.append({"name": "되묻기 종료",
