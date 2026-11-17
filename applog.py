@@ -148,7 +148,7 @@ def begin(key, question: str, round_no: int = 0, answered: str = "", note: str =
         emit(f"[{ts()}] ▶ START #{sess.rid}  {_one_line(question, 110)}",
              f"[{ts()}] ▶ START #{sess.rid}  {question}")
         if round_no > 0:
-            emit(f"[{ts()}]  │ (서버 재시작 등으로 이전 기록이 없어 {round_no}차 되묻기부터 이어서 기록)")
+            emit(f"[{ts()}]  │ ({round_no}차 — 답 아래에서 골라 다시 물었거나(먼저 답하고 묻기), 서버 재시작으로 앞 기록이 없음)")
     else:
         new = answered[len(sess.prev_answered):] if answered.startswith(sess.prev_answered) \
             else answered
@@ -161,6 +161,7 @@ def begin(key, question: str, round_no: int = 0, answered: str = "", note: str =
     sess.last_seen = time.time()
     _tls.sess = sess
     _tls.t_req = time.time()
+    _tls.finish = {}         # ★ v1.60 — 앞 요청의 '잘림' 표시가 이번 요청으로 넘어오지 않게(스레드는 재사용됨)
     return sess
 
 

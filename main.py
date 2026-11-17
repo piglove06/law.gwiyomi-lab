@@ -480,6 +480,7 @@ LAW_ASK_SHARE = float(os.getenv("LAW_ASK_SHARE", "0.5"))
 WEAK_AI_SHARE = float(os.getenv("WEAK_AI_SHARE", "0.4"))
 TREE_MAX_LAWS = int(os.getenv("TREE_MAX_LAWS", "4"))
 FETCH_MAX_LAWS = int(os.getenv("FETCH_MAX_LAWS", "7"))
+FETCH_WORKERS = max(1, int(os.getenv("FETCH_WORKERS", "4")))
 LAW_Q = "어느 법의 규정을 찾으시나요?"
 LAW_Q_DIRECT = "직접 입력 (아래 '추가로 알려줄 내용' 칸에 법령명)"
 LAW_Q_UNKNOWN = "모름 (모두 찾아보기)"
@@ -548,7 +549,7 @@ SELECT_ARTICLES = os.getenv("SELECT_ARTICLES", "1") not in ("0", "false", "False
 # 조회 후 지자체기관명으로 한 번 더 걸러냅니다.
 LOCAL_GOV = os.getenv("LOCAL_GOV", "성남시").strip()
 
-VERSION = "1.59"
+VERSION = "1.60"
 
 app = FastAPI(title="법령 조회 도우미", version=VERSION)
 
@@ -1405,7 +1406,7 @@ def api_detail(id: str, target: str = "law"):
         data = law_client.get_detail(target, id)
     except law_client.LawApiError as e:
         return _err(str(e))
-    return data
+    return _public_result({"laws": [data]})["laws"][0]
 
 
 @app.get("/api/raw", response_class=PlainTextResponse)
@@ -2082,6 +2083,22 @@ def _scope_note(req: AskRequest, result) -> None:
                         f"질문 중 「{tr[2]}」 부분은 법령 조문으로 답할 수 있는 내용이 아니어서 답하지 않았습니다.")
 
 
+def _public_result(result):
+    """
+    ★ v1.60 — 응답으로 내보내기 전에 조문에서 '별표전문'(긴 별표의 전문, 최대 8만 자)을 뺍니다.
+      화면·저장 기록·평가 보고서에는 예전처럼 앞 6,000자(조문내용)만 갑니다. 검색 캐시의 원본은 건드리지 않습니다.
+    """
+    if not isinstance(result, dict) or not result.get("laws"):
+        return result
+    laws = []
+    for f in result["laws"]:
+        arts = f.get("articles") if isinstance(f, dict) else None
+        if isinstance(arts, list) and any("별표전문" in a for a in arts):
+            f = {**f, "articles": [({k: v for k, v in a.items() if k != "별표전문"} if "별표전문" in a else a) for a in arts]}
+        laws.append(f)
+    return {**result, "laws": laws}
+
+
 def _ask_logged(req: AskRequest, progress: list):
     """
     _ask_sync 를 질문 블록 로그로 감쌉니다.
@@ -2098,7 +2115,7 @@ def _ask_logged(req: AskRequest, progress: list):
         _ac_res, _ac_state = answer_cache.before(req, progress, VERSION, CLARIFY_ROUNDS)
         _laws0, _mode0 = list(getattr(req, "laws", None) or []), getattr(req, "laws_mode", "")
         _q0 = req.question
-        result = _ac_res if _ac_res is not None else _ask_sync(req, progress)
+        result = _ac_res if _ac_res is not None else _public_result(_ask_sync(req, progress))
         if _ac_res is None:
             req.laws, req.laws_mode = _laws0, _mode0
             req.question = _q0
@@ -2808,10 +2825,20 @@ def _ask_sync(req: AskRequest, progress: list):
                                               1 if f.get("level") in ("시행령", "시행규칙") else 2))
     _nfetch = FETCH_MAX_LAWS + 2 + (3 if asp_plan else 0)
     _fetched = {id(x) for x in _fetch[:_nfetch]}
-    for f in _fetch[:_nfetch]:
+
+    def _fetch_one(f):
+        """법령 하나의 본문(+법률이면 위임 정보)을 받습니다. 법제처 대기뿐이라 여러 법령을 동시에 받습니다(v1.60)."""
+        detail = law_cache.get_detail(f["target"], f["id"], f.get("mst", ""), f.get("enforced", ""),
+                                      lambda: law_client.get_detail(f["target"], f["id"]))
+        dele = law_client.delegation_map(f["id"]) if f.get("level") == "법률" and f.get("id") else None
+        return detail, dele
+
+    from concurrent.futures import ThreadPoolExecutor
+    with ThreadPoolExecutor(max_workers=FETCH_WORKERS) as _fx:
+        _futs = [(f, _fx.submit(_fetch_one, f)) for f in _fetch[:_nfetch]]
+    for f, _fut in _futs:
         try:
-            detail = law_cache.get_detail(f["target"], f["id"], f.get("mst", ""), f.get("enforced", ""),
-                                          lambda: law_client.get_detail(f["target"], f["id"]))
+            detail, _dele = _fut.result()
         except Exception as e:                            # noqa: BLE001
             if not isinstance(e, law_client.LawApiError):
                 applog.warn(f"조문 수집 실패({f.get('name', '')}) — 그 법령만 건너뜁니다: {type(e).__name__}: {e}")
@@ -2819,8 +2846,8 @@ def _ask_sync(req: AskRequest, progress: list):
         f["meta"] = detail["meta"]
         f["articles"] = detail["articles"]
 
-        if f.get("level") == "법률" and f.get("id"):
-            f["delegated"] = law_client.delegation_map(f["id"])
+        if _dele is not None:
+            f["delegated"] = _dele
 
         if f["target"] == "ordin":
             real = detail["meta"].get("자치법규명", "")
@@ -3265,6 +3292,7 @@ def _ask_after_search(req, steps, answered, found, flat, catalog, refs, it=None,
         body = a.get("조문내용", "")
         if a.get("구분") in ("별표", "별지", "서식") or \
                 str(a.get("조문제목", "")).startswith(("[별표", "[별지", "[서식")):
+            body = a.get("별표전문") or body
             lim = BP_CTX_CHARS
             if (f["name"], *(_bp_no(a) or ("", ""))) in named_bp:
                 lim = min(BP_CTX_CHARS, 1600)

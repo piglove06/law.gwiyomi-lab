@@ -80,6 +80,13 @@ TIMEOUT = 20.0
 # 호출 전에 우리가 잘라서 "몇 건 받았는지" 판정이 어긋나지 않게 합니다.
 MAX_DISPLAY = 100
 
+# ★ v1.60 — 별표 본문 길이. 화면·응답에는 앞 BP_SHOW_CHARS 자만 싣고(예전과 같음), 그보다 긴 별표는 전문을
+#   '별표전문' 에 따로 둡니다. main 이 답변 근거를 만들 때 전문에서 질문 낱말이 든 줄과 비고를 골라 씁니다.
+#   전에는 여기서 6,000자로 잘라 버려서, 뒤쪽 행과 표 끝의 비고가 아예 없는 채로 골랐습니다
+#   (11-17 평가 자료: 별표·서식 1,572개 중 544개가 6,000자에서 잘림 — 폐기물 별표 5, 소음 별표 8, 폐수배출시설 별표 4 등).
+BP_SHOW_CHARS = 6000
+BP_FULL_CHARS = int(os.getenv("BP_FULL_CHARS", "80000"))
+
 # `search`(검색범위 1 법령명 / 2 본문검색) 파라미터가 스펙에 없는 target.
 #   · lsStmd (법령 체계도 목록)  — 요청변수 목록에 search 없음
 #   · lsHistory (법령 연혁 목록) — 요청변수 목록에 search 없음
@@ -211,8 +218,8 @@ def search(target: str, query: str, display: int = 20, scope: int = 1,
     법령을 찾아주므로, 추측 실패를 복구하는 경로가 됩니다.
 
     display — 매뉴얼상 max=100. 넘겨도 서버가 잘라버리므로 우리가 먼저
-        1~100 으로 조정합니다. 안 그러면 search_all() 의 "마지막 페이지"
-        판정("받은 개수 < display")이 영원히 참이 되지 않습니다.
+        1~100 으로 조정합니다. 여러 페이지를 받는 쪽(get_abbreviations)의 "마지막 페이지"
+        판정("받은 개수 < display")이 이 값에 기대기 때문입니다.
 
     page — 검색 결과 페이지(기본 1). 매뉴얼상 lsAbrv 만 미지원입니다.
 
@@ -311,71 +318,6 @@ def ai_search(query: str, display: int = 20, kind: str = "0") -> list[dict]:
         if d.get("법령명") or d.get("행정규칙명"):
             rows.append(d)
     return rows
-
-
-def search_all(target: str, query: str, scope: int = 1,
-               max_items: int = 300, per_page: int = MAX_DISPLAY) -> list[dict]:
-    """
-    여러 페이지를 이어 받습니다. 100건이 넘는 검색 결과가 필요할 때 씁니다.
-
-    종료 조건을 두 개 겹쳐 둡니다 — 하나만 믿으면 무한 루프가 납니다.
-      (a) 이번 페이지에서 받은 원본 레코드 수 < per_page  → 마지막 페이지
-      (b) 모아둔 개수 >= max_items 또는 >= totalCnt        → 충분히 받음
-    (a) 의 판정 대상은 **필터 전** 개수입니다. 연혁본이 걸러져 개수가 줄면
-    아직 뒷페이지가 남았는데도 끝난 줄 알기 때문입니다.
-
-    max_items — 안전장치. 기본 300건.
-    """
-    if target in NO_PAGE_TARGETS:
-        return search(target, query, display=per_page, scope=scope)
-
-    per_page = _clamp_display(per_page)
-    out: list[dict] = []
-    total = None
-    page_no = 1
-    max_pages = max(1, (max_items + per_page - 1) // per_page + 2)
-    seen_rows: set = set()
-
-    while len(out) < max_items and page_no <= max_pages:
-        params = {"target": target, "query": query, "display": per_page}
-        if scope and int(scope) != 1 and target not in NO_SCOPE_TARGETS:
-            params["search"] = str(int(scope))
-        if page_no > 1:
-            params["page"] = str(page_no)
-        if target == "eflaw":
-            params["nw"] = "3"
-
-        try:
-            root = ET.fromstring(_get(SEARCH_URL, params))
-        except ET.ParseError:
-            break
-
-        rows, page_total = _parse_search_rows(root)
-        raw_count = sum(1 for c in root if len(c) > 0)
-        if total is None and page_total:
-            total = page_total
-
-        # 서버가 page 를 무시하고 같은 페이지를 계속 줄 수 있습니다. 중복 제거.
-        added = 0
-        for r in rows:
-            key = (row_id(target, r) or "", row_name(target, r) or "")
-            if key in seen_rows:
-                continue
-            seen_rows.add(key)
-            out.append(r)
-            added += 1
-
-        if raw_count == 0:
-            break
-        if added == 0:
-            break
-        if raw_count < per_page:
-            break
-        if total and page_no * per_page >= total:
-            break
-        page_no += 1
-
-    return out[:max_items]
 
 
 def row_id(target: str, row: dict) -> str:
@@ -586,7 +528,8 @@ def _extract_articles(root: ET.Element) -> list[dict]:
             "조문번호": "", "조문가지번호": "",
             "조문제목": f"[{kind} {_label}] {title}",
             "조문여부": "조문", "시행일자": "", "구분": kind,
-            "조문내용": body[:6000],
+            "조문내용": body[:BP_SHOW_CHARS],
+            **({"별표전문": body[:BP_FULL_CHARS]} if len(body) > BP_SHOW_CHARS and BP_FULL_CHARS > BP_SHOW_CHARS else {}),
             "파일링크": bg("별표서식PDF파일링크") or bg("별표서식파일링크") or bg("별표첨부파일명"),
         })
 
@@ -1111,88 +1054,6 @@ def resolve_current_id(law_name: str, target: str = "") -> str:
         if _norm_name(row_name(tgt, r)) == want:
             return row_id(tgt, r)
     return ""
-
-
-def get_delegated_articles(law_id: str, jo_no="", jo_gaji="",
-                           max_fetch: int = 4) -> list[dict]:
-    """
-    법률 조문이 위임한 **하위법령 조문의 본문**까지 받아옵니다.
-
-    3번(get_delegated) + 7번(JO) 을 잇는 함수입니다. 흐름:
-      1) lsDelegated 로 "법 제53조 → 시행령 제72조" 를 얻습니다.
-      2) 위임 대상 법령명으로 현행 법령ID 를 되찾습니다.
-      3) 그 법령의 **제72조만** JO 로 받습니다. (전체를 받지 않습니다)
-
-    jo_no 를 주면 그 조문의 위임만, 안 주면 법령 전체의 위임을 훑습니다.
-    max_fetch — 본문까지 받아올 최대 건수. 호출 횟수 안전장치입니다.
-
-    반환: [{"kind":…, "law":…, "jo":…, "jo_gaji":…, "articles":[…],
-            "출처":"위임법령", "note":…}, …]
-      위임 대상이 조문번호를 안 주는 종류(행정규칙·자치법규)는 articles 가
-      비고 note 에 이유가 들어갑니다 — 그 경우는 이름만 힌트로 쓰세요.
-    """
-    rows = get_delegated(law_id)
-    if not rows:
-        return []
-
-    if jo_no:
-        want_no = re.sub(r"\D", "", str(jo_no)).lstrip("0")
-        want_gaji = re.sub(r"\D", "", str(jo_gaji or ""))
-        rows = [r for r in rows
-                if r.get("조문번호", "").lstrip("0") == want_no
-                and re.sub(r"\D", "", r.get("조문가지번호", "")) == want_gaji]
-
-    out: list[dict] = []
-    fetched = 0
-    seen: set = set()
-
-    for r in rows:
-        title, tgt, jo = r["_title"], r["_target"], r["_jo"]
-        key = (title, jo, r["_jo_gaji"])
-        if not title or key in seen:
-            continue
-        seen.add(key)
-
-        item = {
-            "kind": r["_kind"], "law": title,
-            "jo": jo, "jo_gaji": r["_jo_gaji"],
-            "위임구분": r.get("위임구분", ""),
-            "출처": "위임법령", "articles": [], "note": "",
-        }
-
-        if not (tgt == "law" and jo):
-            item["note"] = (f"{r['_kind']} 위임 — 법제처가 조문번호를 주지 않습니다. "
-                            f"이름만 근거로 쓰세요.")
-            out.append(item)
-            continue
-
-        if fetched >= max_fetch:
-            item["note"] = f"조회 상한({max_fetch}건) 초과로 본문을 받지 않았습니다."
-            out.append(item)
-            continue
-
-        target_id = resolve_current_id(title)
-        if not target_id:
-            item["note"] = f"「{title}」 의 현행 법령ID 를 찾지 못했습니다."
-            out.append(item)
-            continue
-
-        try:
-            got = get_article(LAW_TARGET, law_id=target_id,
-                              jo_no=jo, jo_gaji=r["_jo_gaji"])
-        except LawApiError as e:
-            item["note"] = f"조문 조회 실패: {e}"
-            out.append(item)
-            continue
-
-        fetched += 1
-        item["articles"] = got["articles"]
-        item["law_id"] = target_id
-        if not got["articles"]:
-            item["note"] = f"제{jo}조에 해당하는 조문이 응답에 없습니다."
-        out.append(item)
-
-    return out
 
 
 # query 파라미터가 없는 API라 전체를 페이지로 받아야 합니다.

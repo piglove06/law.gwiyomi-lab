@@ -57,7 +57,9 @@ def _norm(s: str) -> str:
 def _qkey(req) -> str:
     laws = tuple(sorted(str(x).strip() for x in (getattr(req, "laws", None) or []) if str(x).strip()))
     base = json.dumps([_norm(req.question), req.target, laws, req.laws_mode if laws else "",
-                       _norm(getattr(req, "prev_question", ""))[:200]], ensure_ascii=False)
+                       _norm(getattr(req, "prev_question", ""))[:200]]
+                      + ([_norm(getattr(req, "prev_answered", ""))[:300]] if _norm(getattr(req, "prev_answered", "")) else []),
+                      ensure_ascii=False)
     return hashlib.sha1(base.encode("utf-8")).hexdigest()
 
 

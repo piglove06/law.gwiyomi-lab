@@ -665,6 +665,12 @@ extract_terms → ai_search(질문 원문, 비면 재시도 → 용어로) → �
 ### main.py :: _ask_article
 - 조문 직접 조회 경로("○○법 제N조"). 시간초과 등은 일반 경로로 넘김(C-20261017-15). 가지조문 번호 빠짐 보정 "제39조의제1항" → "제39조의3제1항"(v1.32).
 
+### main.py :: _public_result
+- 응답(화면·answer_cache 저장·평가 보고서)으로 나가기 전에 조문의 `별표전문` 을 뺌(v1.60). 검색 캐시에 든 원본 dict 는 건드리지 않고 겉만 새로 만듦. `/api/detail` 도 같은 처리.
+
+### main.py :: FETCH_WORKERS
+- 법령 본문(+법률의 위임 정보 `delegation_map`)을 동시에 받는 수(기본 4, v1.60). 전에는 법령 최대 9~12개를 하나씩 차례로 받았음. 결과를 쓰는 순서는 예전과 같음(받기만 동시에).
+
 ### main.py :: _ask_logged
 - 질문 로그 블록 + 답변 캐시(answer_cache: 같은 질문이면 "불러올까요?", 되묻기 답이 같으면 저장본 — 최종 답은 근거 법령 MST 재확인, 다르면 그 단계부터 새로 검색. 기본 꺼짐).
 - 저장 전에 `_ask_sync` 가 바꾼 req.laws(이어서 묻기, C-20261028-17)·req.question(법령 부분만, v1.50)을 되돌려 저장 키 = 조회 키. 섞인 질문이면 `_scope_note` 를 붙임.
@@ -740,6 +746,9 @@ extract_terms → ai_search(질문 원문, 비면 재시도 → 용어로) → �
 ### law_client.py :: MAX_DISPLAY
 - 목록 한 번에 최대 100건(매뉴얼 대조). `search` 파라미터가 스펙에 없는 target(lsStmd 등)엔 보내지 않음.
 
+### law_client.py :: BP_SHOW_CHARS
+- 별표 본문 중 화면·응답에 싣는 길이(6,000자, 예전과 같음). 이보다 긴 별표는 전문(최대 `BP_FULL_CHARS`=8만 자, .env)을 조문의 `별표전문` 에 따로 둠(v1.60). main 의 답변 근거 만들기(`_fit_keep_notes`)가 전문에서 질문 낱말이 든 줄과 비고를 고름. 전에는 여기서 6,000자로 잘라 버려, v1.34 에 넣은 '긴 별표에서 관련 줄만 발췌'가 앞 6,000자 안에서만 돌았음 — 11-17 평가 자료의 별표·서식 1,572개 중 544개가 잘려 있었고(폐기물 별표 5, 소음 별표 8, 폐수배출시설 별표 4 등) 뒤쪽 행과 표 끝의 비고는 답변이 볼 수 없었음. 응답으로 나갈 때는 main `_public_result` 가 `별표전문` 을 뺌. law_cache 는 `FORMAT` 을 올려 옛 저장본(잘린 것)을 다시 받음.
+
 ### law_client.py :: _safe_err
 - 오류 문구에서 URL(OC 포함)을 빼고 종류·상태 코드만 남김.
 
@@ -755,9 +764,6 @@ extract_terms → ai_search(질문 원문, 비면 재시도 → 용어로) → �
 
 ### law_client.py :: _fix_html_entities.rep
 - XML 에 없는 HTML 엔티티(&middot; 등)를 글자로. 모르는 이름이면 `&` 를 이스케이프.
-
-### law_client.py :: search_all
-- 여러 페이지 받기. 페이지 번호 상한 + 한 페이지에서 새 항목 0이면 멈춤 + 중복 거름(08-19: 종료 조건 불일치로 "100건 전부 연혁본" 페이지에서 무한 루프, 501회 호출).
 
 ### law_client.py :: get_detail
 - 시행일 기준이 비면 공포일 기준으로 대체하고 meta["조회기준"] 에 남김(화면·로그 구분).
@@ -815,9 +821,6 @@ extract_terms → ai_search(질문 원문, 비면 재시도 → 용어로) → �
 
 ### law_client.py :: _jo_code
 - JO 파라미터(조문 하나만 받기) 6자리. 앞자리 0 유실 시 zfill.
-
-### law_client.py :: get_delegated_articles
-- 조문번호가 오는 건 법령(시행령·시행규칙·인용법령)뿐 — 행정규칙은 이름만.
 
 ### law_client.py :: _ABBR_CACHE
 - 공식 약칭표(예: 개인정보법)를 프로세스 수명 동안 한 번만 받음. "영/규칙" 축약은 main._guess_law 담당.

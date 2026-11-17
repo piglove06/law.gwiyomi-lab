@@ -320,6 +320,55 @@ class AnswerFirst(unittest.TestCase):
         self.assertIn("**_pending", open(os.path.join(HERE, "main.py"), encoding="utf-8").read())
 
 
+class LongAppendix(unittest.TestCase):
+    """별표가 6,000자를 넘어도 뒤쪽 행과 비고를 근거로 쓸 수 있어야 합니다(v1.60)."""
+
+    def _appendix(self):
+        import xml.etree.ElementTree as ET
+        rows = "".join(f"{i}. 시설{i} 시간당 {i}세제곱미터 이상\n" for i in range(1, 700))
+        body = rows + "700. 세차시설 시간당 1세제곱미터 이상\n비고\n1. 세차시설은 자동식만 해당한다."
+        xml = ("<법령><조문><조문단위><조문번호>1</조문번호><조문내용>제1조(목적) 본문</조문내용></조문단위></조문>"
+               "<별표><별표단위><별표번호>0004</별표번호><별표구분>별표</별표구분><별표제목>폐수배출시설</별표제목>"
+               f"<별표내용><![CDATA[{body}]]></별표내용></별표단위></별표></법령>")
+        return law_client._extract_articles(ET.fromstring(xml))[-1]
+
+    def test_full_text_kept_beside_display_text(self):
+        bp = self._appendix()
+        self.assertEqual(len(bp["조문내용"]), law_client.BP_SHOW_CHARS)
+        self.assertIn("자동식만", bp["별표전문"])
+
+    def test_late_row_and_notes_reach_context(self):
+        bp = self._appendix()
+        kw = main._bp_keywords("세차시설 폐수배출시설 신고 대상인가요?")
+        cut = main._fit_keep_notes(main._compact_bp(bp["조문내용"]), main.BP_CTX_CHARS, kw)
+        full = main._fit_keep_notes(main._compact_bp(bp["별표전문"]), main.BP_CTX_CHARS, kw)
+        self.assertNotIn("700. 세차시설", cut)
+        self.assertIn("700. 세차시설", full)
+        self.assertIn("자동식만", full)
+        self.assertLessEqual(len(full), main.BP_CTX_CHARS + 60)
+
+    def test_short_appendix_has_no_extra_copy(self):
+        import xml.etree.ElementTree as ET
+        xml = ("<법령><별표><별표단위><별표번호>0001</별표번호><별표제목>짧은 표</별표제목>"
+               "<별표내용><![CDATA[1. 가 10 이하]]></별표내용></별표단위></별표></법령>")
+        self.assertNotIn("별표전문", law_client._extract_articles(ET.fromstring(xml))[-1])
+
+    def test_full_text_not_sent_to_screen_and_cache_refetches(self):
+        bp = self._appendix()
+        pub = main._public_result({"answer": "a", "laws": [{"name": "x", "articles": [bp]}]})
+        self.assertNotIn("별표전문", pub["laws"][0]["articles"][0])
+        self.assertIn("별표전문", bp)
+        import law_cache
+        self.assertTrue(law_cache._path("eflaw", "1", "2", "20260101").endswith("_b2.json"))
+
+
+class AnswerCacheKey(unittest.TestCase):
+    def test_follow_up_conditions_change_the_key(self):
+        a = main.AskRequest(question="그럼 과태료는?", prev_question="앞 질문")
+        b = main.AskRequest(question="그럼 과태료는?", prev_question="앞 질문", prev_answered="지하매설입니까?: 예")
+        self.assertNotEqual(answer_cache._qkey(a), answer_cache._qkey(b))
+
+
 class EvalAutoAnswer(unittest.TestCase):
     def test_longer_key_first(self):
         self.assertEqual(eval_run.pick_option("재해취약지역에 포함됩니까?", ["예", "아니오", "모름"],
@@ -416,6 +465,22 @@ class VerdictConflict(unittest.TestCase):
         got = ai_client._strip_revision_notes(a)
         self.assertNotIn("검토 의견", got)
         self.assertIn("【설명】\n1. 기준 65dB.", got)
+
+
+class LastFinishPerRequest(unittest.TestCase):
+    def test_new_request_starts_clean(self):
+        import applog
+        keep = applog.emit
+        applog.emit = lambda *a, **k: None
+        try:
+            applog.llm("answer", 10, 5, 0.1, finish="length")
+            self.assertEqual(applog.last_finish("answer"), "length")
+            applog.begin(("zz-test", "law"), "zz-test", 0)
+            self.assertEqual(applog.last_finish("answer"), "")
+        finally:
+            applog.clear()
+            applog._sessions.pop(("zz-test", "law"), None)
+            applog.emit = keep
 
 
 class LastFinish(unittest.TestCase):

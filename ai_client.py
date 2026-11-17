@@ -2,7 +2,7 @@
 LLM 호출부. 로컬 LLM 서버를 OpenAI 호환 API(/v1/chat/completions)로 부릅니다.
 
   현재 구성: llama.cpp 의 llama-server + Qwen3.6-35B-A3B (Q4_K_M)
-    - start.bat 이 llama-server 를 같이 띄웁니다 (포트 8080, 컨텍스트 -c 16384).
+    - start.bat 이 llama-server 를 같이 띄웁니다 (포트 8080, 컨텍스트는 llm_start.bat 의 -c — 지금 32768).
     - .env
         LOCAL_BASE_URL=http://localhost:8080/v1
         LOCAL_MODEL=Qwen3.6-35B-A3B     (llama-server 는 모델 하나만 쓰므로 표시용)
@@ -851,13 +851,6 @@ def scope_split(question: str) -> dict:
     if out["legal"] and other and _scope_part_ok(part, str(question or "")):
         out["law_part"], out["other"] = part, other[:60]
     return out
-
-
-def scope_check(question: str) -> tuple:
-    """(법령 질문인가, 이유). 실패하면 (True, "") — 막지 않습니다.
-    ★ v1.50 — scope_split 을 감싼 예전 모양(섞인 질문 정보는 버림)."""
-    r = scope_split(question)
-    return r["legal"], r["reason"]
 
 
 CASE_PICK_PROMPT = """아래는 법령 질문과, 제목으로 찾은 법령해석례·부처 해석·판례 후보 목록이다.

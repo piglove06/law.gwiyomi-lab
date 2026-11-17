@@ -55,8 +55,11 @@ def _safe(s: str) -> str:
     return re.sub(r"[^0-9A-Za-z가-힣._-]", "_", str(s or ""))[:80] or "_"
 
 
+FORMAT = "b2"      # 저장 내용의 모양이 바뀌면 올립니다(b2: v1.60 별표전문). 옛 파일은 안 읽고 새로 받으며, 최근 것만 남기는 정리로 사라집니다.
+
+
 def _path(target: str, law_id: str, mst: str, enforced: str) -> str:
-    return os.path.join(CACHE_DIR, "laws", _safe(target), _safe(law_id), f"{_safe(mst)}_{_safe(enforced)}.json")
+    return os.path.join(CACHE_DIR, "laws", _safe(target), _safe(law_id), f"{_safe(mst)}_{_safe(enforced)}_{FORMAT}.json")
 
 
 def _good(d) -> bool:
