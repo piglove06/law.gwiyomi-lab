@@ -53,6 +53,41 @@ PLACEHOLDER = re.compile(
     re.I)
 
 
+_SECRET_KEY = re.compile(r"(?i)(^|_)(OC|KEY|TOKEN|SECRET|PASS|PASSWORD|PWD)($|_)")
+
+
+def env_secrets() -> dict:
+    """
+    ★ v1.60 — .env 와 _env_backup/ 안 파일에서 비밀로 보이는 값({변수 이름: 값})을 모읍니다.
+      모양(정규식)으로 못 잡는 키 — 법제처 OC, 지금은 안 쓰는 Gemini 키, 앱 비밀번호 — 도 **실제 값 그대로**
+      커밋될 파일에 들어갔는지 대조하기 위해서입니다. 값은 어디에도 출력하지 않습니다.
+    """
+    paths = [os.path.join(HERE, ".env")]
+    bdir = os.path.join(HERE, "_env_backup")
+    if os.path.isdir(bdir):
+        paths += [os.path.join(bdir, n) for n in sorted(os.listdir(bdir))]
+    out = {}
+    for p in paths:
+        try:
+            with open(p, encoding="utf-8", errors="ignore") as f:
+                for line in f:
+                    line = line.strip()
+                    if not line or line.startswith("#") or "=" not in line:
+                        continue
+                    k, _, v = line.partition("=")
+                    k, v = k.strip(), v.strip().strip("'\"")
+                    if _SECRET_KEY.search(k) and len(v) >= 6 and not PLACEHOLDER.search(v):
+                        out.setdefault(v, k)
+        except OSError:
+            continue
+    return {k: v for v, k in out.items()}
+
+
+def leaked(text: str, secrets: dict) -> list:
+    """text 에 그대로 들어 있는 비밀 값의 **변수 이름** 목록."""
+    return sorted({k for k, v in secrets.items() if v and v in text})
+
+
 def git(*args: str) -> str:
     try:
         p = subprocess.run(["git", *args], cwd=HERE, capture_output=True,
@@ -78,6 +113,15 @@ def main() -> int:
                 f"API 키가 공개 저장소에 올라갑니다.\n"
                 f"        해결:  git rm --cached \"{path}\"")
 
+    # .env 의 실제 값은 **이번에 새로 들어가는 줄**에서만 찾습니다. 파일 전체를 보면, OC 가 깃허브 아이디처럼
+    # 이미 LICENSE 등에 공개된 글자와 같을 때 모든 커밋이 막힙니다.
+    secrets = env_secrets()
+    if secrets:
+        added = "\n".join(l[1:] for l in git("diff", "--cached", "-U0", "--no-color").splitlines()
+                          if l.startswith("+") and not l.startswith("+++"))
+        for key in leaked(added, secrets):
+            problems.append(f"[치명] 커밋할 변경 내용에 .env 의 {key} 값이 그대로 들어 있습니다(값은 가림).\n"
+                            f"        git diff --cached 로 찾아 지우세요.")
     staged = [l.strip() for l in
               git("diff", "--cached", "--name-only").splitlines() if l.strip()]
     targets = staged or tracked

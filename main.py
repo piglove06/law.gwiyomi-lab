@@ -385,8 +385,16 @@ def _fit_keep_notes(text: str, limit: int, keywords=None) -> str:
                 keep |= win
                 used0 += cost
             _heads = [i for i, ln in enumerate(lines) if _NOTES_HEAD.match(ln)]
-            _after = [h for h in _heads if h >= hit[0]]
-            ni = (_after[0] if _after else _heads[-1]) if _heads else None
+            # ★ v1.60b — 비고가 여러 개면(표마다 따로) 질문 낱말이 가장 많이 걸린 표의 비고를 고릅니다.
+            #   표 = 앞 비고 다음 줄부터 이 비고 전까지, 여기에 비고 자신 25줄을 더해 셉니다.
+            #   전에는 '점수가 가장 높은 줄 뒤의 첫 비고' 를 골라, 별표 전문을 쓰게 된 뒤(v1.60) 소음 별표 8 에서
+            #   진동 표의 비고를 가져오고 소음 비고(공휴일 -5dB)를 놓쳤음(11-17 소음 일요일).
+            _hit_sc = {i: sc for sc, i in score if sc > 0}
+
+            def _note_score(k):
+                lo = _heads[k - 1] + 25 if k else 0
+                return sum(v for i, v in _hit_sc.items() if lo <= i < _heads[k] + 25)
+            ni = _heads[max(range(len(_heads)), key=lambda k: (_note_score(k), -k))] if _heads else None
             notes = "\n".join(lines[ni:ni + 25]) if ni is not None else ""
             budget = limit - min(len(notes), int(limit * 0.35)) - 40
             out, used, prev = [], 0, -1
@@ -460,6 +468,36 @@ def _verdict_conflict(text: str) -> str:
     if shared and bool(_NEG_WORDS.search(concl)) != bool(_NEG_WORDS.search(later)):
         return concl
     return ""
+
+
+_DATE_RE = re.compile(r"(\d{4})\s*년\s*(\d{1,2})\s*월\s*(\d{1,2})\s*일|(\d{4})[.\-/]\s*(\d{1,2})[.\-/]\s*(\d{1,2})")
+
+
+def _dates(text: str) -> set:
+    return {(int(m[0] or m[3]), int(m[1] or m[4]), int(m[2] or m[5])) for m in _DATE_RE.findall(text or "")}
+
+
+def _concl_date_mismatch(text: str) -> str:
+    """
+    ★ v1.60b — 【결론】에 나온 날짜가 답변의 나머지(적용 조건·근거·계산·설명) 어디에도 없으면 그 날짜("YYYY-MM-DD").
+      11-17 v1.60 누출검사: 검토가 '첫 검사일 + 8년' 이라는 틀린 지적을 했고, 다시 쓴 답을 버리면서 【결론】만 가져와
+      결론은 '2028년 8월 20일', 계산은 '2028년 3월 15일 … 6월 13일까지' 로 서로 달랐음. 판정 낱말(초과·해당…)이 아니라
+      날짜가 어긋난 것이라 `_verdict_conflict` 가 못 잡았음. 나머지에 날짜가 하나도 없으면 비교하지 않음("").
+    """
+    m = _CONCL_BLOCK_RE.search(text or "")
+    if not m:
+        return ""
+    rest = (text[:m.start()] + text[m.end():])
+    rd = _dates(rest)
+    if not rd:
+        return ""
+    extra = sorted(_dates(m.group(0)) - rd)
+    return "-".join(f"{x:02d}" for x in extra[0]) if extra else ""
+
+
+def _concl_conflict(text: str) -> str:
+    """결론이 본문과 어긋나는지(판정 낱말 반대, 또는 본문에 없는 날짜). 어긋나면 그 내용, 아니면 ""."""
+    return _verdict_conflict(text) or _concl_date_mismatch(text)
 
 
 _SELF_CORR_FIX = ("【결론】과 뒤쪽(【설명】 끝의 '수정된 결론' 등)의 판정이 다르다. 조문 원문으로 다시 따져 하나의 판정으로 정하고, "
@@ -549,7 +587,7 @@ SELECT_ARTICLES = os.getenv("SELECT_ARTICLES", "1") not in ("0", "false", "False
 # 조회 후 지자체기관명으로 한 번 더 걸러냅니다.
 LOCAL_GOV = os.getenv("LOCAL_GOV", "성남시").strip()
 
-VERSION = "1.60"
+VERSION = "1.61"
 
 app = FastAPI(title="법령 조회 도우미", version=VERSION)
 
@@ -3617,7 +3655,8 @@ def _ask_after_search(req, steps, answered, found, flat, catalog, refs, it=None,
                 _keep_secs = all(h in text2 for h in ("【결론】", "【근거】", "【계산】", "【설명】") if h in text)
                 if "【결론】" in text2 and len(text2) > 80 and "【근거】" in text2 and _c2 >= max(1, _c1 // 2) and _keep_secs:
                     text, _trunc = text2, _trunc2
-                elif any(p.get("kind") == "결론모순" for p in probs) and _merge_conclusion(text, text2):
+                elif any(p.get("kind") == "결론모순" for p in probs) and _merge_conclusion(text, text2) \
+                        and not _concl_conflict(_merge_conclusion(text, text2)):
                     text = _merge_conclusion(text, text2)
                     probs = [dict(p, kind=p["kind"] + "(결론만 반영)") for p in probs]
                 else:
@@ -3637,11 +3676,11 @@ def _ask_after_search(req, steps, answered, found, flat, catalog, refs, it=None,
             applog.warn(f"답변 검토 실패 — 처음 답변을 씁니다: {type(e).__name__}: {e}")
 
     warnings = []
-    _vc_final = _verdict_conflict(text)
+    _vc_final = _concl_conflict(text)
     if _vc_final and CONCL_FIX:
         _t3 = _merge_conclusion(text, ai_client.fix_conclusion(
             req.question + (f"\n(확인된 조건: {answered})" if answered else ""), _CONCL_BLOCK_RE.sub("", text, 1).strip()))
-        if _t3 and not _verdict_conflict(_t3):
+        if _t3 and not _concl_conflict(_t3):
             text, _vc_final = _t3, ""
             warnings.append("처음 쓴 【결론】이 【계산】·【설명】의 판정과 달라, 그 판정에 맞춰 【결론】만 다시 썼습니다. "
                             "수치는 근거 조문 원문으로 확인하세요.")

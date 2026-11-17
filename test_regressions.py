@@ -467,6 +467,56 @@ class VerdictConflict(unittest.TestCase):
         self.assertIn("【설명】\n1. 기준 65dB.", got)
 
 
+class ConclusionDates(unittest.TestCase):
+    """11-17 v1.60 누출검사: 다시 쓴 답에서 【결론】만 가져와 결론 날짜가 계산과 달라졌음."""
+    BODY = ("【적용 조건】\n- 설치일: 2010년 3월 15일\n- 첫 누출검사: 2020년 8월 20일\n\n"
+            "【계산】\n기준일 2020년 3월 15일 + 8년 = 다음 검사 기준일 **2028년 3월 15일**\n= 2028년 6월 13일까지")
+
+    def test_date_missing_from_body_is_flagged(self):
+        self.assertEqual(main._concl_date_mismatch("【결론】\n**2028년 8월 20일** 이후 90일 이내\n\n" + self.BODY), "2028-08-20")
+        self.assertTrue(main._concl_conflict("【결론】\n2028년 8월 20일 이후\n\n" + self.BODY))
+
+    def test_matching_or_dateless_conclusion_passes(self):
+        self.assertEqual(main._concl_date_mismatch("【결론】\n2028년 3월 15일부터 2028.6.13까지\n\n" + self.BODY), "")
+        self.assertEqual(main._concl_date_mismatch("【결론】\n2028년 8월 20일\n\n【설명】\n날짜 없음"), "")
+
+
+class NotesOfMatchingTable(unittest.TestCase):
+    """별표에 표·비고가 둘(소음·진동)이면 질문에 맞는 표의 비고를 넣어야 합니다(v1.61, 11-17 소음 일요일)."""
+    TEXT = ("1. 생활소음 규제기준\n" + "\n".join(f"가. 주거지역 공사장 주간 {60 + i} 이하 행{i}" for i in range(12))
+            + "\n비고\n1. 소음 측정 기준\n7. 공사장의 규제기준 중 주거지역은 공휴일에만 -5㏈을 보정한다.\n"
+            + "2. 생활진동 규제기준\n" + "\n".join(f"가. 기타 지역 심야 진동 {50 + i} 이하 행{i}" for i in range(12))
+            + "\n비고\n1. 진동 측정 기준\n4. 진동 작업시간 2시간 초과 4시간 이하 +5dB")
+
+    def test_noise_question_gets_noise_notes(self):
+        kw = main._bp_keywords("주거지역 공사장 일요일 주간 소음 초과인가요?")
+        out = main._fit_keep_notes(self.TEXT * 3, 900, kw)
+        self.assertIn("공휴일에만 -5", out)
+
+
+class SecretValues(unittest.TestCase):
+    """.env 의 실제 값(OC·옛 Gemini 키 등)이 새로 커밋되는 줄에 들어가면 막고, 값은 출력하지 않습니다(v1.60)."""
+
+    def test_values_from_env_and_backups_by_name(self):
+        import tempfile
+        import check_secrets as cs
+        d = tempfile.mkdtemp()
+        keep = cs.HERE
+        cs.HERE = d
+        try:
+            with open(os.path.join(d, ".env"), "w", encoding="utf-8") as f:
+                f.write("LAW_OC=realoc123\nAPP_PASSWORD='hunter22x'\nLOCAL_MODEL=Qwen3.6-35B\nLAW_OC2=발급받은_인증키\n")
+            os.makedirs(os.path.join(d, "_env_backup"))
+            with open(os.path.join(d, "_env_backup", ".env_old"), "w", encoding="utf-8") as f:
+                f.write("GEMINI_API_KEY=oldgeminikey99\n")
+            s = cs.env_secrets()
+        finally:
+            cs.HERE = keep
+        self.assertEqual(sorted(s), ["APP_PASSWORD", "GEMINI_API_KEY", "LAW_OC"])
+        self.assertEqual(cs.leaked("url ?OC=realoc123&x oldgeminikey99", s), ["GEMINI_API_KEY", "LAW_OC"])
+        self.assertEqual(cs.leaked("model Qwen3.6-35B", s), [])
+
+
 class LastFinishPerRequest(unittest.TestCase):
     def test_new_request_starts_clean(self):
         import applog
