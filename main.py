@@ -80,9 +80,7 @@ import law_client  # noqa: E402
 import pdf_maker  # noqa: E402
 import intent as intent_mod  # noqa: E402
 import law_cache  # noqa: E402
-import rag_select  # noqa: E402
 import answer_cache  # noqa: E402
-import ai_ext  # noqa: E402
 import ctx_guard  # noqa: E402
 
 CLARIFY_ROUNDS = int(os.getenv("CLARIFY_ROUNDS", "3"))
@@ -440,6 +438,21 @@ _SELF_CORR_RE = re.compile(r"(?m)(수정된|정정된|바로잡은|다시\s*정�
                            r"|오류\s*수정|재\s*판정|다시\s*확인합니다|제가[^.\n]{0,20}(잘못|다시)")
 _VERDICT_WORDS = re.compile(r"초과|해당|대상|위반|필요|가능")
 _NEG_WORDS = re.compile(r"않|아니|아닙|아님|아닌|미달|미초과|없")
+_NEG_AFTER = re.compile(r"^[^.\n,]{0,6}?(않|아니|아닙|아님|아닌|없)")
+_NEG_BEFORE = re.compile(r"(미|비|불)$")
+
+
+def _word_neg(text: str, word: str) -> bool:
+    """
+    ★ v1.65 (A9) — 판정 낱말 word 가 text 에서 부정으로 쓰였는지. 낱말 바로 뒤 6자 안의 부정(…하지 않/…이 아닙/…필요 없)
+      이나 바로 앞의 미·비·불(미초과·비해당·불필요)만 셉니다. 예전에는 문장 어디든 '없' 이 있으면 부정으로 봐서
+      "제외 규정이 없으므로 신고 대상에 해당합니다" 를 "신고 대상입니다" 와 반대 판정으로 잘못 잡았음.
+    """
+    t = text or ""
+    for m in re.finditer(word, t):
+        if _NEG_AFTER.search(t[m.end():m.end() + 12]) or _NEG_BEFORE.search(t[max(0, m.start() - 1):m.start()]):
+            return True
+    return word == "초과" and "미달" in t
 _FINAL_WORDS = re.compile(r"판정|최종|따라서|그러므로|결론적으로|이므로|므로")
 _COND_WORDS = re.compile(r"경우|이면|라면|다면|만약|만일|할 때|하면")
 
@@ -465,7 +478,7 @@ def _verdict_conflict(text: str) -> str:
                  and not _COND_WORDS.search(x)]
         later = sents[-1] if sents else ""
     shared = set(_VERDICT_WORDS.findall(concl)) & set(_VERDICT_WORDS.findall(later))
-    if shared and bool(_NEG_WORDS.search(concl)) != bool(_NEG_WORDS.search(later)):
+    if any(_word_neg(concl, w) != _word_neg(later, w) for w in sorted(shared)):
         return concl
     return ""
 
@@ -493,6 +506,60 @@ def _concl_date_mismatch(text: str) -> str:
         return ""
     extra = sorted(_dates(m.group(0)) - rd)
     return "-".join(f"{x:02d}" for x in extra[0]) if extra else ""
+
+
+_CN_UNIT_RE = re.compile(
+    r"(\d[\d,]*(?:\.\d+)?)\s*(억\s*원|만\s*원|천\s*원|원|dB\(A\)|dB|㏈|데시벨|%|퍼센트|개월|년|일|시간|분|"
+    r"kg|킬로그램|톤|㎡|제곱미터|m²|㎥|세제곱미터|리터|ℓ|명|회|배)")
+_CN_NUM_RE = re.compile(r"\d[\d,]*(?:\.\d+)?")
+_CN_REF_RE = re.compile(r"제\s*\d+\s*(?:조|항|호|목)(?:\s*의\s*\d+)?|별(?:표|지)\s*\d+(?:\s*의\s*\d+)?|^\s*\d+\.\s", re.M)
+_CN_UNIT_MUL = {"억원": 100000000, "만원": 10000, "천원": 1000}
+_CN_UNIT_ALIAS = {"dB(A)": "dB", "㏈": "dB", "데시벨": "dB", "퍼센트": "%", "킬로그램": "kg", "제곱미터": "㎡",
+               "m²": "㎡", "세제곱미터": "㎥", "ℓ": "리터"}
+
+
+def _cn_num(x: str) -> float:
+    return float(x.replace(",", ""))
+
+
+def _num_values(text: str) -> tuple:
+    """(단위 붙은 값 {(값, 단위)}, 맨 숫자 값 {값}). 날짜·조문 번호(제N조·별표 N·목록 번호)는 뺍니다."""
+    t = _CN_REF_RE.sub(" ", _DATE_RE.sub(" ", text or ""))
+    with_unit = set()
+    for n, u in _CN_UNIT_RE.findall(t):
+        u = u.replace(" ", "")
+        v = _cn_num(n)
+        if u in _CN_UNIT_MUL:
+            v, u = v * _CN_UNIT_MUL[u], "원"
+        with_unit.add((round(v, 4), _CN_UNIT_ALIAS.get(u, u)))
+    bare = {round(_cn_num(n), 4) for n in _CN_NUM_RE.findall(t)}
+    return with_unit, bare
+
+
+def _concl_num_mismatch(text: str) -> str:
+    """
+    ★ v1.65 (A3) — 【결론】의 '숫자+단위'(만원·dB·%·년·개월·일·kg·㎡·리터·명 …) 가 답변의 나머지 어디에도 없으면 그 값.
+      11-17 [R18]: 결론 "300만원 이하의 과태료" / 근거·설명 "200만원" 인데 판정 낱말·날짜 검사만 있어 그대로 나갔음.
+      합산값(15,000+10,000=25,000)·표기 차이(68dB(A))로 생기는 헛경고를 줄이려고, 같은 숫자가 단위 없이라도
+      나머지에 있으면 통과시킵니다. 결론을 고쳐 쓰게 하지는 않고 화면 경고와 결론 병합 거부에만 씁니다.
+    """
+    m = _CONCL_BLOCK_RE.search(text or "")
+    if not m:
+        return ""
+    rest = text[:m.start()] + text[m.end():]
+    r_unit, r_bare = _num_values(rest)
+    if not r_unit and not r_bare:
+        return ""
+    r_vals = {v for v, _ in r_unit} | r_bare
+    c_unit, _ = _num_values(m.group(0))
+    for v, u in sorted(c_unit):
+        raw = v / _CN_UNIT_MUL["만원"] if u == "원" and v >= 10000 else None
+        if (v, u) in r_unit or v in r_vals or (raw is not None and round(raw, 4) in r_vals):
+            continue
+        if u == "원" and v >= 10000 and v % 10000 == 0:
+            return f"{v / 10000:,.0f}만원"
+        return f"{v:,.4g}{u}" if v < 10000 else f"{v:,.0f}{u}"
+    return ""
 
 
 def _concl_conflict(text: str) -> str:
@@ -587,7 +654,7 @@ SELECT_ARTICLES = os.getenv("SELECT_ARTICLES", "1") not in ("0", "false", "False
 # 조회 후 지자체기관명으로 한 번 더 걸러냅니다.
 LOCAL_GOV = os.getenv("LOCAL_GOV", "성남시").strip()
 
-VERSION = "1.61"
+VERSION = "1.65"
 
 app = FastAPI(title="법령 조회 도우미", version=VERSION)
 
@@ -955,6 +1022,33 @@ def _bp_used_as_basis(text: str) -> set:
         if nxt and not _BP_RE.search(nxt) and _bp_num(nxt) \
                 and not any(w in nxt for w in _BP_NEGATIVE):
             out.update(found)
+    return out
+
+
+_BP_CITE_RE = re.compile(r"「([^」]{2,60})」\s*\[?\s*(별표|별지)\s*(\d+)(?:\s*의\s*(\d+))?")
+
+
+def _bp_cited_keys(text: str, laws: list) -> list:
+    """
+    ★ v1.64 — 답변이 든 별표·별지를 "법령명|별표 N" 꼴로. 화면의 조문 원문 칸이 인용된 조문만 펼쳐 보여주는데,
+      cited_keys 에는 '제N조' 인용만 있어 답이 기댄 별표(소음 별표 8 등)가 '전체 조문 보기' 안에 접혀 있었습니다.
+      법령명이 붙은 인용(「…」 별표 N)과 수치 근거로 쓰인 별표(`_bp_used_as_basis`)만 셉니다. 수집한 법령 이름일 때만.
+    """
+    names = {_norm(l.get("name", "")): l.get("name", "") for l in laws or []}
+    out = []
+    for m in _BP_CITE_RE.finditer(str(text or "")):
+        nm = names.get(_norm(m.group(1)))
+        if nm:
+            k = f"{nm}|{m.group(2)} {m.group(3)}" + (f"의{m.group(4)}" if m.group(4) else "")
+            if k not in out:
+                out.append(k)
+    try:
+        for kind, no, law in _bp_used_as_basis(text):
+            nm = names.get(_norm(law)) if law else ""
+            if nm and f"{nm}|{kind} {no}" not in out:
+                out.append(f"{nm}|{kind} {no}")
+    except Exception:                                     # noqa: BLE001
+        pass
     return out
 
 
@@ -1360,6 +1454,7 @@ class PdfRequest(BaseModel):
     answer: str = ""
     citations: list = []
     laws: list = []
+    cited_keys: list = []       # v1.64 — 있으면 '조문 원문' 에 인용된 조문·별표만
 
 
 @app.post("/api/pdf")
@@ -1399,6 +1494,7 @@ def api_version():
     """
     return {
         "version": VERSION,
+        "ui": _ui_version(),
         "llm": {
             "server": ai_client.LOCAL_SERVER,
             "model": ai_client.LOCAL_MODEL,
@@ -1407,9 +1503,27 @@ def api_version():
     }
 
 
+_UI_VER = {"mtime": None, "v": ""}
+
+
+def _ui_version() -> str:
+    """★ v1.64 — 디스크의 static/index.html 에 적힌 UI_VERSION. 화면이 자기 값과 비교해 브라우저 캐시를 알아챕니다."""
+    p = os.path.join(os.path.dirname(os.path.abspath(__file__)), "static", "index.html")
+    try:
+        mt = os.path.getmtime(p)
+        if _UI_VER["mtime"] != mt:
+            with open(p, encoding="utf-8", errors="ignore") as fp:
+                m = re.search(r'const\s+UI_VERSION\s*=\s*"([^"]+)"', fp.read())
+            _UI_VER.update(mtime=mt, v=m.group(1) if m else "")
+    except OSError:
+        return ""
+    return _UI_VER["v"]
+
+
 @app.get("/")
 def index():
-    return FileResponse("static/index.html")
+    # ★ v1.64 — 매번 서버에 새 판이 있는지 묻게(no-cache: 바뀌지 않았으면 304 로 가볍게 끝남)
+    return FileResponse("static/index.html", headers={"Cache-Control": "no-cache"})
 
 
 @app.get("/api/search")
@@ -1535,6 +1649,27 @@ async def api_ask(req: AskRequest):
 _DOTS_RE = re.compile(r"[·ㆍ・‧∙]")
 
 
+AI_Q_SHORT = 50
+
+
+ANSWER_FIRST_HINT = ("\n(확인 항목은 질문자가 아직 모른다. 【결론】은 원칙(조문 본칙에 따른 일반적인 경우)을 먼저 쓰고, "
+                     "예외·제외는 '다만 ○○이면 …' 으로 이어서 두 경우를 모두 쓴다. "
+                     "예외에 해당하는 경우 한쪽만 결론으로 쓰지 않는다)")
+
+
+def _ai_query(question: str, prev_question: str = "") -> str:
+    """
+    ★ v1.65 (A1) — 지능형 검색에 보낼 문장. 이어 묻기이고 질문이 짧으면(AI_Q_SHORT 자 미만) 앞 질문을 앞에 붙입니다.
+      "그럼 그 검사를 안 받으면 어떻게 돼?" 만으로는 무슨 검사인지 몰라 엉뚱한 법(자동차관리법)이 1위로 나왔음(11-17 [R18]).
+      긴 질문은 그 자체로 뜻이 서므로 그대로 둡니다.
+    """
+    q = (question or "").strip()
+    pq = re.sub(r"\s+", " ", (prev_question or "").strip())[:120]
+    if pq and len(q) < AI_Q_SHORT:
+        return f"{pq} {q}"
+    return q
+
+
 def _law_key(name: str) -> str:
     """법령명 비교용 키. 공백·가운뎃점(· / ㆍ)·하위법령 꼬리(시행령/시행규칙)를 뗍니다."""
     n = re.sub(r"\s*(시행령|시행규칙)$", "", str(name or "").strip())
@@ -1548,7 +1683,11 @@ def _stmd_rows(name: str, errs: list | None = None) -> list:
     AI 는 보통 ·(가운뎃점)으로 적습니다.
     ★ v1.45 (C-20261028-19) — errs 를 주면 법제처 호출 오류를 거기에 담습니다('0건' 과 '오류' 구분용).
     """
-    tried = []
+    ck = ("stmd", name)
+    hit = _cache_get(ck)
+    if hit is not None:
+        return list(hit)
+    tried, had_err = [], False
     for q in (name, name.replace("·", "ㆍ"), name.replace("ㆍ", "·"), _DOTS_RE.sub("", name)):
         if not q or q in tried:
             continue
@@ -1557,10 +1696,14 @@ def _stmd_rows(name: str, errs: list | None = None) -> list:
             rows = law_client.search("lsStmd", q)
         except law_client.LawApiError as e:
             rows = []
+            had_err = True
             if errs is not None:
                 errs.append(str(e))
         if rows:
+            _cache_put(ck, rows)
             return rows
+    if not had_err:
+        _cache_put(ck, [])          # '없음' 도 기억(오류로 못 받은 것은 기억하지 않음 — 다음에 다시)
     return []
 
 
@@ -2276,6 +2419,14 @@ def _ask_sync(req: AskRequest, progress: list):
             steps.append({"name": "검색어 변환", "detail": _t_old})
         return _ask_after_search(req, steps, answered, found, flat, catalog, refs, it, ai_hits)
 
+    _ai_first = None
+    ai_q = _ai_query(req.question, req.prev_question)
+    if req.target in ("auto", "law"):
+        # ★ v1.62 — 지능형 검색 첫 시도는 질문 원문만 쓰므로 검색어 변환(LLM)을 기다릴 필요가 없습니다. 미리 보내 둡니다.
+        from concurrent.futures import ThreadPoolExecutor
+        _aix = ThreadPoolExecutor(max_workers=1)
+        _ai_first = _aix.submit(law_client.ai_search, ai_q, 20)
+        _aix.shutdown(wait=False)
     try:
         terms = ai_client.extract_terms(req.question + (f"\n(조건: {answered})" if answered else ""))
     except ai_client.AiError as e:
@@ -2291,18 +2442,21 @@ def _ask_sync(req: AskRequest, progress: list):
     ai_titles: dict = {}
     if req.target in ("auto", "law"):
         ai_rows = []
-        tries = [(req.question, 0.0), (req.question, 1.0), (req.question, 3.0)]
+        tries = [(ai_q, 0.0), (ai_q, 1.0), (ai_q, 3.0)]
         if words:
             tries.append((" ".join(words[:3]), 0.0))
         n_empty = 0
         n_err = 0
         for attempt, (aq, wait) in enumerate(tries, 1):
-            if aq == req.question and n_empty >= 2:
+            if aq == ai_q and n_empty >= 2:
                 continue
             if wait:
                 time.sleep(wait)
             try:
-                ai_rows = law_client.ai_search(aq, display=20)
+                if attempt == 1 and _ai_first is not None:
+                    ai_rows = _ai_first.result()
+                else:
+                    ai_rows = law_client.ai_search(aq, display=20)
                 if not ai_rows:
                     n_empty += 1
             except Exception as e:                          # noqa: BLE001
@@ -2310,7 +2464,7 @@ def _ask_sync(req: AskRequest, progress: list):
                 n_err += 1
                 applog.warn(f"지능형 검색 실패({attempt}차): {e}")
             if ai_rows:
-                if aq != req.question:
+                if aq != ai_q:
                     steps.append({"name": "지능형 검색(용어)", "detail": f"질문 원문으로 결과가 없어 '{aq}' 로 찾음"})
                 break
         score, first = {}, {}
@@ -2663,10 +2817,16 @@ def _ask_sync(req: AskRequest, progress: list):
             hits_info: dict[str, int] = {}
             info_words, weak_words = [], []
             if words:
-                for w in words[:3]:
+                def _body_search(w):
                     try:
-                        rows = law_client.search(LAW_T, w, display=100, scope=2)
+                        return law_client.search(LAW_T, w, display=100, scope=2)
                     except law_client.LawApiError:
+                        return None
+                from concurrent.futures import ThreadPoolExecutor
+                with ThreadPoolExecutor(max_workers=3) as _bx:
+                    _brows = list(_bx.map(_body_search, words[:3]))     # ★ v1.62 — 차례로 받던 것을 동시에(순서는 그대로)
+                for w, rows in zip(words[:3], _brows):
+                    if rows is None:
                         continue
                     if not rows:
                         continue
@@ -2760,6 +2920,16 @@ def _ask_sync(req: AskRequest, progress: list):
             cand_limit = max(LAW_CANDIDATES, len(user_resolved) + 1)
         else:
             cand_limit = max(LAW_CANDIDATES, len(asp_plan)) + len(extra_pick)
+        if user_resolved and ai_hits:
+            # ★ v1.65 (A1) — 사용자가 고른(또는 앞 답에서 이어 받은) 법령이 있으면, 지능형 검색 조문 중 그 법령군 것만
+            #   '맨 앞·보호' 대상으로 둡니다. 11-17 [R18] 이어 묻기: "그럼 그 검사를 안 받으면?" 만으로 검색해
+            #   자동차관리법 조문이 토양환경보전법보다 앞에 들어갔음. 다른 법 조문도 선별에서는 여전히 고를 수 있습니다.
+            _uk = {_law_key(u) for u in user_resolved}
+            _drop = [h for h in ai_hits if _law_key(h[0]) not in _uk]
+            if _drop:
+                ai_hits = [h for h in ai_hits if _law_key(h[0]) in _uk]
+                steps.append({"name": "지능형 검색 조문 제한",
+                              "detail": f"지정 법령({', '.join(user_resolved)}) 밖의 조문 {len(_drop)}개는 우선 넣지 않습니다"})
         stmd_ok, stmd_fail = 0, []
         for nm in cand:
             if stmd_ok >= cand_limit:
@@ -3068,30 +3238,6 @@ def _ask_after_search(req, steps, answered, found, flat, catalog, refs, it=None,
         if picked:
             _cache_put(sel_key, [_akey(f, a) for f, a in picked])
 
-    if picked and rag_select.enabled("select"):
-        _tw_rag = next((s_.get("detail", {}).get("용어", []) for s_ in steps
-                        if s_.get("name") == "검색어 변환" and isinstance(s_.get("detail"), dict)), [])
-        picked, _rag_info = rag_select.augment(req.question, answered or "", flat, picked, _akey,
-                                               label_fn=lambda f_, a_: _ctx_key(f_, a_), terms=_tw_rag)
-        if _rag_info:
-            steps.append(_rag_info)
-    if picked and ai_ext.enabled():
-        try:
-            _x_notes = []
-            if req.round > 0 and answered:
-                picked, _xa = ai_ext.merge(picked, ai_ext.answer_hits(req.question, answered, flat), _akey, front=True)
-                if _xa:
-                    _x_notes.append("답 반영 재검색 " + ", ".join(_ctx_key(f, a) for f, a in _xa))
-            picked, _xb = ai_ext.merge(picked, ai_ext.admrul_hits(req.question, flat), _akey, front=False)
-            if _xb:
-                _x_notes.append("행정규칙 " + ", ".join(_ctx_key(f, a) for f, a in _xb))
-            picked, _xc = ai_ext.merge(picked, ai_ext.byl_hits(req.question, flat), _akey, front=False)
-            if _xc:
-                _x_notes.append("별표 " + ", ".join(_ctx_key(f, a) for f, a in _xc))
-            if _x_notes:
-                steps.append({"name": "지능형 검색 보강", "detail": " / ".join(_x_notes)})
-        except Exception as e:                            # noqa: BLE001
-            applog.warn(f"지능형 검색 보강 실패 — 건너뜁니다: {e}")
     use = list(picked or flat)
 
 
@@ -3176,13 +3322,6 @@ def _ask_after_search(req, steps, answered, found, flat, catalog, refs, it=None,
             use = use + children
             steps.append({"name": "위임 조문 자동 포함",
                           "detail": ", ".join(_ctx_key(f, a) for f, a in children)})
-
-        if rag_select.enabled("refs"):
-            _refs = rag_select.ref_expand(use, flat, have_k)
-            if _refs:
-                use = use + _refs
-                steps.append({"name": "참조 조문 자동 포함(v1.41)",
-                              "detail": ", ".join(_ctx_key(f, a) for f, a in _refs)})
 
     def _bp_no(a):
         """별표 항목에서 번호를 뽑습니다. 조문제목이 '[별표 4] …' 형태입니다."""
@@ -3275,15 +3414,18 @@ def _ask_after_search(req, steps, answered, found, flat, catalog, refs, it=None,
             for f in found:
                 by_name.setdefault(f["name"], f)
             fetched = []
+            _byl_rows: dict = {}     # ★ v1.62 — 같은 법령의 별표 목록을 별표마다 다시 받지 않게
             for law_name, kind, no in still:
                 f = by_name.get(law_name)
                 if not f:
                     continue
-                try:
-                    rows = law_client.get_byeolpyo(
-                        f.get("target", "law"), f.get("mst") or f.get("id", ""), law_name)
-                except Exception:
-                    rows = []
+                if law_name not in _byl_rows:
+                    try:
+                        _byl_rows[law_name] = law_client.get_byeolpyo(
+                            f.get("target", "law"), f.get("mst") or f.get("id", ""), law_name)
+                    except Exception:
+                        _byl_rows[law_name] = []
+                rows = _byl_rows[law_name]
                 row = next((r for r in rows
                             if (r.get("no", "") + (f"의{r['gaji']}" if r.get("gaji") else "")) == no
                             and (r.get("kind") or "별표") == kind), None)
@@ -3401,9 +3543,6 @@ def _ask_after_search(req, steps, answered, found, flat, catalog, refs, it=None,
         prim = [u for u in units if not _is_bp(u)]
         bps = [u for u in units if _is_bp(u)]
         order = prim[:8] + bps[:4] + prim[8:] + bps[4:]
-        if rag_select.enabled("clarify"):
-            order = rag_select.order_for_clarify(req.question, answered or "", prim, bps) or order
-            steps.append({"name": "되묻기 근거 유사도 정렬(v1.41)", "detail": " / ".join(_ctx_key(f_, a_) for f_, a_, _ in order[:4])})
         parts, used = [], 0
         for f, a, txt in order:
             piece = _fit_keep_notes(txt, CLARIFY_BP_CHARS if _is_bp((f, a, txt)) else CLARIFY_ART_CHARS,
@@ -3490,6 +3629,11 @@ def _ask_after_search(req, steps, answered, found, flat, catalog, refs, it=None,
     if _asp:
         _hint += ("\n(이 질문은 여러 측면을 함께 묻는다: " + " / ".join(f"{i + 1}) {q}" for i, q in enumerate(_asp))
                   + " — 【결론】과 【설명】에서 측면마다 근거 조문을 들어 나눠 답한다. 조문이 없는 측면은 그렇다고 밝힌다)")
+    if _pending:
+        # ★ v1.65 (A2) — 먼저 답하고 묻기: 확인 항목을 '모름' 으로 두고 답하므로 원칙 → 예외 순서를 못 박습니다.
+        #   11-17 [R15] 폐기물처리업: 결론이 "…재활용하는 경우라면 허가가 필요하지 않습니다" 예외 한 줄뿐이라
+        #   질문자는 '허가 불필요' 로 읽게 됨. 원칙(허가 필요)은 설명 1번에야 나왔음.
+        _hint += ANSWER_FIRST_HINT
     try:
         _hint += _history_block(req.question, use, prio, bp_kw, steps, answered or "")
     except Exception as e:                                # noqa: BLE001
@@ -3527,14 +3671,14 @@ def _ask_after_search(req, steps, answered, found, flat, catalog, refs, it=None,
     q_for_answer = req.question + (f"\n(확인된 조건: {answered})" if answered else "") + _hint
     ctx_n = ai_client.server_ctx()
     overhead = ai_client.count_tokens(
-        ai_client.ANSWER_PROMPT.format(question=q_for_answer, context=""))
+        ai_client.answer_prompt(q_for_answer, ""))
     budget = min(CTX_BUDGET_MAX, ctx_n - overhead - min(ai_client.MAXTOK_ANSWER, ANSWER_RESERVE) - 96)
     if budget < MIN_CTX_BUDGET and _hint:
         _ht = ai_client.count_tokens(_hint) or 1
         _keep_r = max(0.0, (_ht - (MIN_CTX_BUDGET - budget) * 1.1) / _ht)
         _hint = _hint[:int(len(_hint) * _keep_r)] + ("\n…(참고 블록 분량 제한으로 생략)" if _keep_r < 1 else "")
         q_for_answer = req.question + (f"\n(확인된 조건: {answered})" if answered else "") + _hint
-        overhead = ai_client.count_tokens(ai_client.ANSWER_PROMPT.format(question=q_for_answer, context=""))
+        overhead = ai_client.count_tokens(ai_client.answer_prompt(q_for_answer, ""))
         budget = min(CTX_BUDGET_MAX, ctx_n - overhead - min(ai_client.MAXTOK_ANSWER, ANSWER_RESERVE) - 96)
         steps.append({"name": "참고 블록 축소", "detail": f"조문 예산 확보 — 덧붙임 {_ht:,}토큰 중 {int(_keep_r * 100)}% 남김"})
 
@@ -3622,6 +3766,12 @@ def _ask_after_search(req, steps, answered, found, flat, catalog, refs, it=None,
     except ai_client.AiError as e:
         return _err(str(e))
     _trunc = applog.last_finish("answer") == "length"
+    if ai_client.ANSWER_CONCL_LAST and "【결론】" not in text and len(text) > 80:
+        # ★ v1.63 — 결론을 맨 끝에 쓰게 한 뒤로, 출력이 잘리거나 빠뜨리면 【결론】이 없을 수 있습니다. 본문으로 만들어 붙입니다.
+        _c0 = ai_client.fix_conclusion(req.question + (f"\n(확인된 조건: {answered})" if answered else ""), text.strip())
+        if _c0:
+            text = _c0 + "\n\n" + text.strip()
+            steps.append({"name": "결론 보충", "detail": "답에 【결론】이 없어 본문 판정으로 만들어 붙임"})
     if _neg and "【결론】" in text:
         pre = text[:text.index("【결론】")]
         if pre.strip() and re.search(r"제공된\s*(\[?조문|원문)", pre):
@@ -3656,7 +3806,8 @@ def _ask_after_search(req, steps, answered, found, flat, catalog, refs, it=None,
                 if "【결론】" in text2 and len(text2) > 80 and "【근거】" in text2 and _c2 >= max(1, _c1 // 2) and _keep_secs:
                     text, _trunc = text2, _trunc2
                 elif any(p.get("kind") == "결론모순" for p in probs) and _merge_conclusion(text, text2) \
-                        and not _concl_conflict(_merge_conclusion(text, text2)):
+                        and not _concl_conflict(_merge_conclusion(text, text2)) \
+                        and not _concl_num_mismatch(_merge_conclusion(text, text2)):
                     text = _merge_conclusion(text, text2)
                     probs = [dict(p, kind=p["kind"] + "(결론만 반영)") for p in probs]
                 else:
@@ -3688,6 +3839,11 @@ def _ask_after_search(req, steps, answered, found, flat, catalog, refs, it=None,
     if _vc_final:
         warnings.append("답변의 【결론】과 계산·설명의 판정이 서로 다릅니다. 근거 조문 원문과 수치로 직접 확인하세요.")
         steps.append({"name": "결론 불일치 경고", "detail": _vc_final[:60]})
+    else:
+        _nm = _concl_num_mismatch(text)
+        if _nm:
+            warnings.append(f"【결론】의 수치({_nm})가 근거·계산·설명에 나오지 않습니다. 근거 조문 원문의 수치로 확인하세요.")
+            steps.append({"name": "결론 수치 확인 필요", "detail": f"{_nm} — 본문에 없는 값"})
 
     cites = verify_citations(text, found)
     steps.append({"name": "인용 검증", "detail": f"{sum(1 for c in cites if c['ok'])}/{len(cites)}건 확인"})
@@ -3743,7 +3899,7 @@ def _ask_after_search(req, steps, answered, found, flat, catalog, refs, it=None,
     return {
         "steps": steps, "answer": text, "laws": _laws_by_cites(found, cites), "citations": cites,
         "cases": cases,
-        "cited_keys": [f"{n}|{j}|{g}" for n, j, g in hit],
+        "cited_keys": [f"{n}|{j}|{g}" for n, j, g in hit] + _bp_cited_keys(text, found),
         "references": [r for r, _ in sorted(refs.items(), key=lambda x: -x[1])][:12],
         "warnings": warnings,
         "intent": it.as_dict(),

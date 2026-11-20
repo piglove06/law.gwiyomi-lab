@@ -467,6 +467,117 @@ class VerdictConflict(unittest.TestCase):
         self.assertIn("【설명】\n1. 기준 65dB.", got)
 
 
+class SlimReport(unittest.TestCase):
+    def test_keeps_context_and_cited_only(self):
+        data = {"debug": {"context_keys": ["가법 제3조", "가법 시행규칙 [별표 8] 기준(제20조 관련)"]},
+                "cited_keys": ["가법|5|"],
+                "laws": [{"name": "가법", "id": "1", "delegated": {"x": 1}, "articles": [
+                             {"조문번호": "3", "조문내용": "a"}, {"조문번호": "4", "조문내용": "b"},
+                             {"조문번호": "5", "조문내용": "c"}, {"조문번호": "3", "조문가지번호": "2", "조문내용": "d"}]},
+                         {"name": "가법 시행규칙", "articles": [
+                             {"조문번호": "", "조문제목": "[별표 8] 기준(제20조 관련)", "조문내용": "표"},
+                             {"조문번호": "", "조문제목": "[별표 9] 다른 것", "조문내용": "표"}]}]}
+        got = eval_run._slim_laws(data)
+        self.assertEqual([a["조문내용"] for a in got[0]["articles"]], ["a", "c"])
+        self.assertEqual(got[0]["articles_total"], 4)
+        self.assertNotIn("delegated", got[0])
+        self.assertEqual([a["조문제목"][:6] for a in got[1]["articles"]], ["[별표 8]"])
+
+
+class ScreenFixes(unittest.TestCase):
+    """v1.64 — 화면: 답이 기댄 별표를 펼쳐 보이게, 버전 표시가 늘 빨갛던 것."""
+
+    def test_cited_appendix_keys(self):
+        laws = [{"name": "소음ㆍ진동관리법 시행규칙"}, {"name": "토양환경보전법 시행규칙"}]
+        t = ("【근거】\n「소음ㆍ진동관리법 시행규칙」 별표 8 | 주거지역 공사장 주간 **65dB** 이하\n"
+             "「토양환경보전법 시행규칙」 [별표 3의2] | 권장 기준\n「없는법 시행규칙」 별표 1 | x")
+        self.assertEqual(main._bp_cited_keys(t, laws),
+                         ["소음ㆍ진동관리법 시행규칙|별표 8", "토양환경보전법 시행규칙|별표 3의2"])
+
+    def test_pdf_keeps_only_cited_articles(self):
+        import pdf_maker
+        law = {"name": "가법 시행규칙", "articles": [
+            {"조문번호": "20", "조문내용": "제20조 본문"}, {"조문번호": "21", "조문내용": "제21조 본문"},
+            {"조문번호": "", "조문제목": "[별표 8] 기준", "조문내용": "표"},
+            {"조문번호": "", "조문제목": "[별표 3의2] 다른 표", "조문내용": "표"}]}
+        self.assertEqual([pdf_maker.cite_key(law, a) for a in law["articles"]],
+                         ["가법 시행규칙|20|", "가법 시행규칙|21|", "가법 시행규칙|별표 8", "가법 시행규칙|별표 3의2"])
+        html = open(os.path.join(HERE, "static", "index.html"), encoding="utf-8").read()
+        self.assertIn("cited_keys: data.cited_keys", html)
+        self.assertIn("cited_keys", main.PdfRequest.model_fields)
+
+    def test_ui_version_read_from_page(self):
+        html = open(os.path.join(HERE, "static", "index.html"), encoding="utf-8").read()
+        self.assertTrue(main._ui_version())
+        self.assertIn(f'const UI_VERSION = "{main._ui_version()}"', html)
+        self.assertIn("d.ui && d.ui !== UI_VERSION", html)
+        self.assertIn("function citeKey", html)
+
+
+class ConclusionLast(unittest.TestCase):
+    """v1.63 — 결론을 맨 끝에 쓰게 하고 화면에는 맨 위로 옮깁니다."""
+
+    def test_moved_to_front_and_body_kept(self):
+        t = "【적용 조건】\n- 시설: x\n\n【계산】\n판정: 초과하지 않음\n\n【설명】\n1. z\n\n【결론】\n규제기준을 초과하지 않습니다."
+        got = ai_client.conclusion_first(t)
+        self.assertTrue(got.startswith("【결론】\n규제기준을 초과하지 않습니다."))
+        for part in ("【적용 조건】\n- 시설: x", "【계산】\n판정: 초과하지 않음", "【설명】\n1. z"):
+            self.assertIn(part, got)
+        self.assertEqual(got.count("【결론】"), 1)
+
+    def test_already_first_or_missing_unchanged(self):
+        for t in ("【결론】\n앞\n\n【근거】\nx", "결론 없는 답"):
+            self.assertEqual(ai_client.conclusion_first(t), t)
+
+    def test_old_order_prompt_unchanged_and_new_order_puts_conclusion_last(self):
+        keep = ai_client.ANSWER_CONCL_LAST
+        try:
+            ai_client.ANSWER_CONCL_LAST = False
+            old = ai_client.answer_prompt("Q", "C")
+            ai_client.ANSWER_CONCL_LAST = True
+            new = ai_client.answer_prompt("Q", "C")
+        finally:
+            ai_client.ANSWER_CONCL_LAST = keep
+        head = lambda p: p[p.index("━━ 답변 형식"):]
+        self.assertLess(head(old).index("【결론】"), head(old).index("【근거】"))
+        self.assertGreater(head(new).rindex("【결론】\n질문에"), head(new).index("【설명】"))
+        self.assertNotIn("{", old.replace("{question}", "").replace("{context}", "")[:50])
+
+
+class HierarchyLookupCache(unittest.TestCase):
+    """법령 체계도 검색(_stmd_rows)을 한 질문 안에서 여러 번 부르던 것을 10분 기억합니다(v1.62)."""
+
+    def test_same_name_hits_api_once_and_errors_not_cached(self):
+        calls = []
+        keep = law_client.search
+
+        def fake(target, q, *a, **k):
+            calls.append(q)
+            if q.startswith("오류"):
+                raise law_client.LawApiError("x")
+            return [{"법령명": q}] if q.startswith("있는") else []
+        law_client.search = fake
+        try:
+            for nm in ("있는법zz", "없는법zz", "오류법zz"):
+                main._SEARCH_CACHE.pop(("stmd", nm), None)
+            self.assertEqual(main._stmd_rows("있는법zz"), [{"법령명": "있는법zz"}])
+            self.assertEqual(main._stmd_rows("있는법zz"), [{"법령명": "있는법zz"}])
+            self.assertEqual(calls.count("있는법zz"), 1)
+            main._stmd_rows("없는법zz")
+            n = len(calls)
+            main._stmd_rows("없는법zz")
+            self.assertEqual(len(calls), n)
+            errs = []
+            main._stmd_rows("오류법zz", errs)
+            main._stmd_rows("오류법zz", errs)
+            self.assertEqual(calls.count("오류법zz"), 2)
+            self.assertEqual(len(errs), 2)
+        finally:
+            law_client.search = keep
+            for nm in ("있는법zz", "없는법zz", "오류법zz"):
+                main._SEARCH_CACHE.pop(("stmd", nm), None)
+
+
 class ConclusionDates(unittest.TestCase):
     """11-17 v1.60 누출검사: 다시 쓴 답에서 【결론】만 가져와 결론 날짜가 계산과 달라졌음."""
     BODY = ("【적용 조건】\n- 설치일: 2010년 3월 15일\n- 첫 누출검사: 2020년 8월 20일\n\n"
@@ -599,6 +710,71 @@ class LawClient(unittest.TestCase):
         r = subprocess.run([sys.executable, "test_law_client_patch.py"], cwd=HERE,
                            capture_output=True, text=True, encoding="utf-8", errors="replace")
         self.assertEqual(r.returncode, 0, r.stdout[-800:])
+
+
+
+class V165FollowUpSearch(unittest.TestCase):
+    """v1.65 A1 — 짧은 이어 묻기는 앞 질문을 붙여 지능형 검색 (11-17 [R18])."""
+
+    def test_short_follow_up_gets_prev_question(self):
+        q = main._ai_query("그럼 그 검사를 안 받으면 어떻게 돼?", "주유소 지하 저장탱크 누출검사 주기는?")
+        self.assertEqual(q, "주유소 지하 저장탱크 누출검사 주기는? 그럼 그 검사를 안 받으면 어떻게 돼?")
+
+    def test_long_or_new_question_unchanged(self):
+        long_q = "공장에서 하루 20톤의 폐합성수지를 재활용하려는데 폐기물처리업 허가가 필요한지 알고 싶습니다"
+        self.assertEqual(main._ai_query(long_q, "앞 질문"), long_q)
+        self.assertEqual(main._ai_query("누출검사 주기는?", ""), "누출검사 주기는?")
+
+
+class V165VerdictNegation(unittest.TestCase):
+    """v1.65 A9 — 판정 낱말에 붙은 부정만 셈."""
+
+    @staticmethod
+    def _t(concl, later):
+        return f"【결론】 {concl}\n【계산】\n- 판정: {later}\n【설명】 x"
+
+    def test_unrelated_eopseum_is_not_negation(self):
+        self.assertEqual(main._verdict_conflict(self._t("신고 대상입니다.", "제외 규정이 없으므로 신고 대상이다")), "")
+        self.assertEqual(main._verdict_conflict(self._t("초과 여부와 관계없이 신고 대상입니다.", "신고 대상이다")), "")
+
+    def test_real_conflicts_still_caught(self):
+        self.assertTrue(main._verdict_conflict(self._t("기준을 초과합니다.", "68dB < 70dB 이므로 초과하지 않음")))
+        self.assertTrue(main._verdict_conflict(self._t("허가 대상이 아닙니다.", "업으로 하지 않으므로 허가 대상이다")))
+        self.assertTrue(main._verdict_conflict(self._t("규제기준 미초과입니다.", "기준 초과")))
+        self.assertTrue(main._verdict_conflict(self._t("허가가 필요 없습니다.", "허가 필요")))
+
+
+class V165ConclusionNumbers(unittest.TestCase):
+    """v1.65 A3 — 결론의 수치가 본문에 없으면 잡음 (11-17 [R18] 300만원 vs 200만원)."""
+
+    def test_amount_mismatch(self):
+        t = ("【결론】 300만원 이하의 과태료가 부과됩니다.\n【근거】 제90조 200만원 이하의 과태료\n"
+             "【설명】 1차 100만원, 2차 150만원, 3차 200만원")
+        self.assertEqual(main._concl_num_mismatch(t), "300만원")
+
+    def test_db_mismatch(self):
+        self.assertEqual(main._concl_num_mismatch("【결론】 60dB 이하입니다.\n【계산】 65dB, 70dB > 65dB"), "60dB")
+
+    def test_no_false_alarm(self):
+        for t in ("【결론】 합계 25,000리터로 신고 대상입니다.\n【계산】 15,000 + 10,000 = 25,000",
+                  "【결론】 68dB(A) 로 초과합니다.\n【계산】 측정 68 dB, 기준 65dB",
+                  "【결론】 2028년 8월 20일까지 검사를 받아야 합니다.\n【계산】 2020년 8월 20일 + 8년",
+                  "【결론】 300만원 이하 과태료\n【근거】 3,000,000원 이하의 과태료",
+                  "【결론】 해당합니다.\n【근거】 제3조"):
+            self.assertEqual(main._concl_num_mismatch(t), "", t)
+
+
+class V165AnswerFirstHint(unittest.TestCase):
+    """v1.65 A2 — 먼저 답하고 묻기에서 원칙 → 예외 순서 지시."""
+
+    def test_hint_text(self):
+        self.assertIn("원칙", main.ANSWER_FIRST_HINT)
+        self.assertIn("다만", main.ANSWER_FIRST_HINT)
+        self.assertIn("한쪽만 결론으로 쓰지 않는다", main.ANSWER_FIRST_HINT)
+
+    def test_hint_wired_when_pending(self):
+        src = open(os.path.join(HERE, "main.py"), encoding="utf-8").read()
+        self.assertRegex(src, r"if _pending:\s*\n(?:\s*#.*\n)*\s*_hint \+= ANSWER_FIRST_HINT")
 
 
 if __name__ == "__main__":

@@ -395,6 +395,41 @@ def grade(case: dict, data: dict) -> dict:
             "total": len(checks)}
 
 
+_BP_HEAD = re.compile(r"^\[(별표|별지|서식)\s*(\d+(?:의\d+)?)\]")
+
+
+def _slim_laws(data: dict) -> list:
+    """
+    ★ v1.64 — 보고서 JSON 에 싣는 법령 조문을 줄입니다. 답변 근거에 들어간 조문(debug.context_keys)과
+      답변이 인용한 조문·별표(cited_keys)만 남기고 나머지는 이름·번호만 둡니다.
+      예전에는 검색한 법령의 조문 전부(문항당 300~750개)를 indent 붙여 저장해 보고서 하나가 40~70MB 였고,
+      _eval 폴더(OneDrive 바탕화면)에 수 GB 가 쌓였습니다. 다시 돌려 보는 분석(인용 검증·근거 대조)에는 남긴 것으로 충분합니다.
+    """
+    norm = lambda x: re.sub(r"\s+", "", str(x or ""))
+    ctx = {norm(k) for k in ((data.get("debug") or {}).get("context_keys") or [])}
+    cited = set(data.get("cited_keys") or [])
+    out = []
+    for law in data.get("laws") or []:
+        if not isinstance(law, dict):
+            continue
+        name = law.get("name", "")
+        keep = []
+        for a in law.get("articles") or []:
+            no, gaji = str(a.get("조문번호") or ""), str(a.get("조문가지번호") or "")
+            m = _BP_HEAD.match(str(a.get("조문제목") or ""))
+            if no:
+                ck = norm(f"{name} 제{no}조" + (f"의{gaji}" if gaji else ""))
+                key = f"{name}|{no}|{gaji}"
+            else:
+                ck = norm(f"{name} [{m.group(1)} {m.group(2)}]") if m else ""
+                key = f"{name}|{m.group(1)} {m.group(2)}" if m else ""
+            if key in cited or (ck and any(c.startswith(ck) for c in ctx)):
+                keep.append(a)
+        out.append({**{k: v for k, v in law.items() if k not in ("articles", "delegated")},
+                    "articles": keep, "articles_total": len(law.get("articles") or [])})
+    return out
+
+
 def write_report(results: list, base: str) -> str:
     os.makedirs(OUTDIR, exist_ok=True)
     stamp = datetime.now().strftime("%Y%m%d_%H%M%S")
@@ -509,8 +544,9 @@ def write_report(results: list, base: str) -> str:
 
     with open(md_path, "w", encoding="utf-8") as f:
         f.write("\n".join(L))
+    slim = [{**r, "data": {**r["data"], "laws": _slim_laws(r["data"])}} for r in results]
     with open(js_path, "w", encoding="utf-8") as f:
-        json.dump(results, f, ensure_ascii=False, indent=2)
+        json.dump(slim, f, ensure_ascii=False)
     return md_path
 
 

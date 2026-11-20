@@ -6,7 +6,6 @@ FLAG_DIR = os.path.join(os.path.dirname(os.path.abspath(__file__)), "_cache", "f
 
 KNOWN = (
     "answer_cache", "clarify_why", "law_cache",
-    "rag_select", "rag_refs", "rag_clarify", "rag_hyde", "rag_ai_ext",
     "kv_off", "kv_prefix_off", "kv_chain_on", "llm_restart_once",
 )
 

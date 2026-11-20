@@ -149,6 +149,17 @@ def _split_hang(text: str) -> list[str]:
     return [ln.strip() for ln in t.split("\n") if ln.strip()]
 
 
+_BP_TITLE = re.compile(r"^\[(별표|별지|서식)\s*(\d+(?:의\d+)?)\]")
+
+
+def cite_key(law: dict, a: dict) -> str:
+    """인용 열쇠 — 조문 "법령명|조문번호|가지번호", 별표 "법령명|별표 N" (화면 index.html 의 citeKey 와 같은 규칙)."""
+    if a.get("조문번호"):
+        return f'{law.get("name", "")}|{a["조문번호"]}|{a.get("조문가지번호") or ""}'
+    m = _BP_TITLE.match(str(a.get("조문제목") or ""))
+    return f'{law.get("name", "")}|{m.group(1)} {m.group(2)}' if m else ""
+
+
 def build(payload: dict) -> bytes:
     """
     조회 결과를 PDF 바이트로 만듭니다.
@@ -214,6 +225,11 @@ def build(payload: dict) -> bytes:
                 story.append(Paragraph(_rich(p, fb), st["body"]))
 
     laws = payload.get("laws") or []
+    keys = set(payload.get("cited_keys") or [])
+    if keys:
+        # ★ v1.64 — 답변이 인용한 조문·별표만 싣습니다. 예전에는 검색한 법령의 조문 전부(한 답에 300~750개)를 실어
+        #   7개 법령 답변 하나가 121쪽이었습니다. 화면도 인용된 것만 펼쳐 보여줍니다.
+        laws = [{**l, "articles": [a for a in (l.get("articles") or []) if cite_key(l, a) in keys]} for l in laws]
     shown = [l for l in laws if l.get("articles")]
     if shown:
         story.append(PageBreak())

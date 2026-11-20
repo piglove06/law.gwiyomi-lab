@@ -32,8 +32,8 @@ import urllib.parse
 import urllib.request
 import xml.etree.ElementTree as ET
 
-SEARCH_URL = "http://www.law.go.kr/DRF/lawSearch.do"
-SERVICE_URL = "http://www.law.go.kr/DRF/lawService.do"
+SEARCH_URL = "https://www.law.go.kr/DRF/lawSearch.do"    # v1.62 — https(인증키를 암호화해 보냄)
+SERVICE_URL = "https://www.law.go.kr/DRF/lawService.do"
 TIMEOUT = 30
 
 HERE = os.path.dirname(os.path.abspath(__file__))

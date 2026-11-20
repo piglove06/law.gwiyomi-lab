@@ -47,8 +47,11 @@ git remote add origin %REPO%
 git remote -v
 
 echo [4/5] secret scan ...
+rem  v1.64 - stage first so the scan sees new files (check_secrets.py reads the staged changes).
+git add -A
 call :PY check_secrets.py
 if errorlevel 1 (
+  git reset >nul 2>&1
   echo.
   echo  [STOP] Secret scan failed. Nothing was committed.
   echo         Fix the items listed above, then run this again.
@@ -58,7 +61,6 @@ if errorlevel 1 (
 )
 
 echo [5/5] commit ...
-git add -A
 git diff --cached --quiet
 if errorlevel 1 (
   git commit -m "chore: initial import - v1.28"

@@ -14,20 +14,23 @@ if not exist ".git" (
   exit /b 1
 )
 
-call :PY check_secrets.py
-if errorlevel 1 (
-  echo.
-  echo  [STOP] Secret scan failed. Nothing was committed.
-  pause
-  exit /b 1
-)
-
+rem  v1.64 - stage first, then scan: check_secrets.py looks at the STAGED changes.
+rem  (Before, the scan ran before "git add", so new files were never scanned.)
 git add -A
 git diff --cached --quiet
 if not errorlevel 1 (
   echo No changes.
   timeout /t 2 >nul
   exit /b 0
+)
+
+call :PY check_secrets.py
+if errorlevel 1 (
+  git reset >nul 2>&1
+  echo.
+  echo  [STOP] Secret scan failed. Nothing was committed.
+  pause
+  exit /b 1
 )
 
 git diff --cached --stat

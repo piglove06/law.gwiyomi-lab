@@ -178,7 +178,7 @@ ANSWER_PROMPT = """너는 대한민국 국가법령 조문을 근거로 답하�
    질문의 전제와 모순되는 경우는 만들지 마라.
    예) "1년 동안 80% 이상 출근" 이라고 했는데 "1년 미만이면 …" 으로 나누지 마라.
 9. **최종 판단만 쓴다.** "수정:", "다시 확인:", "정정하면" 처럼 쓰다가 고친 흔적을 남기지 마라.
-   【결론】의 판정과 【계산】·【설명】의 판정이 서로 달라서는 안 된다. 쓰기 전에 먼저 판정을 정하라.
+   【결론】의 판정과 【계산】·【설명】의 판정이 서로 달라서는 안 된다. {verdict_order}
    【결론】에 "가능성이 높다" 같은 추측을 쓰지 마라. 경우를 나눠도 모든 경우의 판정이 같으면
    그 판정 하나만 쓴다. 되묻기에 "모름" 이라 답한 조건이 판정을 바꾸지 않으면 언급하지 마라.
 10. 한국어로만 쓴다. 일본어(への·の 등)·중국어 글자를 섞지 마라.
@@ -298,15 +298,7 @@ ANSWER_PROMPT = """너는 대한민국 국가법령 조문을 근거로 답하�
 본문에 넣지 마라. 그대로 글자로 나와 법령 용어처럼 보인다.
 
 ━━ 답변 형식 ━━━━━━━━━━━━━━━━━━━━━━━━━━━
-【결론】
-질문에 대한 답을 __먼저__ 2~3줄로 말한다. 사용자가 다른 사람에게 그대로
-읽어줄 수 있는 문장으로 쓴다. 조문번호를 나열하지 마라.
-조건이 "모름" 이라 하나로 정할 수 없으면 "○○이면 A, □□이면 B" 로 쓴다.
-여기서도 수치는 **굵게**, 의무는 __밑줄__ 로 표시한다.
-예) 설치 전에 __관할 시장·군수·구청장에게 신고해야 합니다__.
-    신고는 시설 설치 **전**에 해야 하고, 변경 시에는 **30일 이내**입니다.
-
-【적용 조건】
+{concl_first}【적용 조건】
 사용자가 알려준 사실만 한 줄씩 적는다. 안 알려준 항목은 **줄째로 빼라**
 (‑ 미확인 을 줄줄이 적으면 화면만 길어진다).
 해당하는 것만 골라 쓴다: 시설 / 용량 / 설치일·설치 경과 / 검사 종류 / 마지막 검사 / 기타
@@ -343,7 +335,7 @@ ANSWER_PROMPT = """너는 대한민국 국가법령 조문을 근거로 답하�
 
 질문이 단순하고 조건이 명확하면 위 4단계를 억지로 채우지 말고
 필요한 부분만 간결하게 쓴다.
-
+{concl_last}
 분량 — 짧을수록 좋다:
 - 【결론】은 3줄 안쪽. 여기만 읽어도 무엇을 해야 하는지 알 수 있어야 한다.
 - 【적용 조건】·【계산】은 쓸 내용이 없으면 **블록째로 생략**한다. 빈 칸을
@@ -1158,17 +1150,17 @@ def _tidy_answer(text: str) -> str:
 
 def answer(question: str, context: str) -> str:
     """조문 원문을 근거로 답변 생성."""
-    prompt = ANSWER_PROMPT.format(question=question, context=context)
+    prompt = answer_prompt(question, context)
     if LOCAL_SERVER == "llamacpp" and kv_reuse.enabled():
         try:
             _room = server_ctx() - (count_tokens(prompt) + 32) - 16
             if _room >= 64:
                 _kv = kv_reuse.answer_call(prompt, 0.3, min(MAXTOK_ANSWER, _room))
                 if _kv is not None and _kv.strip():
-                    return _tidy_answer(_clean_output(_kv))
+                    return conclusion_first(_tidy_answer(_clean_output(_kv)))
         except Exception as e:                           # noqa: BLE001
             applog.warn(f"KV 답변 경로 실패 — 예전 방식으로: {type(e).__name__}: {e}")
-    return _tidy_answer(_call(prompt, max_tokens=MAXTOK_ANSWER, stage="answer"))
+    return conclusion_first(_tidy_answer(_call(prompt, max_tokens=MAXTOK_ANSWER, stage="answer")))
 
 
 REVIEW_PROMPT = """너는 법령 답변 검토자다. [답변]의 핵심 주장을 [조문 원문]과 하나씩 대조한다.
@@ -1280,6 +1272,49 @@ def review_answer(question: str, answer_text: str, context: str) -> list:
     if ct and ctf and len(_qnorm(ct)) >= 4 and _qnorm(ct) in na:
         out.append({"kind": "결론모순", "quote": ct, "fix": ctf})
     return out[:4]
+
+
+# ★ v1.63 — 【결론】을 맨 마지막에 쓰게 하고(계산·설명을 먼저 따진 뒤 요약), 서버가 맨 위로 옮겨 보여줍니다.
+#   생각 모드를 끈 모델은 앞에 쓴 글을 고칠 수 없어, 결론을 먼저 쓰면 뒤의 계산과 판정이 어긋났습니다
+#   (11-17: 소음 5시간·일요일 — 평가 19문항 중 결론 모순 처리가 일어난 2문항이 모두 계산형).
+#   되돌리기: .env ANSWER_CONCL_LAST=0
+ANSWER_CONCL_LAST = os.getenv("ANSWER_CONCL_LAST", "1") != "0"
+CONCL_SPEC = """【결론】
+질문에 대한 답을 2~3줄로 말한다. 사용자가 다른 사람에게 그대로
+읽어줄 수 있는 문장으로 쓴다. 조문번호를 나열하지 마라.
+조건이 "모름" 이라 하나로 정할 수 없으면 "○○이면 A, □□이면 B" 로 쓴다.
+여기서도 수치는 **굵게**, 의무는 __밑줄__ 로 표시한다.
+예) 설치 전에 __관할 시장·군수·구청장에게 신고해야 합니다__.
+    신고는 시설 설치 **전**에 해야 하고, 변경 시에는 **30일 이내**입니다.
+"""
+_ORDER_FIRST = dict(
+    concl_first=CONCL_SPEC.replace("2~3줄로", "__먼저__ 2~3줄로") + "\n",
+    concl_last="",
+    verdict_order="쓰기 전에 먼저 판정을 정하라.")
+_ORDER_LAST = dict(
+    concl_first="",
+    concl_last=("\n★ 【결론】은 **맨 마지막에** 쓴다(화면에서는 맨 위로 옮겨 보여준다). 위 【계산】·【설명】에서 내린 판정을\n"
+                "그대로 요약한다. 앞에서 내린 판정과 다른 판정을 【결론】에 새로 쓰지 마라.\n" + CONCL_SPEC),
+    verdict_order="【계산】·【설명】으로 판정을 먼저 따지고, 그 판정을 【결론】에 요약한다.")
+
+
+def answer_prompt(question: str, context: str) -> str:
+    """답변 지시문을 채웁니다(결론을 마지막에 쓰게 하는지에 따라 형식 부분이 다름)."""
+    return ANSWER_PROMPT.format(question=question, context=context,
+                                **(_ORDER_LAST if ANSWER_CONCL_LAST else _ORDER_FIRST))
+
+
+_CONCL_ANY_RE = re.compile(r"(?m)^[ \t]*\**\s*【결론】[\s\S]*?(?=\n[ \t]*\**\s*【|\Z)")
+
+
+def conclusion_first(text: str) -> str:
+    """【결론】 블록이 맨 앞이 아니면 맨 앞으로 옮깁니다. 없거나 이미 앞이면 그대로."""
+    t = str(text or "")
+    m = _CONCL_ANY_RE.search(t)
+    if not m or not t[:m.start()].strip():
+        return t
+    rest = (t[:m.start()].rstrip() + "\n\n" + t[m.end():].lstrip()).strip()
+    return m.group(0).strip() + ("\n\n" + rest if rest else "")
 
 
 _REVISION_NOTE_RE = re.compile(r"검토\s*의견|이전\s*답변|앞선\s*답변|처음\s*답변|결론을\s*정정|최종\s*수정")

@@ -451,7 +451,7 @@
       <span class="k">법령 데이터</span> — 법제처 국가법령정보 OPEN API
       (<a href="https://open.law.go.kr" target="_blank" rel="noopener">open.law.go.kr</a>).
       법령·시행령·시행규칙·행정규칙·자치법규를 실시간으로 가져옵니다.<br>
-      <span class="k">답변 생성</span> — 이 서버에서 직접 돌리는 로컬 AI 모델(Qwen3.6-35B-A3B). 질문 내용이 외부로 나가지 않으며, 위에서 가져온 조문 원문만 근거로 씁니다.<br>
+      <span class="k">답변 생성</span> — 이 서버에서 직접 돌리는 로컬 AI 모델(Qwen3.6-35B-A3B). 답변을 만드는 데 외부 AI 를 쓰지 않으며, 위에서 가져온 조문 원문만 근거로 씁니다. 다만 질문 문장은 법령 검색을 위해 법제처로 전송됩니다.<br>
       <span class="k">서버</span> — Python / FastAPI<br>
       <span class="k">설계 참고</span> —
       <a href="https://github.com/ChangooLee/mcp-kr-legislation" target="_blank" rel="noopener">ChangooLee/mcp-kr-legislation</a>
@@ -509,6 +509,12 @@ try { history = history.map(h => ({...h, laws: slimLaws(h.laws, h.cited_keys)}))
 //   기록 한 건에 근거 법령 전체(조문 수백 개, 약 0.5MB)를 그대로 넣어, 몇 건만 쌓여도 브라우저 저장 한도(약 5MB)를
 //   넘었고, 저장 실패를 조용히 무시해서 새로고침하면 기록이 사라졌습니다.
 //   → 기록에는 답변에 인용된 조문만 남기고(법령 목록·인용 표시는 그대로), 그래도 넘치면 오래된 기록부터 지웁니다.
+// v1.64 — 조문은 "법령명|조문번호|가지번호", 별표·별지는 "법령명|별표 8" 꼴의 열쇠로 인용 여부를 봅니다.
+function citeKey(l, a){
+  if(a.조문번호) return `${l.name}|${a.조문번호}|${a.조문가지번호 || ""}`;
+  const m = String(a.조문제목 || "").match(/^\[(별표|별지|서식)\s*(\d+(?:의\d+)?)\]/);
+  return m ? `${l.name}|${m[1]} ${m[2]}` : "";
+}
 function slimLaws(laws, citedKeys){
   const cited = new Set(citedKeys || []);
   return (laws || []).map(l => {
@@ -516,8 +522,7 @@ function slimLaws(laws, citedKeys){
     ["level","mst","id","name","enforced","promulgation_no","target","kind","ministry"].forEach(k => {
       if(l[k] !== undefined) keep[k] = l[k];
     });
-    keep.articles = (l.articles || []).filter(a =>
-      a.조문번호 && cited.has(`${l.name}|${a.조문번호}|${a.조문가지번호 || ""}`));
+    keep.articles = (l.articles || []).filter(a => cited.has(citeKey(l, a)));
     return keep;
   });
 }
@@ -837,8 +842,7 @@ function renderLaws(laws, citedKeys){
   const groups = {};
   // v1.37 — 답변이 조문을 인용했으면, 인용 조문이 하나도 없는 법령은 목록에서 빼고
   //   맨 아래 접힌 칸("답변에 쓰이지 않은 법령")에만 둡니다. 검색 후보일 뿐 근거가 아니기 때문입니다.
-  const hitLaw = l => (l.articles || []).some(a => a.조문번호 &&
-                        cited.has(`${l.name}|${a.조문번호}|${a.조문가지번호 || ""}`));
+  const hitLaw = l => (l.articles || []).some(a => cited.has(citeKey(l, a)));
   const unused = cited.size ? laws.filter(l => !hitLaw(l)) : [];
   if(cited.size) laws = laws.filter(hitLaw);
   laws.forEach(l => {
@@ -871,8 +875,7 @@ function renderLaws(laws, citedKeys){
   const block = l => {
     const arts = (l.articles || []);
     // 법령명까지 포함해 비교합니다. 법률 제3조와 시행령 제3조는 다른 조문입니다.
-    const isHit = a => cited.size && a.조문번호 &&
-                       cited.has(`${l.name}|${a.조문번호}|${a.조문가지번호 || ""}`);
+    const isHit = a => cited.size && cited.has(citeKey(l, a));
     const hits = cited.size ? arts.filter(isHit) : [];
     const rest = cited.size ? arts.filter(a => !isHit(a)) : arts;
 
@@ -935,12 +938,15 @@ function renderHistory(){
   $("hist").querySelectorAll("li").forEach(li => li.onclick = () => {
     const h = history[li.dataset.i];
     $("q").value = h.q;
+    // v1.64 — 지금 질문의 되묻기 양식이 남아 있으면 기록과 섞여 보입니다(먼저 답하고 묻기 양식 포함)
+    $("clarify").innerHTML = "";
+    if($("clarifyAfter")) $("clarifyAfter").innerHTML = "";
     $("answer").innerHTML = renderAnswer(h.answer);
     $("answer").className = "answer";
     CURRENT_LAWS = h.laws || [];
     LAST_RESULT = {
       question: h.q, answered: h.answered || "", answer: h.answer || "",
-      citations: h.citations || [], laws: h.laws || [],
+      citations: h.citations || [], laws: h.laws || [], cited_keys: h.cited_keys || [],
     };
     renderCites(h.citations);
     renderRefs(h.references);
@@ -1156,7 +1162,7 @@ async function ask(skipClarify, extra, round){
     LAST_RESULT = {
       question: base, answered: extra || "",
       answer: warnHead + (data.answer || ""),
-      citations: data.citations || [], laws: data.laws || [],
+      citations: data.citations || [], laws: data.laws || [], cited_keys: data.cited_keys || [],
     };
     renderCites(data.citations);
     renderRefs(data.references);
@@ -1446,12 +1452,15 @@ $("clearhist").onclick = () => {
 })();
 
 // 서버 버전 확인 — 화면과 서버가 다른 버전이면 경고
-const UI_VERSION = "1.49";
+// ★ v1.64 — 화면 판 번호. 서버가 지금 디스크의 index.html 에서 이 값을 읽어 돌려주므로(api_version 의 ui),
+//   다르면 브라우저가 예전 화면을 들고 있는 것입니다. 예전에는 서버 버전(VERSION)과 비교해 v1.50 부터
+//   늘 "파이썬 파일도 교체하세요" 가 빨갛게 떴습니다. index.html 을 바꾸면 이 값을 올리세요.
+const UI_VERSION = "1.64";
 fetch("/api/version").then(r => r.json()).then(d => {
-  if(d.version !== UI_VERSION){
+  if(d.ui && d.ui !== UI_VERSION){
     $("vbadge").innerHTML =
       `<span style="color:var(--seal);font-weight:700">
-        서버 v${esc(d.version)} / 화면 v${UI_VERSION} — 파이썬 파일도 교체하세요
+        화면이 예전 판(v${UI_VERSION})입니다 — 새로고침(Ctrl+F5) 해 주세요
        </span> · `;
   } else {
     const m = (d.llm && d.llm.model) ? ` · <b style="color:var(--accent)">${esc(d.llm.model)}</b>` : "";

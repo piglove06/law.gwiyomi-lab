@@ -43,8 +43,6 @@
 | `law_client.py` | 법제처 OPEN API(lawSearch/lawService) 호출·XML 파싱: 검색, 본문, 체계도, 위임, 별표, 약칭, 연혁, 해석례·판례 |
 | `law_cache.py` | 법령 본문 로컬 캐시(MST 버전 기준) |
 | `intent.py` | 질문 유형 규칙 분류(조문 조회·정의·일반 기준·기한·제재·사례 판단) |
-| `rag_select.py` | 조문 본문 유사도(글자 2-gram BM25, 선택: 임베딩)로 선별 보강, 참조 조문 확장, 되묻기 근거 정렬 |
-| `ai_ext.py` | 지능형 검색 더 쓰기(되묻기 답 재검색·행정규칙·별표) — 기본 꺼짐 |
 | `ctx_guard.py` | 질문에 적힌 조문 보호, 분량 조절 뒤 되돌려 넣기 |
 | `answer_cache.py` | 같은 질문 저장본 불러오기(되묻기 답이 같을 때만) — 기본 꺼짐 |
 | `applog.py` / `logpipe.py` | 질문 블록 로그(_runs) / llama-server·터널 창 로그에 서울 시간·저장 |
@@ -72,8 +70,8 @@
 | 7 | 측면별 법 고르기 / 주 법령 고르기 | `pick_aspect_laws` / `pick_main_laws` | aspect_laws / main_laws | LAW_PICK |
 | 8 | 법령 확정·약칭 복구·체계도(법→령→규칙→위임 행정규칙)·원문 | `law_client.search/resolve_abbrev/get_hierarchy`, `law_cache.get_detail` | – | TREE_MAX_LAWS, FETCH_MAX_LAWS, flags/law_cache |
 | 9 | 조문 목록 → LLM 선별 | `ai_client.select_articles` | select | SELECT_ARTICLES, SELECT_MAX |
-| 10 | 보강: 지능형 검색 조문, 질문에 나온 조문 보호, 상위·위임·참조 조문, 별표 | `_ask_after_search` 중반, `rag_select.augment/ref_expand`, `ai_ext.merge`, `ctx_guard.cited_in_question` | – | flags/rag_select, rag_refs, rag_ai_ext |
-| 11 | 되묻기(최대 CLARIFY_ROUNDS 라운드) | `ai_client.clarify` | clarify | CLARIFY_ROUNDS, CLARIFY_WHY, flags/rag_clarify |
+| 10 | 보강: 지능형 검색 조문, 질문에 나온 조문 보호, 상위·위임·참조 조문, 별표 | `_ask_after_search` 중반, `ctx_guard.cited_in_question` | – | – |
+| 11 | 되묻기(최대 CLARIFY_ROUNDS 라운드) | `ai_client.clarify` | clarify | CLARIFY_ROUNDS, CLARIFY_WHY |
 | 12 | 참고 해석례·판례 고르기·본문 확인 | `_case_candidates`(→`ai_client.pick_cases`), `confirm_cases` | cases / case_confirm | RELATED_CASES, CASE_IN_ANSWER |
 | 13 | 컨텍스트 조립(토큰 예산, 별표 축약, 조문 되돌려 넣기) | `_ask_after_search` 안 `_assemble`, `_fit_keep_notes`, `ctx_guard` | – | MIN_CTX_BUDGET, ANSWER_RESERVE |
 | 14 | 답변 | `ai_client.answer` | answer | MAXTOK_ANSWER, flags/kv_* |
@@ -229,6 +227,18 @@ extract_terms → ai_search(질문 원문, 비면 재시도 → 용어로) → �
 
 ### ai_client.py :: answer
 - 답변 생성. kv_reuse ①: /completion 으로 생성 토큰을 기억(검토가 이어 쓰기용, flags/kv_chain_on 일 때만), 고정 지시문은 ② 로 복원. 안 되면 예전 방식.
+
+### ai_client.py :: ANSWER_CONCL_LAST
+- 【결론】을 답 맨 끝에 쓰게 할지(v1.63, 기본 켬, .env `ANSWER_CONCL_LAST=0` 으로 예전 순서). 생각 모드를 끈 모델이 결론을 먼저 정하면 뒤 계산과 어긋나서. 끄면 지시문이 예전과 똑같음(테스트로 고정).
+
+### ai_client.py :: answer_prompt
+- 답변 지시문 채우기. `ANSWER_PROMPT` 의 형식 부분(`{concl_first}`·`{concl_last}`·`{verdict_order}`)을 `_ORDER_LAST`/`_ORDER_FIRST` 로 채움. main 의 토큰 세기도 이것을 씀 — `ANSWER_PROMPT.format(...)` 을 직접 부르면 빈 자리 때문에 오류.
+
+### ai_client.py :: CONCL_SPEC
+- 【결론】 블록 작성 규칙(두 순서가 같이 씀).
+
+### ai_client.py :: conclusion_first
+- 【결론】 블록을 맨 앞으로 옮김(이미 앞이거나 없으면 그대로). `answer()` 가 생성 직후 부름 — 다시 쓴 답(`answer_revised`)도 이것을 지나감. main 은 【결론】이 아예 없으면 `fix_conclusion` 으로 만들어 붙임('결론 보충').
 
 ### ai_client.py :: fix_conclusion
 - 【결론】을 뺀 답변 본문을 주고 【결론】 블록만 다시 받음(`CONCLUSION_FIX_PROMPT`, 출력 `MAXTOK_CONCL`=300, v1.57). main 이 마지막 `_verdict_conflict` 가 참일 때만 부름(.env `CONCL_FIX=0` 으로 끔). 다시 쓴 답도 계산은 '70 이하 → 초과 아님'인데 결론만 '초과'로 나온 일(11-17 소음 5시간)이 있어서 — 답 전체를 또 쓰게 하면 같은 실수를 되풀이하므로 본문을 고정하고 결론만 받음. 받은 결론이 여전히 본문과 어긋나면 버리고 예전처럼 경고만 냄. 실패하면 "".
@@ -425,6 +435,25 @@ extract_terms → ai_search(질문 원문, 비면 재시도 → 용어로) → �
 
 ### main.py :: _concl_date_mismatch
 - 【결론】의 날짜가 답 나머지에 없으면 그 날짜(v1.61). `_concl_conflict` = `_verdict_conflict` 또는 이것 — 결론만 가져오기(검토 단계)와 마지막 결론만 다시 쓰기(`fix_conclusion`)의 기준. 나머지에 날짜가 하나도 없으면 비교 안 함.
+
+### main.py :: _concl_num_mismatch
+- 【결론】의 숫자+단위가 답 나머지에 없으면 그 값(v1.65). 만원·천원·억원은 원으로 바꿔 비교, dB(A)·㏈·데시벨은 dB 로. 날짜와 조문 번호(제N조·별표 N·목록 번호)는 빼고, 같은 숫자가 단위 없이라도 나머지에 있으면 통과(합산값·표기 차이 헛경고 방지).
+- 쓰임: 최종 답 화면 경고 '결론 수치 확인 필요'(판정 불일치 경고가 없을 때만), 검토 단계 결론 병합 거부. 결론을 다시 쓰게 하지는 않음.
+
+### main.py :: _cn_num
+- `_concl_num_mismatch` 용 숫자 변환(쉼표 제거).
+
+### main.py :: _num_values
+- 글 속 (값, 단위) 집합과 맨 숫자 집합. `_concl_num_mismatch` 용.
+
+### main.py :: _word_neg
+- 판정 낱말이 부정으로 쓰였는지 — 낱말 바로 뒤 6자 안의 않·아니·없 또는 바로 앞의 미·비·불(v1.65). `_verdict_conflict` 가 공통 판정 낱말마다 결론·뒤쪽 판정의 부정 여부를 비교.
+
+### main.py :: _ai_query
+- 지능형 검색에 보낼 문장(v1.65). 이어 묻기이고 질문이 `AI_Q_SHORT`(50)자 미만이면 앞 질문(120자까지)을 앞에 붙임.
+
+### main.py :: ANSWER_FIRST_HINT
+- 먼저 답하고 묻기(`_pending`)일 때 답변 지시에 붙는 한 줄: 원칙 먼저, '다만 ○○이면' 예외 뒤, 예외 한쪽만 결론 금지(v1.65).
 
 ### main.py :: _concl_conflict
 - 결론이 본문과 어긋나는지(판정 낱말 반대 또는 본문에 없는 날짜).
@@ -677,6 +706,21 @@ extract_terms → ai_search(질문 원문, 비면 재시도 → 용어로) → �
 ### main.py :: _ask_article
 - 조문 직접 조회 경로("○○법 제N조"). 시간초과 등은 일반 경로로 넘김(C-20261017-15). 가지조문 번호 빠짐 보정 "제39조의제1항" → "제39조의3제1항"(v1.32).
 
+### main.py :: _stmd_rows
+- 법령 체계도 검색(가운뎃점 표기를 바꿔 재시도). 결과를 `_SEARCH_CACHE` 에 10분 기억(v1.62, 열쇠 ("stmd", 이름)) — 한 질문 안에서 주 법령 고르기·신뢰도 확인·후보 확인·체계도 받기가 같은 이름을 다시 찾았음. 오류로 못 받은 것은 기억 안 함(errs 로 알려 '0건' 과 구분).
+
+### main.py :: _bp_cited_keys
+- 답변이 든 별표·별지를 "법령명|별표 N" 꼴로(v1.64). 「법령」 별표 N 인용 + 수치 근거로 쓰인 별표(`_bp_used_as_basis`) 중 수집한 법령 이름인 것만. 결과의 cited_keys 에 '제N조' 열쇠와 함께 실림 — 화면(`citeKey`)이 그 별표를 펼쳐 보이고 이력에 남김.
+
+### main.py :: _BP_CITE_RE
+- 「법령명」 별표 N(의M) 꼴.
+
+### main.py :: _ui_version
+- 디스크의 static/index.html 에 적힌 UI_VERSION(파일 시각이 바뀔 때만 다시 읽음). /api/version 의 ui. 화면이 자기 값과 다르면 '새로고침' 안내 — 예전엔 서버 VERSION 과 비교해 v1.50 부터 늘 경고가 떴음(v1.64). index.html 을 바꾸면 UI_VERSION 을 올릴 것.
+
+### main.py :: _UI_VER
+- `_ui_version` 의 기억(파일 시각·값).
+
 ### main.py :: _public_result
 - 응답(화면·answer_cache 저장·평가 보고서)으로 나가기 전에 조문의 `별표전문` 을 뺌(v1.60). 검색 캐시에 든 원본 dict 는 건드리지 않고 겉만 새로 만듦. `/api/detail` 도 같은 처리.
 
@@ -713,13 +757,13 @@ extract_terms → ai_search(질문 원문, 비면 재시도 → 용어로) → �
 조문 확보 이후: 선별 → 보강 → 되묻기 → 사례 → 예산 조립 → 답변 → 검증.
 - **'아니오' 제외**: 되묻기 답이 실제로 있는 이 지점에서 처리(08-19: 검색 경로에만 있어 round≥1 은 캐시로 빠져 기능이 죽어 있었음). 캐시 오염 방지로 **사본**에만. 전부 걸리면 거르지 않음.
 - **선별**(제목 목록 → LLM, 3만 → 2천 토큰): 되묻기 **앞**(v1.31, 되묻기가 본문을 봄). 결과는 번호가 아닌 **조문 키**로 캐시(제외로 번호가 밀림). 캐시 선별이 제외로 비면 재선별(C-20261028-08). 목록이 넘치면 법령명을 묶음 머리에 한 번만(v1.40, U-21) → 그래도 넘치면 서식(별지) 제외(L-1016-2) → 뒤를 자름. 중복 번호 제거(C-20261018-10), 번호 0개면 '전체 사용'(C-20261028-07).
-- **보강 순서 = 우선순위**(예산 초과 시 뒤에서부터 뺌): 지능형 지목 조문 상위 6 맨 앞(v1.31/32: 법 제25조 누락 사례), rag_select 본문 유사도 조문 뒤에 최대 6(flags/rag_select), ai_ext 재검색·행정규칙·별표(flags/rag_ai_ext). 원본 목록 오염 방지로 복사본.
+- **보강 순서 = 우선순위**(예산 초과 시 뒤에서부터 뺌): 지능형 지목 조문 상위 6 맨 앞(v1.31/32: 법 제25조 누락 사례). 원본 목록 오염 방지로 복사본. (본문 유사도 보강 rag_select·지능형 검색 확장 ai_ext 는 한 번도 켜지 않아 v1.64 에 삭제)
 - **보호 조문**: 제목이 질문에 그대로 나온 기준 조문(v1.35 — 맨 앞 이동은 되묻기를 흔들어 '빠졌으면 넣고 예산에서 끝까지 지킴' 으로), 질문에 "법령명 제N조" 로 적힌 조문(ctx_guard, `CTX_GUARD_CITED=0`). 보호 조문이 인용한 별표는 짧게(1,600자).
-- **상위 조문**(v1.32): 하위 조문이 "법 제12조에 따른" 처럼 근거를 적으면 법률 조문 포함(최대 4, 인용 조문 바로 뒤; 주유소 설치신고 사례). "같은 법" 은 앞에 나온 다른 법. **위임 조문**(v1.34): 법률 조문의 위임 대상 하위 조문 포함 → 그 별표까지 따라옴(환경영향평가 별표 3 사례). 참조 확장(flags/rag_refs) 최대 3.
+- **상위 조문**(v1.32): 하위 조문이 "법 제12조에 따른" 처럼 근거를 적으면 법률 조문 포함(최대 4, 인용 조문 바로 뒤; 주유소 설치신고 사례). "같은 법" 은 앞에 나온 다른 법. **위임 조문**(v1.34): 법률 조문의 위임 대상 하위 조문 포함 → 그 별표까지 따라옴(환경영향평가 별표 3 사례).
 - **별표 끌어오기**: 별표 앞 100자 안에 「다른 법령명」이 있으면 그 법령 별표(08-19), 수집 안 한 법령이면 건드리지 않음. 별표 순위 = 인용한 조문들 중 가장 높은 순위(모든 순위 조정 뒤 재계산, C-20261028-06). "○○이 아니다" 라고 밝힌 대상의 특례 조문은 먼저 뺌(v1.35 비교15).
 - **못 받은 별표**: 별표·서식 API 로 한 번 더(받아 둔 법령도 검색, C-20261028-05), 1만2천 자까지 받고 넘길 때 압축. 별지(서식)는 경고 대상 아님(링크만). 끝내 못 받으면 "본문 미확보 + 제목" 을 컨텍스트에 명시(안 쓰면 기억으로 채움). 캐시 dict 에 같은 제목 중복 추가 금지(08-19).
 - **렌더링**: 조문마다 법령명 머리(구분선만 두면 법률 제8조를 시행령으로 인용). 위임 힌트는 법률 조문에만: 위임(조문번호, 없으면 "미제공")과 인용(단순 상호참조)을 문장 분리(08-18: 455건 중 354건이 인용).
-- **되묻기**(v1.31: 선별·별표 뒤, 본문 기반): 의도가 사실을 요구하지 않으면 안 물음. 질문에 구체 사실 2개 이상이면 1라운드까지(v1.32, 68dB 사례). "어느 법" 라운드는 따로 셈. rag_clarify 면 유사도 순 근거. 별표는 비고 남겨 조금 길게, 글자→토큰 2단 컷. 법정 기한 자체를 묻는 질문에 사건 날짜 되묻기는 코드로 버림(v1.40, L-2244-2). 이미 물은 질문과 겹치면 버림.
+- **되묻기**(v1.31: 선별·별표 뒤, 본문 기반): 의도가 사실을 요구하지 않으면 안 물음. 질문에 구체 사실 2개 이상이면 1라운드까지(v1.32, 68dB 사례). "어느 법" 라운드는 따로 셈. 별표는 비고 남겨 조금 길게, 글자→토큰 2단 컷. 법정 기한 자체를 묻는 질문에 사건 날짜 되묻기는 코드로 버림(v1.40, L-2244-2). 이미 물은 질문과 겹치면 버림.
 - **덧붙임**: 아니라고 밝힌 대상 → 일반 조문으로 답하라는 안내(v1.35), 측면별로 나눠 답하라(v1.38), [개정 이력](v1.35), 참고 해석례 — 답변 **전에** 본문 대조 통과한 것만(v1.40 U-24, 해석 뒤 개정 가능성 함께 알림 v1.47). 대조 호출 실패면 지시엔 안 넣고 화면 목록은 유지(C-20261028-27).
 - **토큰 예산**(09-29): 컨텍스트 = 지시문+질문+조문+출력. 덧붙임이 길면 MIN_CTX_BUDGET 확보(C-26). 조문을 빼기 전에 별표를 질문 낱말 줄 주변으로 줄임(v1.32/v1.40), 그다음 prio 큰 것(같으면 뒤)부터 통째로 뺌, 최소 3개 유지. 많이 남으면 뺀 것 중 순위 높은 것부터 되돌려 넣음(ctx_guard refill, `CTX_GUARD_REFILL=0`), '※ 분량 제한' 안내 몫 ~400토큰 남김. 최후 수단 글자 자르기(음수 방지). 평가용 context_keys 는 실제로 남은 조문만(C-20261028-29). 빠진 조문이 있다는 사실을 모델에 알림.
 - **답변·검증**: 참고 사례는 답변 중 다른 스레드에서(v1.36). "질문은 …이나 제공된 조문은 …" 분석문 제거(v1.35). 검토(v1.40) → 근거 글자 있는 지적만 남겨 한 번 다시 쓰기, 고친 흔적이 있으면 문제 없음이어도 다시(v1.46). 다시 쓴 답이 인용을 잃거나 첫 답의 블록이 빠지면(잘림) 첫 답 유지(C-20261028-10). 단, 결론모순 지적이면 첫 답에 다시 쓴 답의 【결론】만 넣음(`_merge_conclusion`, v1.51). 검토 실패를 '문제 없음' 으로 보이지 않게(C-14), 모든 예외를 잡음(C-20261018-18). 못 받은 별표를 근거로 썼으면 경고(다른 법령 별표라고 밝혔으면 제외, C-13). 계산 검산(실패해도 답은 냄).
@@ -760,6 +804,12 @@ extract_terms → ai_search(질문 원문, 비면 재시도 → 용어로) → �
 
 ### law_client.py :: BP_SHOW_CHARS
 - 별표 본문 중 화면·응답에 싣는 길이(6,000자, 예전과 같음). 이보다 긴 별표는 전문(최대 `BP_FULL_CHARS`=8만 자, .env)을 조문의 `별표전문` 에 따로 둠(v1.60). main 의 답변 근거 만들기(`_fit_keep_notes`)가 전문에서 질문 낱말이 든 줄과 비고를 고름. 전에는 여기서 6,000자로 잘라 버려, v1.34 에 넣은 '긴 별표에서 관련 줄만 발췌'가 앞 6,000자 안에서만 돌았음 — 11-17 평가 자료의 별표·서식 1,572개 중 544개가 잘려 있었고(폐기물 별표 5, 소음 별표 8, 폐수배출시설 별표 4 등) 뒤쪽 행과 표 끝의 비고는 답변이 볼 수 없었음. 응답으로 나갈 때는 main `_public_result` 가 `별표전문` 을 뺌. law_cache 는 `FORMAT` 을 올려 옛 저장본(잘린 것)을 다시 받음.
+
+### law_client.py :: _SCHEME
+- 법제처 주소의 http/https(v1.62). 기본 https(예전 http 는 인증키(OC)가 주소에 실려 암호화 없이 갔음). .env `LAW_HTTPS=0` 이면 http.
+
+### law_client.py :: HTTP
+- 법제처 호출용 공용 httpx 클라이언트(연결 재사용, 최대 12연결·유지 8개·15초). `_get` 만 씀. 법제처가 끊은 묵은 연결에 걸리면 `_get` 의 1초 뒤 재시도가 받아냄(v1.62).
 
 ### law_client.py :: _safe_err
 - 오류 문구에서 URL(OC 포함)을 빼고 종류·상태 코드만 남김.
@@ -875,67 +925,6 @@ extract_terms → ai_search(질문 원문, 비면 재시도 → 용어로) → �
 
 ### kv_reuse.py :: _restart_once
 - flags/llm_restart_once 파일이 있으면 지우고 5초 뒤 `restart_local_llm` 1회(v1.49a). llm_start.bat 새 옵션을 창을 닫지 않고 반영.
-
-## rag_select.py
-
-(전부 기본 꺼짐: flags/rag_select·rag_refs·rag_clarify·rag_hyde)
-
-### rag_select.py :: TOPK
-- 유사도 상위 후보 수 12.
-
-### rag_select.py :: MAX_ADD
-- 선별 결과에 덧붙일 최대 수 6.
-
-### rag_select.py :: DOC_CHARS
-- 앞 6,000자만 색인(긴 별표, 속도).
-
-### rag_select.py :: EMBED_URL
-- (선택) 임베딩 주소. 비면 BM25 만(예: :8081/v1/embeddings).
-
-### rag_select.py :: EMBED_BUDGET
-- 한 질문의 임베딩 계산 최대 20초.
-
-### rag_select.py :: _WORD
-- 토큰화 = 글자 2-gram.
-
-### rag_select.py :: _ANS_NOISE
-- 되묻기 답 중 검색에 쓸모없는 보기 문구.
-
-### rag_select.py :: _TERMS_MEMO
-- 질의 확장 ①: 1라운드 검색어 변환 용어를 질문별로 기억해 2라운드부터도 씀(LLM 추가 호출 없음).
-
-### rag_select.py :: HYDE_PROMPT
-- 질의 확장 ②(rag_hyde, LLM 1회): 답이 될 조문을 법령 문체 2~3문장으로 쓰게 해 검색어에만 더함(생활어↔법령어 차이). 조문 번호는 지움, 답변·되묻기엔 안 넣음.
-
-### rag_select.py :: hyde
-- 지연 import(순환 방지).
-
-### rag_select.py :: _BAG_MEMO
-- 토큰화 결과 메모(텍스트 해시 → Counter).
-
-### rag_select.py :: _EMB_LOCK
-- (선택) 임베딩: llama-server /v1/embeddings + sqlite 캐시.
-
-### rag_select.py :: _post_embed
-- httpx 사용(requirements 에 있음).
-
-### rag_select.py :: embed_scores
-- 시간 예산을 넘기면 이번 질문은 BM25 만, 계산한 것은 저장.
-
-### rag_select.py :: rank
-- 임베딩은 보조, 실패하면 BM25 만.
-
-### rag_select.py :: augment
-- 확장 실패면 확장 없이.
-
-### rag_select.py :: _REF
-- 참조 조문 확장(rag_refs, v1.41) — 받은 조문 안에서만(법제처 호출 없음): ① 같은 법령 "제75조제1항에 따른"(앞에 다른 법 이름이면 제외) ② 위임 데이터에 없을 때 "법 제N조" 를 적은 하위 조문. 근거: KoBLEX — 법령 질문 3/4 이 조문 2~3개를 이어 봐야 풀림.
-
-### rag_select.py :: ref_expand
-- ① 조문당 2개까지 ② 조문당 1개, 여러 조문을 나열하는 일반 조문(민감정보·권한 위임·과태료) 제외, 언급이 적은(전용) 조문 먼저.
-
-### rag_select.py :: (파일 끝)
-- `python rag_select.py` = 간단 자가 점검.
 
 ## intent.py
 
@@ -1061,6 +1050,12 @@ extract_terms → ai_search(질문 원문, 비면 재시도 → 용어로) → �
 
 (표준 라이브러리만 사용)
 
+### eval_run.py :: _slim_laws
+- 보고서 JSON 에 싣는 법령 조문을 근거에 들어간 것(debug.context_keys)과 인용된 것(cited_keys)만으로 줄임(v1.64, 65MB → 2MB). 나머지는 법령 이름·번호와 원래 조문 수(articles_total)만. 위임 정보(delegated)는 뺌.
+
+### eval_run.py :: _BP_HEAD
+- 별표 제목 머리 "[별표 N]".
+
 ### eval_run.py :: HERE
 - 서브프로세스로 돌 때 stdout 인코딩 문제로 죽어(08-20), 시작 시 utf-8 로 reconfigure.
 
@@ -1152,6 +1147,12 @@ extract_terms → ai_search(질문 원문, 비면 재시도 → 용어로) → �
 
 ## pdf_maker.py
 
+### pdf_maker.py :: cite_key
+- 인용 열쇠(조문 "법령명|조문번호|가지번호", 별표 "법령명|별표 N") — 화면 `citeKey` 와 같은 규칙. `build` 가 payload 의 cited_keys 가 있으면 '조문 원문' 에 이 열쇠의 조문·별표만 실음(v1.64, 예전엔 전부 — 121쪽).
+
+### pdf_maker.py :: _BP_TITLE
+- 별표 제목 머리 "[별표 N]".
+
 ### pdf_maker.py :: _FONT_CANDIDATES
 - 한글 폰트 (등록명, 보통, 굵게) 앞에서부터: 윈도우 맑은 고딕, 리눅스 나눔고딕(`sudo apt install fonts-nanum`).
 
@@ -1195,10 +1196,10 @@ extract_terms → ai_search(질문 원문, 비면 재시도 → 용어로) → �
 - `_cache/flags/`. 빈 파일 하나 = 스위치 하나(재시작 없이 바로 반영).
 
 ### flags.py :: KNOWN
-- 쓰는 플래그 이름 전부(문서·점검용 목록). 켜는 쪽: answer_cache·clarify_why·law_cache·rag_*(기본 꺼짐), 끄는 쪽: kv_off·kv_prefix_off, kv_chain_on(기본 꺼짐), llm_restart_once(한 번 쓰고 지움).
+- 쓰는 플래그 이름 전부(문서·점검용 목록). 켜는 쪽: answer_cache·clarify_why·law_cache, 끄는 쪽: kv_off·kv_prefix_off, kv_chain_on(기본 꺼짐), llm_restart_once(한 번 쓰고 지움).
 
 ### flags.py :: on
-- 환경변수가 비어 있지 않으면 그 값('1' = 켬, 그 밖 = 끔), 없으면 파일이 있을 때 켬. rag_select·answer_cache·law_cache·clarify_why 가 씀. kv_reuse 는 `has` 로 각자 규칙.
+- 환경변수가 비어 있지 않으면 그 값('1' = 켬, 그 밖 = 끔), 없으면 파일이 있을 때 켬. answer_cache·law_cache·clarify_why 가 씀. kv_reuse 는 `has` 로 각자 규칙.
 
 ## rules.py
 

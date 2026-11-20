@@ -60,7 +60,7 @@ echo.
 echo ------------------------------------------------------------
 echo  SUCCESS.  https://github.com/piglove06/law.gwiyomi-lab
 echo.
-echo  From now on _4_start_watcher.bat pushes automatically.
+echo  From now on the watcher started by start.bat pushes automatically.
 echo ------------------------------------------------------------
 echo.
 git log --oneline -5

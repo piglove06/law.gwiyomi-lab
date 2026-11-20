@@ -18,9 +18,12 @@ import xml.etree.ElementTree as ET
 
 import httpx
 
-# 법제처는 http 입니다 (https 아님). 나중에 https 로 바뀌면 여기만 고치면 됩니다.
-SEARCH_URL = "http://www.law.go.kr/DRF/lawSearch.do"
-SERVICE_URL = "http://www.law.go.kr/DRF/lawService.do"
+# 법제처 주소. ★ v1.62 — https 가 기본입니다. 예전 http 는 인증키(OC)가 주소에 실려 **암호화 없이** 갔습니다.
+#   (2026-11-18 확인: lawSearch.do·lawService.do 모두 https 로 같은 응답. 아래 공용 연결 덕에 암호화 연결은 처음 한 번만 맺음)
+#   예전처럼 http 로 돌리기: .env LAW_HTTPS=0
+_SCHEME = "http" if os.getenv("LAW_HTTPS", "1") == "0" else "https"
+SEARCH_URL = f"{_SCHEME}://www.law.go.kr/DRF/lawSearch.do"
+SERVICE_URL = f"{_SCHEME}://www.law.go.kr/DRF/lawService.do"
 
 OC = os.getenv("LAW_OC", "")
 
@@ -75,6 +78,11 @@ NAME_KEYS = {
 
 # 요청 타임아웃(초). 법제처가 느릴 때가 있어 넉넉히 잡았습니다.
 TIMEOUT = 20.0
+
+# ★ v1.62 — 법제처 호출용 공용 클라이언트(연결 재사용). httpx.get() 은 부를 때마다 클라이언트·연결을 새로 만들어
+#   한 질문에 15~20번 부르면 그만큼 연결 시간이 쌓입니다. 법제처가 끊은 묵은 연결에 걸리면 _get 이 1초 뒤 한 번 더 부릅니다.
+HTTP = httpx.Client(timeout=TIMEOUT, limits=httpx.Limits(max_connections=12, max_keepalive_connections=8,
+                                                          keepalive_expiry=15.0))
 
 # display 는 매뉴얼상 max=100 입니다. 넘겨도 조용히 잘리거나 무시되므로
 # 호출 전에 우리가 잘라서 "몇 건 받았는지" 판정이 어긋나지 않게 합니다.
@@ -144,7 +152,7 @@ def _get(url: str, params: dict) -> str:
     params = {"OC": _require_oc(), "type": "XML", **params}
     for attempt in (1, 2):
         try:
-            resp = httpx.get(url, params=params, timeout=TIMEOUT)
+            resp = HTTP.get(url, params=params, timeout=TIMEOUT)
             resp.raise_for_status()
             break
         except httpx.HTTPError as e:
