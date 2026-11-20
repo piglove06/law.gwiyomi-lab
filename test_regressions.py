@@ -811,6 +811,18 @@ class V166FollowUpContext(unittest.TestCase):
              "앞 질문: 누출검사 주기는? / 탱크 용량: 30,000리터 / 추가 설명: 지하매설")
         self.assertEqual(main._strip_prev(a), "탱크 용량: 30,000리터 / 추가 설명: 지하매설")
 
+    def test_prev_note_separator_and_returned_answered(self):
+        class R:
+            prev_question = "누출검사 주기는? / 주유소"
+            prev_conclusion = "8년마다 받습니다 / 단 신고는 별도"
+            prev_answered = "지하매설입니까?: 예"
+        note = main._make_prev_note(R())
+        self.assertEqual(note, "앞 질문: 누출검사 주기는?, 주유소 / 앞 답변 결론: 8년마다 받습니다, 단 신고는 별도"
+                               " / 지하매설입니까?: 예")
+        # 화면에 돌려줄 answered 에서는 이어 받은 조건도 뺌(다음 라운드에 두 번 들어가지 않게)
+        ans = note + " / 용량?: 3만L / 지하매설입니까?: 예"
+        self.assertEqual(main._strip_prev(ans, note), "용량?: 3만L")
+
     def test_prev_conditions_drops_old_conclusion(self):
         pa = ("그 앞 질문: Q0 / 앞 질문: Q1 / 앞 답변 결론: 틀렸을 수 있는 결론 / 탱크 용량: 30,000리터 / "
               "그 앞 질문: Q1 / 설치일: 모름")
@@ -825,7 +837,8 @@ class V166AiHitOrder(unittest.TestCase):
     def test_wired(self):
         src = open(os.path.join(HERE, "main.py"), encoding="utf-8").read()
         self.assertIn('"name": "지능형 검색 조문 정렬"', src)
-        self.assertRegex(src, r"_mk = \{_law_key\(ai_laws\[0\]\)\}")
+        self.assertIn("else {_law_key(ai_laws[0])}", src)       # 지능형 1위가 약하면(weak_ai) 1위 법을 주 법령으로 보지 않음
+        self.assertIn('if f.get("_main")', src)                  # 선별 목록이 넘칠 때 주 법령 끝까지 남김
 
 
 
@@ -839,7 +852,7 @@ class V166CatalogTrim(unittest.TestCase):
 
     def test_form_article(self):
         self.assertTrue(main._is_form_article({"구분": "별지", "조문제목": "[별지 제1호서식] 신고서"}))
-        self.assertTrue(main._is_form_article({"조문제목": "[서식 1] 대장"}))
+        self.assertFalse(main._is_form_article({"조문제목": "[서식 1] 대장"}))   # 행정규칙 서식은 남김(재포함 경로 없음)
         self.assertFalse(main._is_form_article({"구분": "별표", "조문제목": "[별표 1] 기준"}))
 
 

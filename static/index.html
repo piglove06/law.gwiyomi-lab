@@ -642,6 +642,7 @@ function lawLink(name, label){
 let CURRENT_LAWS = [];
 let LAST_RESULT = null;   // PDF 로 만들 때 쓸 마지막 조회 결과
 let ACTIVE_QUERY = "";    // 지금 진행 중인 질문. 바뀌면 이전 상태를 모두 버립니다
+let ACTIVE_PREV = null;   // v1.66 — 지금 질문을 처음 보낼 때 함께 보낸 앞 질문 맥락(되묻기 다음 라운드에 그대로 씀)
 
 // 새 질문을 시작할 때 이전 질문의 흔적을 지웁니다.
 // 이것이 없으면 이전 질문의 법령·조문·조건이 그대로 남아
@@ -1028,12 +1029,17 @@ async function ask(skipClarify, extra, round){
   // v1.34 — 앞 질문에 이어서 묻기: 체크돼 있고 앞 질문이 지금 질문과 다를 때만
   autoFollow(base);
   const followOn = !!($("follow") && $("follow").checked && PREV_CTX && PREV_CTX.q !== base);
-  const prevSent = followOn ? PREV_CTX : null;
-  const qkey = base + "||" + lawsPicked.join(",") + "||" + (lawsPicked.length ? lawsMode : "")
-             + "||" + (prevSent ? prevSent.q : "");
+  let prevSent = followOn ? PREV_CTX : null;
+  const lawKey = lawsPicked.join(",") + "||" + (lawsPicked.length ? lawsMode : "");
+  // v1.66 — 되묻기·'먼저 답하고 묻기' 의 다음 라운드(round>0)는 처음 보낸 앞 질문 맥락을 그대로 씁니다.
+  //   이어 물은 질문에 먼저 답이 오면 그 자리에서 PREV_CTX 가 지금 질문으로 바뀌어, 답 아래에서 고르면
+  //   새 질문으로 잘못 보고 고른 조건을 버리고 처음부터 다시 검색했음.
+  if((round || 0) > 0 && ACTIVE_QUERY.startsWith(base + "||" + lawKey + "||")) prevSent = ACTIVE_PREV;
+  const qkey = base + "||" + lawKey + "||" + (prevSent ? prevSent.q : "");
   if(qkey !== ACTIVE_QUERY){
     resetQueryState();
     ACTIVE_QUERY = qkey;
+    ACTIVE_PREV = prevSent;
     extra = "";        // 이전 질문의 되묻기 답변을 물려받지 않습니다
     round = 0;
   }
@@ -1455,7 +1461,7 @@ $("clearhist").onclick = () => {
 // ★ v1.64 — 화면 판 번호. 서버가 지금 디스크의 index.html 에서 이 값을 읽어 돌려주므로(api_version 의 ui),
 //   다르면 브라우저가 예전 화면을 들고 있는 것입니다. 예전에는 서버 버전(VERSION)과 비교해 v1.50 부터
 //   늘 "파이썬 파일도 교체하세요" 가 빨갛게 떴습니다. index.html 을 바꾸면 이 값을 올리세요.
-const UI_VERSION = "1.64";
+const UI_VERSION = "1.66";
 fetch("/api/version").then(r => r.json()).then(d => {
   if(d.ui && d.ui !== UI_VERSION){
     $("vbadge").innerHTML =
