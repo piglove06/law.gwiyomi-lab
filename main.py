@@ -438,21 +438,30 @@ _SELF_CORR_RE = re.compile(r"(?m)(수정된|정정된|바로잡은|다시\s*정�
                            r"|오류\s*수정|재\s*판정|다시\s*확인합니다|제가[^.\n]{0,20}(잘못|다시)")
 _VERDICT_WORDS = re.compile(r"초과|해당|대상|위반|필요|가능")
 _NEG_WORDS = re.compile(r"않|아니|아닙|아님|아닌|미달|미초과|없")
-_NEG_AFTER = re.compile(r"^[^.\n,]{0,6}?(않|아니|아닙|아님|아닌|없)")
+_NEG_IN_CLAUSE = re.compile(r"않|아니|아닙|아님|아닌|없")
+_CLAUSE_END = re.compile(r"[.\n,]|므로|으며|이며|하며|하여|되어|지만|으나|이고|하고|인데|이어서")
+_NEUTRAL_EOPS = re.compile(r"(관계|상관|예외|규정이|제한|빠짐)\s*없")
 _NEG_BEFORE = re.compile(r"(미|비|불)$")
 
 
 def _word_neg(text: str, word: str) -> bool:
     """
-    ★ v1.65 (A9) — 판정 낱말 word 가 text 에서 부정으로 쓰였는지. 낱말 바로 뒤 6자 안의 부정(…하지 않/…이 아닙/…필요 없)
-      이나 바로 앞의 미·비·불(미초과·비해당·불필요)만 셉니다. 예전에는 문장 어디든 '없' 이 있으면 부정으로 봐서
-      "제외 규정이 없으므로 신고 대상에 해당합니다" 를 "신고 대상입니다" 와 반대 판정으로 잘못 잡았음.
+    ★ v1.65 (A9) — 판정 낱말 word 가 text 에서 부정으로 쓰였는지. 낱말 뒤 20자 안에서 그 절이 끝나기 전(쉼표·므로·하여·
+      지만…)까지의 부정(않·아니·없)이나 바로 앞의 미·비·불(미초과·비해당·불필요)만 셉니다. '관계없이·예외 없이' 같은
+      중립 표현은 뺍니다. 예전에는 문장 어디든 '없' 이 있으면 부정으로 봐서 "제외 규정이 없으므로 신고 대상에 해당합니다"
+      를 "신고 대상입니다" 와 반대 판정으로 잘못 잡았음. 창을 6자로만 두면 "대상에 해당하지 않습니다"·"필요하다고 볼 수
+      없습니다" 를 놓쳐서(교차 검토) 절 단위로 바꿈.
     """
     t = text or ""
     for m in re.finditer(word, t):
-        if _NEG_AFTER.search(t[m.end():m.end() + 12]) or _NEG_BEFORE.search(t[max(0, m.start() - 1):m.start()]):
+        w = t[m.end():m.end() + 20]
+        c = _CLAUSE_END.search(w)
+        w = _NEUTRAL_EOPS.sub(" ", w[:c.start()] if c else w)
+        if _NEG_IN_CLAUSE.search(w) or _NEG_BEFORE.search(t[max(0, m.start() - 1):m.start()]):
             return True
     return word == "초과" and "미달" in t
+
+
 _FINAL_WORDS = re.compile(r"판정|최종|따라서|그러므로|결론적으로|이므로|므로")
 _COND_WORDS = re.compile(r"경우|이면|라면|다면|만약|만일|할 때|하면")
 
@@ -464,6 +473,9 @@ def _verdict_conflict(text: str) -> str:
     if not mc:
         return ""
     concl = re.split(r"(?<=[.다])\s", mc.group(1).strip(), 1)[0]
+    # ★ v1.65 — "원칙적으로 허가가 필요하나, 다만 …이면 필요하지 않습니다" 처럼 원칙·예외를 한 문장에 쓰면(먼저 답하고 묻기의
+    #   원칙→예외 지시) 예외 절의 부정 때문에 늘 모순으로 잡혔음. 원칙 절만 비교합니다.
+    concl = re.split(r"[,，]?\s*(?:다만|단,|그러나|하지만|반면)", concl, 1)[0]
     later = ""
     mk = re.search(r"【계산】([\s\S]*?)(?=【|\Z)", text or "")
     if mk:
@@ -509,13 +521,36 @@ def _concl_date_mismatch(text: str) -> str:
 
 
 _CN_UNIT_RE = re.compile(
-    r"(\d[\d,]*(?:\.\d+)?)\s*(억\s*원|만\s*원|천\s*원|원|dB\(A\)|dB|㏈|데시벨|%|퍼센트|개월|년|일|시간|분|"
-    r"kg|킬로그램|톤|㎡|제곱미터|m²|㎥|세제곱미터|리터|ℓ|명|회|배)")
+    r"(\d[\d,]*(?:\.\d+)?)(?:\s*(dB\(A\)|dB|㏈|%|kg|㎡|m²|㎥|ℓ)|(억\s*원|만\s*원|천\s*원|원(?!칙|인|래|본)|데시벨|퍼센트|"
+    r"개월|년|일|시간|분(?!의)|킬로그램|톤|제곱미터|세제곱미터|리터|명|회|배))")
 _CN_NUM_RE = re.compile(r"\d[\d,]*(?:\.\d+)?")
-_CN_REF_RE = re.compile(r"제\s*\d+\s*(?:조|항|호|목)(?:\s*의\s*\d+)?|별(?:표|지)\s*\d+(?:\s*의\s*\d+)?|^\s*\d+\.\s", re.M)
+_CN_REF_RE = re.compile(r"제\s*\d+\s*(?:조|항|호|목)(?:\s*의\s*\d+)?|별(?:표|지)\s*\d+(?:\s*의\s*\d+)?"
+                        r"|^\s*\d+\.\s|\(\d+\)|(?<![\d.])\d+\)", re.M)
+# 날짜를 뺀 뒤 남는 '연도만'·'월·일만' 표기 (2028년 중, 3월 31일까지)
+_CN_YEAR_RE = re.compile(r"(?<!\d)(?:19|20)\d{2}\s*년(?:\s*\d{1,2}\s*월)?(?:\s*\d{1,2}\s*일)?|(?<!\d)\d{1,2}\s*월\s*(?:\d{1,2}\s*일|말일|초|중순|말)?")
+# 법령식 한글 자릿수 표기(2천만원, 1억5천만원, 1천제곱미터, 1만톤) — 아라비아 숫자로 바꿔 비교
+_CN_KOR_RE = re.compile(r"\d[\d,]*(?:\.\d+)?\s*(?:억|만|천|백|십)(?:\s*(?:\d[\d,]*(?:\.\d+)?)?\s*(?:억|만|천|백|십))*"
+                        r"(?=\s*(?:원|제곱미터|㎡|세제곱미터|㎥|톤|리터|명|킬로그램|kg))")
+_CN_KOR_TOK = re.compile(r"(\d[\d,]*(?:\.\d+)?)?\s*(억|만|천|백|십)")
+_CN_FRAC_RE = re.compile(r"(\d+)\s*분의\s*(\d+)")
 _CN_UNIT_MUL = {"억원": 100000000, "만원": 10000, "천원": 1000}
 _CN_UNIT_ALIAS = {"dB(A)": "dB", "㏈": "dB", "데시벨": "dB", "퍼센트": "%", "킬로그램": "kg", "제곱미터": "㎡",
-               "m²": "㎡", "세제곱미터": "㎥", "ℓ": "리터"}
+                  "m²": "㎡", "세제곱미터": "㎥", "ℓ": "리터"}
+
+
+def _cn_kor(expr: str) -> str:
+    """'2천만' → '20000000', '1억5천만' → '150000000', '3천5백만' → '35000000', '1천' → '1000'."""
+    total, section = 0.0, 0.0
+    small = {"천": 1000, "백": 100, "십": 10}
+    for num, u in _CN_KOR_TOK.findall(expr):
+        n = float(num.replace(",", "")) if num else 0.0
+        if u in small:
+            section += (n or 1) * small[u]
+        else:
+            total += (section + n or 1) * (100000000 if u == "억" else 10000)
+            section = 0.0
+    v = total + section
+    return f"{v:.0f}" if v == int(v) else f"{v}"
 
 
 def _cn_num(x: str) -> float:
@@ -524,29 +559,33 @@ def _cn_num(x: str) -> float:
 
 def _num_values(text: str) -> tuple:
     """(단위 붙은 값 {(값, 단위)}, 맨 숫자 값 {값}). 날짜·조문 번호(제N조·별표 N·목록 번호)는 뺍니다."""
-    t = _CN_REF_RE.sub(" ", _DATE_RE.sub(" ", text or ""))
+    t = _CN_YEAR_RE.sub(" ", _CN_REF_RE.sub(" ", _DATE_RE.sub(" ", text or "")))
+    t = _CN_KOR_RE.sub(lambda m: _cn_kor(m.group(0)), t)
     with_unit = set()
-    for n, u in _CN_UNIT_RE.findall(t):
-        u = u.replace(" ", "")
+    for n, u1, u2 in _CN_UNIT_RE.findall(t):
+        u = (u1 or u2).replace(" ", "")
         v = _cn_num(n)
         if u in _CN_UNIT_MUL:
             v, u = v * _CN_UNIT_MUL[u], "원"
         with_unit.add((round(v, 4), _CN_UNIT_ALIAS.get(u, u)))
     bare = {round(_cn_num(n), 4) for n in _CN_NUM_RE.findall(t)}
+    bare |= {round(int(b) / int(a) * 100, 4) for a, b in _CN_FRAC_RE.findall(t) if int(a)}
     return with_unit, bare
 
 
-def _concl_num_mismatch(text: str) -> str:
+def _concl_num_mismatch(text: str, given: str = "") -> str:
     """
     ★ v1.65 (A3) — 【결론】의 '숫자+단위'(만원·dB·%·년·개월·일·kg·㎡·리터·명 …) 가 답변의 나머지 어디에도 없으면 그 값.
       11-17 [R18]: 결론 "300만원 이하의 과태료" / 근거·설명 "200만원" 인데 판정 낱말·날짜 검사만 있어 그대로 나갔음.
       합산값(15,000+10,000=25,000)·표기 차이(68dB(A))로 생기는 헛경고를 줄이려고, 같은 숫자가 단위 없이라도
       나머지에 있으면 통과시킵니다. 결론을 고쳐 쓰게 하지는 않고 화면 경고와 결론 병합 거부에만 씁니다.
+      given: 질문·확인된 조건 — 결론이 질문 속 사실(하루 20톤)을 되풀이한 것은 통과. 법령식 표기(2천만원·1천제곱미터)와
+      'N분의 M'(→%) 은 숫자로 바꿔 비교하고, 날짜를 뺀 뒤 남는 연도·월일(2028년 중, 3월 31일)은 비교하지 않습니다.
     """
     m = _CONCL_BLOCK_RE.search(text or "")
     if not m:
         return ""
-    rest = text[:m.start()] + text[m.end():]
+    rest = text[:m.start()] + text[m.end():] + "\n" + (given or "")
     r_unit, r_bare = _num_values(rest)
     if not r_unit and not r_bare:
         return ""
@@ -558,7 +597,7 @@ def _concl_num_mismatch(text: str) -> str:
             continue
         if u == "원" and v >= 10000 and v % 10000 == 0:
             return f"{v / 10000:,.0f}만원"
-        return f"{v:,.4g}{u}" if v < 10000 else f"{v:,.0f}{u}"
+        return f"{v:,.10g}{u}" if v < 10000 else f"{v:,.0f}{u}"
     return ""
 
 
@@ -3807,7 +3846,7 @@ def _ask_after_search(req, steps, answered, found, flat, catalog, refs, it=None,
                     text, _trunc = text2, _trunc2
                 elif any(p.get("kind") == "결론모순" for p in probs) and _merge_conclusion(text, text2) \
                         and not _concl_conflict(_merge_conclusion(text, text2)) \
-                        and not _concl_num_mismatch(_merge_conclusion(text, text2)):
+                        and not _concl_num_mismatch(_merge_conclusion(text, text2), f"{req.question}\n{answered}"):
                     text = _merge_conclusion(text, text2)
                     probs = [dict(p, kind=p["kind"] + "(결론만 반영)") for p in probs]
                 else:
@@ -3840,7 +3879,7 @@ def _ask_after_search(req, steps, answered, found, flat, catalog, refs, it=None,
         warnings.append("답변의 【결론】과 계산·설명의 판정이 서로 다릅니다. 근거 조문 원문과 수치로 직접 확인하세요.")
         steps.append({"name": "결론 불일치 경고", "detail": _vc_final[:60]})
     else:
-        _nm = _concl_num_mismatch(text)
+        _nm = _concl_num_mismatch(text, f"{req.question}\n{answered}")
         if _nm:
             warnings.append(f"【결론】의 수치({_nm})가 근거·계산·설명에 나오지 않습니다. 근거 조문 원문의 수치로 확인하세요.")
             steps.append({"name": "결론 수치 확인 필요", "detail": f"{_nm} — 본문에 없는 값"})

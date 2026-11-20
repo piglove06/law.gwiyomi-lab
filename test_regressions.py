@@ -737,6 +737,16 @@ class V165VerdictNegation(unittest.TestCase):
         self.assertEqual(main._verdict_conflict(self._t("신고 대상입니다.", "제외 규정이 없으므로 신고 대상이다")), "")
         self.assertEqual(main._verdict_conflict(self._t("초과 여부와 관계없이 신고 대상입니다.", "신고 대상이다")), "")
 
+    def test_clause_negation_and_principle_exception(self):
+        # 교차 검토(11-20)에서 나온 꼴 — 둘 다 부정 / 원칙·예외 한 문장 / '예외 없이'
+        self.assertEqual(main._verdict_conflict(self._t("이 시설은 신고 대상에 해당하지 않습니다.", "신고 대상이 아니다")), "")
+        self.assertEqual(main._verdict_conflict(self._t(
+            "원칙적으로 폐기물처리업 허가가 필요하나, 다만 생활폐기물을 재활용하는 경우라면 허가가 필요하지 않습니다.",
+            "따라서 원칙적으로 허가가 필요하다")), "")
+        self.assertEqual(main._verdict_conflict(self._t("허가 대상에 해당하여 예외 없이 허가를 받아야 합니다.",
+                                                        "허가 대상에 해당")), "")
+        self.assertTrue(main._verdict_conflict(self._t("허가가 필요하다고 볼 수 없습니다.", "따라서 허가가 필요하다")))
+
     def test_real_conflicts_still_caught(self):
         self.assertTrue(main._verdict_conflict(self._t("기준을 초과합니다.", "68dB < 70dB 이므로 초과하지 않음")))
         self.assertTrue(main._verdict_conflict(self._t("허가 대상이 아닙니다.", "업으로 하지 않으므로 허가 대상이다")))
@@ -754,6 +764,21 @@ class V165ConclusionNumbers(unittest.TestCase):
 
     def test_db_mismatch(self):
         self.assertEqual(main._concl_num_mismatch("【결론】 60dB 이하입니다.\n【계산】 65dB, 70dB > 65dB"), "60dB")
+
+    def test_law_style_numbers(self):
+        self.assertEqual(main._concl_num_mismatch("【결론】 2,000만원 이하의 벌금\n【근거】 2천만원 이하의 벌금"), "")
+        self.assertEqual(main._concl_num_mismatch("【결론】 1,000㎡ 이상이면 신고\n【근거】 1천제곱미터 이상"), "")
+        self.assertEqual(main._concl_num_mismatch("【결론】 5천만원 이하 벌금\n【근거】 3천만원 이하의 벌금"), "5,000만원")
+        self.assertEqual(main._cn_kor("1억5천만"), "150000000")
+        self.assertEqual(main._cn_kor("3천5백만"), "35000000")
+
+    def test_year_only_fraction_and_question_facts(self):
+        self.assertEqual(main._concl_num_mismatch(
+            "【결론】 설치일부터 8년이 되는 2028년 중에 검사\n【계산】 2020년 8월 20일 + 8년 = 2028년 8월 20일"), "")
+        self.assertEqual(main._concl_num_mismatch("【결론】 과태료를 50% 감경\n【근거】 2분의 1 범위에서 감경"), "")
+        self.assertEqual(main._concl_num_mismatch("【결론】 하루 20톤을 처리하므로 허가 대상\n【근거】 제25조 허가",
+                                                  "하루 20톤 재활용"), "")
+        self.assertEqual(main._concl_num_mismatch("【결론】 3년마다 검사\n【근거】 1) 1년마다 검사"), "3년")
 
     def test_no_false_alarm(self):
         for t in ("【결론】 합계 25,000리터로 신고 대상입니다.\n【계산】 15,000 + 10,000 = 25,000",
