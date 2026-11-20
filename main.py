@@ -693,7 +693,7 @@ SELECT_ARTICLES = os.getenv("SELECT_ARTICLES", "1") not in ("0", "false", "False
 # 조회 후 지자체기관명으로 한 번 더 걸러냅니다.
 LOCAL_GOV = os.getenv("LOCAL_GOV", "성남시").strip()
 
-VERSION = "1.65"
+VERSION = "1.66"
 
 app = FastAPI(title="법령 조회 도우미", version=VERSION)
 
@@ -1350,20 +1350,49 @@ _NO_ANSWER_RE = re.compile(
 _UNKNOWN_ANS = re.compile(r"^(모름|모르|잘\s*모|확인\s*안|미확인)")
 
 
+_PREV_SEG_RE = re.compile(r"^\s*(앞 질문에 이어서|앞 질문|앞 답변 결론|그 앞 질문)\s*[:：]")
+
+
+def _strip_prev(answered: str) -> str:
+    """
+    ★ v1.66 (A5) — answered 에서 서버가 붙인 '앞 질문: …'·'앞 답변 결론: …'·'그 앞 질문: …' 조각을 빼고, 같은 조각은
+      하나만 남깁니다. 서버가 이어 묻기 맥락(prev_note)을 answered 앞에 붙여 화면에 돌려주면 화면은 그걸 다음 라운드의
+      answered 로 다시 보내서, 라운드마다 같은 맥락이 한 번씩 더 쌓였음(2라운드 2번, 3라운드 3번). 맥락은 서버가
+      prev_question 으로 매번 새로 붙이므로 화면에 돌려줄 때는 뺍니다.
+    """
+    out, seen = [], set()
+    for seg in (answered or "").split(" / "):
+        seg = seg.strip()
+        if not seg or _PREV_SEG_RE.match(seg) or seg in seen:
+            continue
+        seen.add(seg)
+        out.append(seg)
+    return " / ".join(out)
+
+
 def _prev_conditions(prev_answered: str) -> str:
     """
     ★ v1.58 — 앞 질문에서 확인된 조건 중 이어 묻는 질문에 넘길 것만 고릅니다("질문: 답 / …" 형식 그대로).
       '모름' 으로 답한 것(확인된 사실이 아님)과 법령 고르기 질문(법령은 prev_laws 로 따로 넘어옴)은 뺍니다.
       형식을 그대로 두므로 같은 질문을 다시 묻지 않고(_asked_questions), '아니오' 로 답한 종류도 계속 제외됩니다.
     """
-    keep = []
+    keep, older = [], ""
     for seg in (prev_answered or "").split(" / "):
         seg = seg.strip()
         ans = re.split(r"[:：]", seg)[-1].strip()
         if not seg or LAW_Q in seg or not ans or _UNKNOWN_ANS.match(ans):
             continue
-        keep.append(seg[:200])
-    return " / ".join(keep[-8:])
+        # ★ v1.66 (A5) — 앞앞 질문의 결론·질문은 '확인된 조건' 이 아님. 결론은 버리고, 주제를 잃지 않게
+        #   가장 최근의 '그 앞 질문' 하나만 맨 앞에 둡니다(앞 답이 틀렸으면 그 결론이 계속 전파되던 문제).
+        mp = _PREV_SEG_RE.match(seg)
+        if mp:
+            if mp.group(1) == "그 앞 질문":
+                older = seg[:200]
+            continue
+        if seg[:200] not in keep:
+            keep.append(seg[:200])
+    keep = keep[-8:]
+    return " / ".join(([older] if older else []) + keep)
 
 
 def _excluded_terms(answered: str) -> list:
@@ -2016,6 +2045,21 @@ _CASE_URL = {"expc": "https://www.law.go.kr/LSW/expcInfoP.do?expcSeq={id}",
 _CASE_WIDE = {"경우", "여부", "관련", "대상", "기준", "절차", "방법", "신고", "규정", "해당", "의무", "처분", "허가"}
 
 
+def _byeolpyo_cached(target: str, mid: str, law_name: str) -> list:
+    """
+    ★ v1.66 (B5e) — 법령 하나의 별표 목록(본문 포함). 되묻기 라운드마다 같은 법령의 별표를 다시 받던 것을
+      검색 캐시(_SEARCH_CACHE, 10분)에 둡니다. 빈 결과·오류는 기억하지 않습니다(다음 라운드에 다시 시도).
+    """
+    key = ("byl", target, str(mid), law_name)
+    hit = _cache_get(key)
+    if hit is not None:
+        return hit
+    rows = law_client.get_byeolpyo(target, mid, law_name)
+    if rows:
+        _cache_put(key, rows)
+    return rows
+
+
 def _case_search_cached(target: str, query: str) -> list:
     key = ("case", target, query)
     hit = _cache_get(key)
@@ -2394,7 +2438,8 @@ def _ask_sync(req: AskRequest, progress: list):
                                     + (f" · 앞 답의 법령 우선 참고: {', '.join(req.laws)}" if req.laws else "")
                                     + (f" · 앞에서 확인된 조건 {_pc.count(' / ') + 1}개 이어 받음" if _pc else "")})
 
-    answered = " / ".join(x for x in (prev_note, req.answered, req.note.strip()) if x)
+    answered = " / ".join(x for x in (prev_note, _strip_prev(" / ".join(x for x in (req.answered, req.note.strip()) if x)))
+                          if x)
 
     if SCOPE_TRIM and req.round > 0:
         _tr = _SCOPE_TRIM.get(req.question.strip())
@@ -2736,7 +2781,7 @@ def _ask_sync(req: AskRequest, progress: list):
                     "clarify": [{"question": LAW_Q, "options": opts + [LAW_Q_DIRECT, LAW_Q_UNKNOWN]}],
                     "round": req.round + 1,
                     "max_rounds": CLARIFY_ROUNDS + 1,
-                    "answered": answered,
+                    "answered": _strip_prev(answered),
                     "steps": steps,
                     "intent": it.as_dict(),
                 }
@@ -2969,6 +3014,21 @@ def _ask_sync(req: AskRequest, progress: list):
                 ai_hits = [h for h in ai_hits if _law_key(h[0]) in _uk]
                 steps.append({"name": "지능형 검색 조문 제한",
                               "detail": f"지정 법령({', '.join(user_resolved)}) 밖의 조문 {len(_drop)}개는 우선 넣지 않습니다"})
+        elif ai_hits and ai_laws and not asp_plan and not asp_same:
+            # ★ v1.66 (A6) — 지능형 검색 조문은 상위 6개를 '맨 앞·보호' 로 넣는데, 점수 2·3위 법(예: 누출검사 질문의
+            #   이산화탄소 포집법, 폐기물처리업 질문의 가축분뇨법)의 조문이 섞여 주 법령 조문을 밀어냈음(11-17 [R2]·[R14],
+            #   11-20 '전부 모름'). 주 법령군(지능형 1위·LLM 이 고른 법·질문에서 뽑은 법 이름) 조문을 앞으로 옮깁니다.
+            #   다른 법 조문은 버리지 않고 뒤로만 — 주 법령 조문이 6개보다 적으면 그대로 보호됩니다.
+            _mk = {_law_key(ai_laws[0])} | {_law_key(x) for x in law_pick} | {_law_key(n) for n in names}
+            if weak_ai:
+                _mk |= {_law_key(c) for c in cand[:2]}
+            _main = [h for h in ai_hits if _law_key(h[0]) in _mk]
+            _other = [h for h in ai_hits if _law_key(h[0]) not in _mk]
+            _moved = [h for h in _other if h in ai_hits[:AI_HIT_PROTECT] and h not in (_main + _other)[:AI_HIT_PROTECT]]
+            if _main and _moved:
+                ai_hits = _main + _other
+                steps.append({"name": "지능형 검색 조문 정렬",
+                              "detail": f"주 법령 조문을 앞으로 — 다른 법 조문 {len(_moved)}개는 우선 보호에서 뺌"})
         stmd_ok, stmd_fail = 0, []
         for nm in cand:
             if stmd_ok >= cand_limit:
@@ -3111,15 +3171,20 @@ def _ask_sync(req: AskRequest, progress: list):
         for r in law_client.extract_references(detail["articles"], f["name"]):
             refs[r] = refs.get(r, 0) + 1
 
-    flat = []
+    flat, n_deleted = [], 0
     for f in [x for x in found if id(x) in _fetched]:
         for a in f.get("articles", []):
             if a.get("조문여부") == "전문":
                 continue
             if not (a.get("조문내용") or "").strip():
                 continue
+            if _is_deleted_article(a):
+                n_deleted += 1
+                continue
             flat.append((f, a))
 
+    if n_deleted:
+        steps.append({"name": "삭제 조문 제외", "detail": f"본문이 '삭제' 뿐인 조문 {n_deleted}개는 선별·근거에서 뺌"})
     if not flat:
         return {"steps": steps, "answer": "조문 본문을 가져오지 못했습니다.", "laws": found}
 
@@ -3136,6 +3201,19 @@ def _ask_sync(req: AskRequest, progress: list):
 
     _cache_put(cache_key, (found, flat, catalog, refs, ai_hits))
     return _ask_after_search(req, steps, answered, found, flat, catalog, refs, it, ai_hits)
+
+
+_DELETED_ART_RE = re.compile(r"^\s*제\s*\d+\s*조(?:\s*의\s*\d+)?\s*(?:\([^)]*\))?\s*삭제\s*(?:[<〈(][^>〉)]*[>〉)])?\s*$")
+
+
+def _is_deleted_article(a: dict) -> bool:
+    """★ v1.66 — '제5조 삭제 <2010. 5. 31.>' 처럼 본문이 삭제 표시뿐인 조문."""
+    return bool(_DELETED_ART_RE.match(re.sub(r"\s+", " ", str(a.get("조문내용") or "")).strip()))
+
+
+def _is_form_article(a: dict) -> bool:
+    """별지·서식(제출 양식). 기준·주기를 정하지 않아 조문 선별 목록에서 뺍니다(v1.66)."""
+    return a.get("구분") in ("별지", "서식") or str(a.get("조문제목", "")).startswith(("[별지", "[서식"))
 
 
 def _ai_hit_articles(ai_hits, use: list) -> list:
@@ -3163,17 +3241,25 @@ def _ask_after_search(req, steps, answered, found, flat, catalog, refs, it=None,
             drop_ids = {id(d) for d in dropped}
             found = [f for f in found if id(f) not in drop_ids]
             flat = [(f, a) for f, a in flat if id(f) not in drop_ids]
-            catalog = "\n".join(
-                f"{i+1}. [{f['name']}] "
-                + (lambda no, gaji, t: (f"제{no}조" + (f"의{gaji}" if gaji else "")
-                                        + (f"({t})" if t else "")) if no else (t or "(제목 없음)"))(
-                    a.get("조문번호", ""), a.get("조문가지번호", ""), a.get("조문제목", ""))
-                for i, (f, a) in enumerate(flat))
             steps.append({
                 "name": "제외 조건 적용",
                 "detail": f"'{', '.join(excluded)}' 아님 → "
                           + ", ".join(d["name"] for d in dropped[:4]) + " 제외",
             })
+    # ★ v1.66 (B3) — 참고 사례 후보(법제처 API 만)는 법령·검색어만 있으면 되므로 지금 미리 시작해 조문 선별·되묻기 LLM 과
+    #   겹칩니다. 되묻기로 끝나는 라운드면 결과가 검색 캐시(_case_search_cached)에 남아 다음 라운드가 바로 씁니다.
+    _case_fut = None
+    if RELATED_CASES and CASE_IN_ANSWER:
+        try:
+            from concurrent.futures import ThreadPoolExecutor
+            _tw_e = next((s_.get("detail", {}).get("용어", []) for s_ in steps
+                          if s_.get("name") == "검색어 변환" and isinstance(s_.get("detail"), dict)), [])
+            _cex = ThreadPoolExecutor(max_workers=1)
+            _case_fut = _cex.submit(_case_candidates, req.question, _tw_e, list(found))
+            _cex.shutdown(wait=False)
+        except Exception as e:                            # noqa: BLE001
+            applog.warn(f"참고 사례 후보 미리 찾기 실패 — 답변 전에 찾습니다: {e}")
+            _case_fut = None
 
     def label_of(a):
         no, gaji = a.get("조문번호", ""), a.get("조문가지번호", "")
@@ -3204,32 +3290,49 @@ def _ask_after_search(req, steps, answered, found, flat, catalog, refs, it=None,
                           "detail": f"이전 라운드에서 고른 {len(picked)}개"})
     if picked is None and SELECT_ARTICLES and len(flat) > 12:
         try:
-            cat_sel = catalog
             q_sel = req.question + (f"\n(사용자가 참고 법령으로 지정: {', '.join(_ul)} — 이 법령의 조문을 우선 고려)"
                                     if _ul else "")
-            n_sel = ai_client.count_tokens(ai_client.select_prompt(q_sel, catalog))
             lim = min(ai_client.server_ctx(), SELECT_CTX_CAP) - ai_client.MAXTOK_SELECT - 64
+            # ★ v1.66 (B2) — 선별 목록을 처음부터 줄여 보냅니다. 번호는 flat 순서 그대로(빠진 번호가 있어도 됨).
+            #   ① 법령명은 묶음 머리 [ ] 에 한 번만(전에는 한도를 넘을 때만) ② 별지·서식은 빼고(양식은 기준을 정하지
+            #   않음 — 본문에서 인용되면 '별표 자동 포함' 이 따로 넣음) ③ 그래도 넘치면 주 법령군 밖의 법령을 뒤에서부터
+            #   통째로 빼고, 마지막에만 줄 단위로 자름(전에는 '앞 N줄만' 이라 뒤쪽 시행규칙 조문이 반쯤 잘려 나갔음).
+            groups, n_form = [], 0
+            for i, (f, a_) in enumerate(flat):
+                if _is_form_article(a_):
+                    n_form += 1
+                    continue
+                if not groups or groups[-1][0] != f["name"]:
+                    groups.append((f["name"], []))
+                groups[-1][1].append(f"{i + 1}. {label_of(a_)}")
+
+            def _cat(gs):
+                return "\n".join(["(법령명은 묶음 첫 줄 [ ] 에 한 번만 적었다. 그 아래 번호들은 그 법령의 조문이다)"]
+                                 + [ln for nm, ls in gs for ln in [f"[{nm}]"] + ls])
+            cat_sel = _cat(groups)
+            n_sel = ai_client.count_tokens(ai_client.select_prompt(q_sel, cat_sel))
+            steps.append({"name": "선별 목록",
+                          "detail": f"{sum(len(ls) for _, ls in groups)}개 조문 · 법령 {len(groups)}개"
+                                    + (f" · 별지·서식 {n_form}개 제외" if n_form else "") + f" · {n_sel:,}토큰"})
+            if n_sel > lim and len(groups) > 1:
+                keep_fams = ({_law_key(h[0]) for h in (ai_hits or [])[:AI_HIT_PROTECT]}
+                             | {_law_key(u) for u in _ul} | {_law_key(groups[0][0])})
+                gs, cut = list(groups), []
+                for j in range(len(gs) - 1, 0, -1):
+                    if n_sel <= lim:
+                        break
+                    if _law_key(gs[j][0]) in keep_fams:
+                        continue
+                    cut.append(f"{gs[j][0]}({len(gs[j][1])})")
+                    del gs[j]
+                    cat_sel = _cat(gs)
+                    n_sel = ai_client.count_tokens(ai_client.select_prompt(q_sel, cat_sel))
+                if cut:
+                    steps.append({"name": "조문 목록 축소(법령 단위)",
+                                  "detail": f"한도 {lim:,}토큰 — 주 법령군 밖 법령 {len(cut)}개 제외: "
+                                            + ", ".join(cut[:5]) + f" → {n_sel:,}토큰"})
             if n_sel > lim:
-                out_l, prev_nm = ["(법령명은 묶음 첫 줄 [ ] 에 한 번만 적었다. 그 아래 번호들은 그 법령의 조문이다)"], None
-                for i, (f, a_) in enumerate(flat):
-                    if f["name"] != prev_nm:
-                        out_l.append(f"[{f['name']}]")
-                        prev_nm = f["name"]
-                    out_l.append(f"{i + 1}. {label_of(a_)}")
-                compact = "\n".join(out_l)
-                n_c = ai_client.count_tokens(ai_client.select_prompt(q_sel, compact))
-                if n_c > lim:
-                    compact = "\n".join(ln for ln in out_l
-                                         if not re.match(r"^\d+\.\s*\[(별지|서식)", ln))
-                    n_c = ai_client.count_tokens(ai_client.select_prompt(q_sel, compact))
-                steps.append({"name": "조문 목록 압축",
-                              "detail": f"선별 입력 {n_sel:,}토큰 > 한도 {lim:,} — 법령명 묶음 표기로 {n_c:,}토큰"})
-                catalog_for_cut, n_sel = compact, n_c
-                cat_sel = compact
-            else:
-                catalog_for_cut = catalog
-            if n_sel > lim:
-                lines = catalog_for_cut.splitlines()
+                lines = cat_sel.splitlines()
                 keep_n = max(20, int(len(lines) * lim / n_sel * 0.95))
                 cat_sel = "\n".join(lines[:keep_n])
                 steps.append({"name": "조문 목록 축소",
@@ -3460,7 +3563,7 @@ def _ask_after_search(req, steps, answered, found, flat, catalog, refs, it=None,
                     continue
                 if law_name not in _byl_rows:
                     try:
-                        _byl_rows[law_name] = law_client.get_byeolpyo(
+                        _byl_rows[law_name] = _byeolpyo_cached(
                             f.get("target", "law"), f.get("mst") or f.get("id", ""), law_name)
                     except Exception:
                         _byl_rows[law_name] = []
@@ -3624,7 +3727,8 @@ def _ask_after_search(req, steps, answered, found, flat, catalog, refs, it=None,
             steps.append({"name": "되묻기 판단",
                           "detail": f"더 물을 것 없음 (조문 {len(parts)}개 본문 기준)"})
         if asks and ANSWER_FIRST and not any(_needs_value(a) for a in asks):
-            _pending = {"clarify_after": asks, "round": req.round + 1, "max_rounds": max_r, "answered": answered}
+            _pending = {"clarify_after": asks, "round": req.round + 1, "max_rounds": max_r,
+                        "answered": _strip_prev(answered)}
             steps.append({"name": "먼저 답하고 묻기",
                           "detail": f"{len(asks)}개 항목 — 보기별로 경우를 나눠 먼저 답하고, 답 아래에서 고르면 좁혀서 다시 답함 "
                                     f"(조문 {len(parts)}개 본문 기준)"})
@@ -3637,7 +3741,7 @@ def _ask_after_search(req, steps, answered, found, flat, catalog, refs, it=None,
                 "clarify": asks,
                 "round": req.round + 1,
                 "max_rounds": max_r,
-                "answered": answered,
+                "answered": _strip_prev(answered),
                 "steps": steps,
                 "intent": it.as_dict(),
             }
@@ -3682,8 +3786,15 @@ def _ask_after_search(req, steps, answered, found, flat, catalog, refs, it=None,
         try:
             _tw0 = next((s_.get("detail", {}).get("용어", []) for s_ in steps
                          if s_.get("name") == "검색어 변환" and isinstance(s_.get("detail"), dict)), [])
-            _pre_cases = _case_finalize(req.question + (f"\n(확인된 조건: {answered})" if answered else ""),
-                                        _case_candidates(req.question, _tw0, found))
+            _cands = None
+            if _case_fut is not None:
+                try:
+                    _cands = _case_fut.result(timeout=30)
+                except Exception as e:                    # noqa: BLE001
+                    applog.warn(f"참고 사례 후보(미리 찾기) 실패 — 다시 찾습니다: {e}")
+            if _cands is None:
+                _cands = _case_candidates(req.question, _tw0, found)
+            _pre_cases = _case_finalize(req.question + (f"\n(확인된 조건: {answered})" if answered else ""), _cands)
             _ci = _pre_cases.get("items") or []
             if _ci:
                 _keep = ai_client.confirm_cases(req.question, _ci)

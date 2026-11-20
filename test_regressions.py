@@ -802,6 +802,71 @@ class V165AnswerFirstHint(unittest.TestCase):
         self.assertRegex(src, r"if _pending:\s*\n(?:\s*#.*\n)*\s*_hint \+= ANSWER_FIRST_HINT")
 
 
+
+class V166FollowUpContext(unittest.TestCase):
+    """v1.66 A5 — 이어 묻기 맥락이 라운드마다 쌓이거나 앞앞 결론이 '확인된 조건' 으로 넘어가지 않게."""
+
+    def test_strip_prev_removes_context_and_dupes(self):
+        a = ("앞 질문: 누출검사 주기는? / 앞 답변 결론: 8년마다 / 탱크 용량: 30,000리터 / "
+             "앞 질문: 누출검사 주기는? / 탱크 용량: 30,000리터 / 추가 설명: 지하매설")
+        self.assertEqual(main._strip_prev(a), "탱크 용량: 30,000리터 / 추가 설명: 지하매설")
+
+    def test_prev_conditions_drops_old_conclusion(self):
+        pa = ("그 앞 질문: Q0 / 앞 질문: Q1 / 앞 답변 결론: 틀렸을 수 있는 결론 / 탱크 용량: 30,000리터 / "
+              "그 앞 질문: Q1 / 설치일: 모름")
+        got = main._prev_conditions(pa)
+        self.assertEqual(got, "그 앞 질문: Q1 / 탱크 용량: 30,000리터")
+        self.assertNotIn("결론", got)
+
+
+class V166AiHitOrder(unittest.TestCase):
+    """v1.66 A6 — 지능형 검색 조문 정렬 코드가 들어 있는지(전체 흐름은 평가로 확인)."""
+
+    def test_wired(self):
+        src = open(os.path.join(HERE, "main.py"), encoding="utf-8").read()
+        self.assertIn('"name": "지능형 검색 조문 정렬"', src)
+        self.assertRegex(src, r"_mk = \{_law_key\(ai_laws\[0\]\)\}")
+
+
+
+class V166CatalogTrim(unittest.TestCase):
+    """v1.66 B2 — 삭제 조문·별지/서식은 선별 목록에서 뺌."""
+
+    def test_deleted_article(self):
+        for t in ("제5조 삭제 <2010. 5. 31.>", "제5조의2 삭제 〈2015.1.20〉", "제12조(정의) 삭제", "제8조 삭제<2019.12.10>"):
+            self.assertTrue(main._is_deleted_article({"조문내용": t}), t)
+        self.assertFalse(main._is_deleted_article({"조문내용": "제7조(신고) ① 누구든지 삭제된 규정을 근거로 …"}))
+
+    def test_form_article(self):
+        self.assertTrue(main._is_form_article({"구분": "별지", "조문제목": "[별지 제1호서식] 신고서"}))
+        self.assertTrue(main._is_form_article({"조문제목": "[서식 1] 대장"}))
+        self.assertFalse(main._is_form_article({"구분": "별표", "조문제목": "[별표 1] 기준"}))
+
+
+class V166ByeolpyoCache(unittest.TestCase):
+    """v1.66 B5e — 같은 법령의 별표 목록은 라운드마다 다시 받지 않음, 빈 결과는 기억 안 함."""
+
+    def test_cached_and_empty_not_cached(self):
+        calls = []
+        orig = main.law_client.get_byeolpyo
+
+        def fake(target, mid, name):
+            calls.append((target, mid, name))
+            return [{"no": "1", "body": "x"}] if mid == "A" else []
+        main.law_client.get_byeolpyo = fake
+        try:
+            for k in [k for k in main._SEARCH_CACHE if k and k[0] == "byl"]:
+                main._SEARCH_CACHE.pop(k, None)
+            main._byeolpyo_cached("law", "A", "가법")
+            main._byeolpyo_cached("law", "A", "가법")
+            main._byeolpyo_cached("law", "B", "나법")
+            main._byeolpyo_cached("law", "B", "나법")
+        finally:
+            main.law_client.get_byeolpyo = orig
+        self.assertEqual(calls.count(("law", "A", "가법")), 1)
+        self.assertEqual(calls.count(("law", "B", "나법")), 2)
+
+
 if __name__ == "__main__":
     res = unittest.main(exit=False, verbosity=1, warnings="ignore").result
     sys.exit(0 if res.wasSuccessful() else 1)
